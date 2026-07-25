@@ -10,3 +10,4 @@ This follows the `/prd` skill convention: PRD docs/specs live in the project's O
 folder; only if the vault is unavailable do they fall back to this `docs/` directory.
 
 Human-facing summaries there: `Итоговый отчёт.md`, `План задач и отчёты.md`, `index.md`.
+
