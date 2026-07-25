@@ -7,7 +7,7 @@ mod theme;
 mod ui;
 
 use crate::changelists::{store_path, ChangelistStore};
-use crate::engine::{BranchState, Commit, FileStatus, GitEngine, ResetMode};
+use crate::engine::{BranchState, Commit, FileStatus, GitEngine, PushOpts, ResetMode};
 use anyhow::Result;
 use crossterm::event::{self, Event};
 use keymap::{resolve, Action};
@@ -48,6 +48,7 @@ pub struct ConfirmState {
 pub enum ConfirmPurpose {
     ResetHard(String),
     RollbackFile(String),
+    ForcePush(String),
 }
 
 /// Single-line text entry (new/rename changelist; commit message in a later wave).
@@ -62,6 +63,7 @@ pub enum InputPurpose {
     NewList,
     RenameList(String),
     CommitMessage { files: Vec<String>, amend: bool },
+    NewBranch,
 }
 
 /// A choose-one list overlay (move target, active list; branch/reset in later waves).
@@ -82,6 +84,7 @@ pub enum PickerPurpose {
     SetActive,
     MoveFiles(Vec<String>),
     ResetMode(String),
+    Checkout,
 }
 
 /// A rendered row in the Changes panel: a changelist header or a file under it.
@@ -273,9 +276,81 @@ impl<'e> App<'e> {
             Amend => self.open_commit(true),
             Log => self.toggle_log(),
             Rollback => self.open_rollback(),
+            Push => self.push_action(),
+            Fetch => self.fetch_action(),
+            Branches => self.open_branches(),
+            Confirm | Cancel => {} // only meaningful inside overlays
             // Remaining git operations land in later waves.
             other => self.message = format!("{}: следующая волна", other.label()),
         }
+    }
+
+    // ----- branches (Task 08) --------------------------------------------------
+
+    fn push_action(&mut self) {
+        let Some(branch) = self.branch.current_branch.clone() else {
+            self.message = "no branch to push".into();
+            return;
+        };
+        if self.branch.detached {
+            self.message = "detached HEAD; cannot push".into();
+            return;
+        }
+        if self.branch.upstream.is_none() {
+            self.do_push(
+                &branch,
+                PushOpts { set_upstream: true, ..Default::default() },
+                "pushed (upstream set)",
+            );
+        } else if self.branch.behind > 0 {
+            // Diverged: offer --force-with-lease behind an explicit confirm.
+            self.overlay = Overlay::Confirm(ConfirmState {
+                title: "Diverged from upstream".into(),
+                body: format!(
+                    "Local/remote diverged (↑{} ↓{}). Push with --force-with-lease?",
+                    self.branch.ahead, self.branch.behind
+                ),
+                purpose: ConfirmPurpose::ForcePush(branch),
+            });
+        } else {
+            self.do_push(&branch, PushOpts::default(), "pushed");
+        }
+    }
+
+    fn do_push(&mut self, branch: &str, opts: PushOpts, ok: &str) {
+        match self.engine.push(branch, &opts) {
+            Ok(()) => {
+                self.refresh();
+                self.message = ok.into();
+            }
+            Err(e) => self.message = e.to_string(),
+        }
+    }
+
+    fn fetch_action(&mut self) {
+        match self.engine.fetch() {
+            Ok(()) => {
+                self.refresh();
+                self.message = "fetched".into();
+            }
+            Err(e) => self.message = e.to_string(),
+        }
+    }
+
+    fn open_branches(&mut self) {
+        let mut items = vec![PickerItem {
+            label: "＋ new branch…".into(),
+            id: "__new__".into(),
+        }];
+        for b in self.engine.branches().unwrap_or_default() {
+            items.push(PickerItem { label: b.clone(), id: b });
+        }
+        self.overlay = Overlay::Picker(PickerState {
+            title: "Branches — checkout / create".into(),
+            items,
+            cursor: 0,
+            purpose: PickerPurpose::Checkout,
+        });
     }
 
     // ----- mini-log, revert, reset, rollback (Task 07) -------------------------
@@ -390,6 +465,11 @@ impl<'e> App<'e> {
                 }
                 Err(e) => self.message = e.to_string(),
             },
+            ConfirmPurpose::ForcePush(branch) => self.do_push(
+                &branch,
+                PushOpts { force_with_lease: true, ..Default::default() },
+                "force-pushed (with lease)",
+            ),
         }
     }
 
@@ -580,6 +660,20 @@ impl<'e> App<'e> {
                     Err(e) => self.message = e.to_string(),
                 }
             }
+            InputPurpose::NewBranch => {
+                if value.is_empty() {
+                    self.message = "branch name must not be empty".into();
+                    return;
+                }
+                match self.engine.create_branch(&value, "HEAD") {
+                    Ok(()) => {
+                        self.overlay = Overlay::None;
+                        self.refresh();
+                        self.message = format!("created & switched to {value}");
+                    }
+                    Err(e) => self.message = e.to_string(),
+                }
+            }
             InputPurpose::CommitMessage { files, amend } => {
                 if value.is_empty() {
                     self.message = "commit message required".into();
@@ -657,6 +751,23 @@ impl<'e> App<'e> {
                 "soft" => self.do_reset(&hash, ResetMode::Soft),
                 _ => self.do_reset(&hash, ResetMode::Mixed),
             },
+            PickerPurpose::Checkout => {
+                if id == "__new__" {
+                    self.overlay = Overlay::Input(InputState {
+                        title: "New branch (from HEAD)".into(),
+                        value: String::new(),
+                        purpose: InputPurpose::NewBranch,
+                    });
+                } else {
+                    match self.engine.checkout_branch(&id) {
+                        Ok(()) => {
+                            self.refresh();
+                            self.message = format!("switched to {id}");
+                        }
+                        Err(e) => self.message = e.to_string(),
+                    }
+                }
+            }
         }
     }
 
@@ -902,6 +1013,63 @@ mod tests {
         app.handle_key(key_char('y'));
         assert!(!engine.status().unwrap().iter().any(|f| f.path == "a.txt"), "rollback restores HEAD");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn init_bare(tag: &str) -> std::path::PathBuf {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("mygit-bare-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(Command::new("git")
+            .current_dir(&dir)
+            .args(["init", "--bare", "-q"])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        dir
+    }
+
+    #[test]
+    fn push_new_branch_sets_upstream_and_create_checkout() {
+        use crate::engine::GixEngine;
+        use std::process::Command;
+        let remote = init_bare("push-remote");
+        let dir = init_repo("push");
+        let run = |a: &[&str]| {
+            assert!(Command::new("git").current_dir(&dir).args(a).output().unwrap().status.success());
+        };
+        run(&["remote", "add", "origin", remote.to_str().unwrap()]);
+        std::fs::write(dir.join("a.txt"), "1").unwrap();
+        let engine = GixEngine::discover(&dir).unwrap();
+        engine.commit(&["a.txt".to_string()], "c1", false).unwrap();
+
+        let mut app = App::new(&engine);
+        assert!(app.branch.upstream.is_none(), "no upstream before first push");
+        app.on_action(Action::Push); // no upstream -> push -u
+        assert!(
+            engine.branch_state().unwrap().upstream.is_some(),
+            "upstream set after push -u"
+        );
+
+        // A new local commit makes the branch ahead by 1.
+        std::fs::write(dir.join("a.txt"), "2").unwrap();
+        engine.commit(&["a.txt".to_string()], "c2", false).unwrap();
+        assert_eq!(engine.branch_state().unwrap().ahead, 1, "ahead reflects the new commit");
+
+        // Create + checkout a new branch via the branches picker.
+        app.on_action(Action::Branches);
+        assert!(matches!(app.overlay, Overlay::Picker(_)));
+        app.handle_key(key(event::KeyCode::Enter)); // "＋ new branch…" is first
+        assert!(matches!(app.overlay, Overlay::Input(_)));
+        for c in "feature-x".chars() {
+            app.handle_key(key_char(c));
+        }
+        app.handle_key(key(event::KeyCode::Enter));
+        assert!(engine.branches().unwrap().iter().any(|b| b == "feature-x"));
+        assert_eq!(engine.branch_state().unwrap().current_branch.as_deref(), Some("feature-x"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&remote);
     }
 
     #[test]
