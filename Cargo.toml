@@ -1,0 +1,20 @@
+[package]
+name = "mygit"
+version = "0.1.0"
+edition = "2021"
+description = "TUI git manager with named changelists"
+
+[[bin]]
+name = "mygit"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+anyhow = "1"
+gix = { version = "0.66", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
