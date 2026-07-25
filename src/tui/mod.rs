@@ -85,6 +85,8 @@ pub enum PickerPurpose {
     MoveFiles(Vec<String>),
     ResetMode(String),
     Checkout,
+    RebaseOnto,
+    RebaseControl,
 }
 
 /// A rendered row in the Changes panel: a changelist header or a file under it.
@@ -279,9 +281,71 @@ impl<'e> App<'e> {
             Push => self.push_action(),
             Fetch => self.fetch_action(),
             Branches => self.open_branches(),
+            Rebase => self.open_rebase(),
             Confirm | Cancel => {} // only meaningful inside overlays
-            // Remaining git operations land in later waves.
-            other => self.message = format!("{}: следующая волна", other.label()),
+        }
+    }
+
+    // ----- rebase (Task 09) ----------------------------------------------------
+
+    fn open_rebase(&mut self) {
+        if let Some(rb) = self.branch.rebase.clone() {
+            // In progress: list conflicts (informational) + control actions.
+            let conflicts = self.engine.conflicts().unwrap_or_default();
+            let mut items: Vec<PickerItem> = conflicts
+                .iter()
+                .map(|p| PickerItem { label: format!("⚠ {p}"), id: "noop".into() })
+                .collect();
+            let first_control = items.len();
+            items.push(PickerItem { label: "Continue".into(), id: "continue".into() });
+            items.push(PickerItem { label: "Skip".into(), id: "skip".into() });
+            items.push(PickerItem { label: "Abort".into(), id: "abort".into() });
+            self.overlay = Overlay::Picker(PickerState {
+                title: format!("Rebase {}/{} in progress", rb.current, rb.total),
+                items,
+                cursor: first_control,
+                purpose: PickerPurpose::RebaseControl,
+            });
+        } else {
+            let cur = self.branch.current_branch.clone().unwrap_or_default();
+            let items: Vec<PickerItem> = self
+                .engine
+                .branches()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|b| *b != cur)
+                .map(|b| PickerItem { label: b.clone(), id: b })
+                .collect();
+            if items.is_empty() {
+                self.message = "no other branch to rebase onto".into();
+                return;
+            }
+            self.overlay = Overlay::Picker(PickerState {
+                title: "Rebase current branch onto…".into(),
+                items,
+                cursor: 0,
+                purpose: PickerPurpose::RebaseOnto,
+            });
+        }
+    }
+
+    fn after_rebase_step(&mut self, result: Result<()>, ok: &str) {
+        self.refresh();
+        match result {
+            Ok(()) => {
+                self.message = if self.branch.rebase.is_some() {
+                    "still in progress — resolve conflicts, then Continue".into()
+                } else {
+                    format!("rebase {ok}")
+                };
+            }
+            Err(_) => {
+                self.message = if self.branch.rebase.is_some() {
+                    "rebase step failed — unresolved conflicts remain".into()
+                } else {
+                    "rebase step failed".into()
+                };
+            }
         }
     }
 
@@ -768,6 +832,37 @@ impl<'e> App<'e> {
                     }
                 }
             }
+            PickerPurpose::RebaseOnto => match self.engine.rebase_onto(&id) {
+                Ok(()) => {
+                    self.refresh();
+                    self.message = format!("rebased onto {id}");
+                }
+                Err(_) => {
+                    // git rebase exits non-zero on conflict but leaves the rebase
+                    // in progress; reflect that so the user can drive it with R.
+                    self.refresh();
+                    self.message = if self.branch.rebase.is_some() {
+                        "rebase stopped — resolve conflicts, then press R".into()
+                    } else {
+                        "rebase failed".into()
+                    };
+                }
+            },
+            PickerPurpose::RebaseControl => match id.as_str() {
+                "continue" => {
+                    let r = self.engine.rebase_continue();
+                    self.after_rebase_step(r, "continued");
+                }
+                "skip" => {
+                    let r = self.engine.rebase_skip();
+                    self.after_rebase_step(r, "skipped");
+                }
+                "abort" => {
+                    let r = self.engine.rebase_abort();
+                    self.after_rebase_step(r, "aborted");
+                }
+                _ => self.message = "resolve conflicts in your editor, then Continue".into(),
+            },
         }
     }
 
@@ -1070,6 +1165,80 @@ mod tests {
         assert_eq!(engine.branch_state().unwrap().current_branch.as_deref(), Some("feature-x"));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    fn select_picker(app: &mut App, label: &str) {
+        if let Overlay::Picker(p) = &mut app.overlay {
+            p.cursor = p.items.iter().position(|i| i.label == label).expect("picker item");
+        }
+        app.handle_key(key(event::KeyCode::Enter));
+    }
+
+    #[test]
+    fn rebase_onto_completes_cleanly() {
+        use crate::engine::GixEngine;
+        use std::process::Command;
+        let dir = init_repo("rebase-clean");
+        let run = |a: &[&str]| {
+            assert!(Command::new("git").current_dir(&dir).args(a).output().unwrap().status.success());
+        };
+        let engine = GixEngine::discover(&dir).unwrap();
+        std::fs::write(dir.join("base.txt"), "base").unwrap();
+        engine.commit(&["base.txt".to_string()], "base", false).unwrap();
+        let base = engine.branch_state().unwrap().current_branch.unwrap();
+
+        run(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.join("feat.txt"), "feat").unwrap();
+        engine.commit(&["feat.txt".to_string()], "feat", false).unwrap();
+        run(&["checkout", "-q", &base]);
+        std::fs::write(dir.join("other.txt"), "other").unwrap();
+        engine.commit(&["other.txt".to_string()], "other", false).unwrap();
+        run(&["checkout", "-q", "feature"]);
+
+        let mut app = App::new(&engine);
+        app.on_action(Action::Rebase);
+        select_picker(&mut app, &base);
+        assert!(app.branch.rebase.is_none(), "clean rebase should complete");
+        assert!(dir.join("other.txt").exists(), "base commit replayed under feature");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rebase_conflict_then_abort_restores() {
+        use crate::engine::GixEngine;
+        use std::process::Command;
+        let dir = init_repo("rebase-conflict");
+        let run = |a: &[&str]| {
+            assert!(Command::new("git").current_dir(&dir).args(a).output().unwrap().status.success());
+        };
+        let engine = GixEngine::discover(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), "base\n").unwrap();
+        engine.commit(&["f.txt".to_string()], "base", false).unwrap();
+        let base = engine.branch_state().unwrap().current_branch.unwrap();
+
+        run(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.join("f.txt"), "feature version\n").unwrap();
+        engine.commit(&["f.txt".to_string()], "feat", false).unwrap();
+        run(&["checkout", "-q", &base]);
+        std::fs::write(dir.join("f.txt"), "base version\n").unwrap();
+        engine.commit(&["f.txt".to_string()], "base2", false).unwrap();
+        run(&["checkout", "-q", "feature"]);
+
+        let mut app = App::new(&engine);
+        app.on_action(Action::Rebase);
+        select_picker(&mut app, &base); // conflicts -> rebase stops
+        assert!(app.branch.rebase.is_some(), "conflicting rebase stops in progress");
+
+        // Abort via the in-progress control picker.
+        app.on_action(Action::Rebase);
+        select_picker(&mut app, "Abort");
+        assert!(app.branch.rebase.is_none(), "abort ends the rebase");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "feature version\n",
+            "abort restores the pre-rebase feature state"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
