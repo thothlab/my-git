@@ -16,6 +16,11 @@ central keymap dispatch, help overlay, and the named UI states. Produce the **de
 deliverable** (ТЗ §7): wireframes, the Pane→ANSI/truecolor colour map, the finalised key
 map, and the state specification.
 
+**Reference:** adapt the architecture from `gwm-cli` (MIT) — role-based theme
+(`tui/theme.rs`), the `define_actions!` keymap (`tui/keymap.rs`), the App-orchestrator +
+pure-state overlay slices (`tui/state/*`), and the default-to-Cancel confirm modal. See
+[reference note](../../notes/reference_gwm-cli.md) for the module→task map and attribution.
+
 ## Scope
 
 - Two-panel layout (Changes | Diff/Log) + status bar; focus model with visible focus.

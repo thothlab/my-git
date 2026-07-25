@@ -35,6 +35,9 @@ GUI-compatibility contract.
 4. Implement `persist()` atomically (temp file + rename); implement re-read + last-write-wins on write conflict.
 5. Implement `create`/`rename`/`delete`/`setActive`/`move` with invariants (Default protection, unique names, delete→reassign to Default).
 6. Normalise paths to repo-relative, `/`-separated on all platforms.
+7. Add a **schema freeze test** (pattern from `gwm-cli` `contract.rs` — see
+   [reference note](../../notes/reference_gwm-cli.md)) that fails if the serialized
+   `changelists.json` shape drifts, guaranteeing GUI wire-compat (AC#2).
 
 ## Deliverables
 
@@ -51,6 +54,7 @@ GUI-compatibility contract.
 - [ ] Duplicate list names are rejected on create/rename.
 - [ ] `persist` never leaves a partial file (temp+rename); concurrent-write test yields valid JSON.
 - [ ] Paths stored repo-relative with `/` separators on macOS/Linux/Windows.
+- [ ] A schema freeze test fails on any backward-incompatible shape change to `changelists.json`.
 
 ## Tests
 
