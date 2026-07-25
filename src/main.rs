@@ -8,7 +8,7 @@ mod changelists;
 mod engine;
 mod tui;
 
-use engine::{GitEngine, GixEngine};
+use engine::GixEngine;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -29,16 +29,9 @@ fn main() -> ExitCode {
         }
     };
 
-    // Live pipeline: load the changelist store, reconcile it with the real
-    // working tree, and persist the reconciled assignments (ТЗ §6.2).
-    let store_path = changelists::store_path(engine.repo_root());
-    let mut store = changelists::ChangelistStore::load(&store_path).unwrap_or_default();
-    if let Ok(changed) = engine.status() {
-        store.sync(&changed);
-        let _ = store.persist(&store_path); // best-effort; a write race is tolerated
-    }
-
-    if let Err(err) = tui::run(engine.repo_root(), &store) {
+    // The App owns the startup pipeline (load store → sync against the real
+    // working tree → persist) and the event loop.
+    if let Err(err) = tui::run(&engine) {
         eprintln!("mygit: {err:#}");
         return ExitCode::FAILURE;
     }
