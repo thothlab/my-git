@@ -155,7 +155,10 @@ impl ChangelistStore {
     /// Rename a list (id stays stable). Rejects a duplicate name.
     pub fn rename(&mut self, id: &str, name: &str) -> Result<()> {
         anyhow::ensure!(
-            !self.changelists.iter().any(|c| c.name == name && c.id != id),
+            !self
+                .changelists
+                .iter()
+                .any(|c| c.name == name && c.id != id),
             "a changelist named {name:?} already exists"
         );
         let list = self.list_mut(id)?;
@@ -234,7 +237,8 @@ impl ChangelistStore {
         if !self.changelists.iter().any(|c| c.id == base) {
             return base.to_string();
         }
-        (2..).map(|n| format!("{base}-{n}"))
+        (2..)
+            .map(|n| format!("{base}-{n}"))
             .find(|cand| !self.changelists.iter().any(|c| &c.id == cand))
             .expect("infinite range yields a free id")
     }
@@ -299,7 +303,11 @@ mod tests {
     #[test]
     fn gui_written_file_is_read_without_loss() {
         let s: ChangelistStore = serde_json::from_str(GUI_FIXTURE).unwrap();
-        let nfc = s.changelists.iter().find(|c| c.name == "Not for commit").unwrap();
+        let nfc = s
+            .changelists
+            .iter()
+            .find(|c| c.name == "Not for commit")
+            .unwrap();
         assert_eq!(nfc.id, "not-for-commit");
         assert_eq!(nfc.files, vec!["config/local.xml"]);
     }
@@ -338,7 +346,8 @@ mod tests {
         let mut s = ChangelistStore::default();
         s.sync(&changed(&["config/local.xml"]));
         let nfc = s.create("Not for commit").unwrap();
-        s.move_files(&["config/local.xml".to_string()], &nfc).unwrap();
+        s.move_files(&["config/local.xml".to_string()], &nfc)
+            .unwrap();
         let in_lists: Vec<&str> = s
             .changelists
             .iter()

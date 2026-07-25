@@ -91,8 +91,14 @@ pub enum PickerPurpose {
 
 /// A rendered row in the Changes panel: a changelist header or a file under it.
 pub enum Row {
-    Header { list: usize },
-    File { list: usize, path: String, status: FileStatus },
+    Header {
+        list: usize,
+    },
+    File {
+        list: usize,
+        path: String,
+        status: FileStatus,
+    },
 }
 
 pub struct App<'e> {
@@ -184,7 +190,11 @@ impl<'e> App<'e> {
             rows.push(Row::Header { list: i });
             for path in &cl.files {
                 if let Some(&status) = self.status_map.get(path) {
-                    rows.push(Row::File { list: i, path: path.clone(), status });
+                    rows.push(Row::File {
+                        list: i,
+                        path: path.clone(),
+                        status,
+                    });
                 }
             }
         }
@@ -296,12 +306,24 @@ impl<'e> App<'e> {
             let conflicts = self.engine.conflicts().unwrap_or_default();
             let mut items: Vec<PickerItem> = conflicts
                 .iter()
-                .map(|p| PickerItem { label: format!("⚠ {p}"), id: "noop".into() })
+                .map(|p| PickerItem {
+                    label: format!("⚠ {p}"),
+                    id: "noop".into(),
+                })
                 .collect();
             let first_control = items.len();
-            items.push(PickerItem { label: "Continue".into(), id: "continue".into() });
-            items.push(PickerItem { label: "Skip".into(), id: "skip".into() });
-            items.push(PickerItem { label: "Abort".into(), id: "abort".into() });
+            items.push(PickerItem {
+                label: "Continue".into(),
+                id: "continue".into(),
+            });
+            items.push(PickerItem {
+                label: "Skip".into(),
+                id: "skip".into(),
+            });
+            items.push(PickerItem {
+                label: "Abort".into(),
+                id: "abort".into(),
+            });
             self.overlay = Overlay::Picker(PickerState {
                 title: format!("Rebase {}/{} in progress", rb.current, rb.total),
                 items,
@@ -316,7 +338,10 @@ impl<'e> App<'e> {
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|b| *b != cur)
-                .map(|b| PickerItem { label: b.clone(), id: b })
+                .map(|b| PickerItem {
+                    label: b.clone(),
+                    id: b,
+                })
                 .collect();
             if items.is_empty() {
                 self.message = "no other branch to rebase onto".into();
@@ -365,7 +390,10 @@ impl<'e> App<'e> {
         if self.branch.upstream.is_none() {
             self.do_push(
                 &branch,
-                PushOpts { set_upstream: true, ..Default::default() },
+                PushOpts {
+                    set_upstream: true,
+                    ..Default::default()
+                },
                 "pushed (upstream set)",
             );
         } else if self.branch.behind > 0 {
@@ -409,7 +437,10 @@ impl<'e> App<'e> {
             id: "__new__".into(),
         }];
         for b in self.engine.branches().unwrap_or_default() {
-            items.push(PickerItem { label: b.clone(), id: b });
+            items.push(PickerItem {
+                label: b.clone(),
+                id: b,
+            });
         }
         self.overlay = Overlay::Picker(PickerState {
             title: "Branches — checkout / create".into(),
@@ -460,7 +491,9 @@ impl<'e> App<'e> {
     }
 
     fn revert_selected(&mut self) {
-        let Some(hash) = self.selected_commit_hash() else { return };
+        let Some(hash) = self.selected_commit_hash() else {
+            return;
+        };
         match self.engine.revert(&hash) {
             Ok(()) => {
                 self.reload_log();
@@ -472,11 +505,22 @@ impl<'e> App<'e> {
     }
 
     fn open_reset_picker(&mut self) {
-        let Some(hash) = self.selected_commit_hash() else { return };
+        let Some(hash) = self.selected_commit_hash() else {
+            return;
+        };
         let items = vec![
-            PickerItem { label: "soft  (keep index + worktree)".into(), id: "soft".into() },
-            PickerItem { label: "mixed (keep worktree)".into(), id: "mixed".into() },
-            PickerItem { label: "hard  (DISCARD changes)".into(), id: "hard".into() },
+            PickerItem {
+                label: "soft  (keep index + worktree)".into(),
+                id: "soft".into(),
+            },
+            PickerItem {
+                label: "mixed (keep worktree)".into(),
+                id: "mixed".into(),
+            },
+            PickerItem {
+                label: "hard  (DISCARD changes)".into(),
+                id: "hard".into(),
+            },
         ];
         self.overlay = Overlay::Picker(PickerState {
             title: format!("Reset to {}…", &hash[..hash.len().min(8)]),
@@ -519,7 +563,9 @@ impl<'e> App<'e> {
     }
 
     fn execute_confirm(&mut self) {
-        let Overlay::Confirm(c) = &self.overlay else { return };
+        let Overlay::Confirm(c) = &self.overlay else {
+            return;
+        };
         let purpose = c.purpose.clone();
         self.overlay = Overlay::None;
         match purpose {
@@ -533,7 +579,10 @@ impl<'e> App<'e> {
             },
             ConfirmPurpose::ForcePush(branch) => self.do_push(
                 &branch,
-                PushOpts { force_with_lease: true, ..Default::default() },
+                PushOpts {
+                    force_with_lease: true,
+                    ..Default::default()
+                },
                 "force-pushed (with lease)",
             ),
         }
@@ -600,7 +649,9 @@ impl<'e> App<'e> {
         if !self.marked.is_empty() {
             self.marked.iter().cloned().collect()
         } else {
-            self.selected_path().map(|p| vec![p.to_string()]).unwrap_or_default()
+            self.selected_path()
+                .map(|p| vec![p.to_string()])
+                .unwrap_or_default()
         }
     }
 
@@ -662,7 +713,10 @@ impl<'e> App<'e> {
         self.store
             .changelists
             .iter()
-            .map(|c| PickerItem { label: c.name.clone(), id: c.id.clone() })
+            .map(|c| PickerItem {
+                label: c.name.clone(),
+                id: c.id.clone(),
+            })
             .collect()
     }
 
@@ -698,7 +752,9 @@ impl<'e> App<'e> {
     }
 
     fn submit_input(&mut self) {
-        let Overlay::Input(s) = &self.overlay else { return };
+        let Overlay::Input(s) = &self.overlay else {
+            return;
+        };
         let value = s.value.trim().to_string();
         let purpose = s.purpose.clone();
         // On rejection the overlay stays open so the user can correct the value.
@@ -757,7 +813,11 @@ impl<'e> App<'e> {
                         self.overlay = Overlay::None;
                         self.marked.clear();
                         self.refresh();
-                        self.message = if amend { "amended".into() } else { "committed".into() };
+                        self.message = if amend {
+                            "amended".into()
+                        } else {
+                            "committed".into()
+                        };
                     }
                     Err(e) => self.message = e.to_string(),
                 }
@@ -787,7 +847,9 @@ impl<'e> App<'e> {
     }
 
     fn submit_picker(&mut self) {
-        let Overlay::Picker(p) = &self.overlay else { return };
+        let Overlay::Picker(p) = &self.overlay else {
+            return;
+        };
         let Some(item) = p.items.get(p.cursor) else {
             self.overlay = Overlay::None;
             return;
@@ -926,39 +988,86 @@ mod tests {
     impl GitEngine for Mock {
         fn status(&self) -> Result<Vec<ChangedFile>> {
             Ok(vec![
-                ChangedFile { path: "a.rs".into(), status: FileStatus::Modified },
-                ChangedFile { path: "b.rs".into(), status: FileStatus::Untracked },
+                ChangedFile {
+                    path: "a.rs".into(),
+                    status: FileStatus::Modified,
+                },
+                ChangedFile {
+                    path: "b.rs".into(),
+                    status: FileStatus::Untracked,
+                },
             ])
         }
         fn diff(&self, path: &str) -> Result<String> {
             Ok(format!("+++ {path}\n@@ -1 +1 @@\n+changed"))
         }
         fn branch_state(&self) -> Result<BranchState> {
-            Ok(BranchState { current_branch: Some("main".into()), ..Default::default() })
+            Ok(BranchState {
+                current_branch: Some("main".into()),
+                ..Default::default()
+            })
         }
-        fn stage(&self, _: &[String]) -> Result<()> { Ok(()) }
-        fn commit(&self, _: &[String], _: &str, _: bool) -> Result<String> { Ok("x".into()) }
-        fn log(&self, _: usize) -> Result<Vec<Commit>> { Ok(vec![]) }
-        fn revert(&self, _: &str) -> Result<()> { Ok(()) }
-        fn reset(&self, _: &str, _: ResetMode) -> Result<()> { Ok(()) }
-        fn checkout_file(&self, _: &str) -> Result<()> { Ok(()) }
-        fn branches(&self) -> Result<Vec<String>> { Ok(vec![]) }
-        fn checkout_branch(&self, _: &str) -> Result<()> { Ok(()) }
-        fn create_branch(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
-        fn push(&self, _: &str, _: &PushOpts) -> Result<()> { Ok(()) }
-        fn fetch(&self) -> Result<()> { Ok(()) }
-        fn pull(&self) -> Result<()> { Ok(()) }
-        fn rebase_onto(&self, _: &str) -> Result<()> { Ok(()) }
-        fn rebase_continue(&self) -> Result<()> { Ok(()) }
-        fn rebase_skip(&self) -> Result<()> { Ok(()) }
-        fn rebase_abort(&self) -> Result<()> { Ok(()) }
-        fn conflicts(&self) -> Result<Vec<String>> { Ok(vec![]) }
-        fn repo_root(&self) -> &Path { &self.root }
+        fn stage(&self, _: &[String]) -> Result<()> {
+            Ok(())
+        }
+        fn commit(&self, _: &[String], _: &str, _: bool) -> Result<String> {
+            Ok("x".into())
+        }
+        fn log(&self, _: usize) -> Result<Vec<Commit>> {
+            Ok(vec![])
+        }
+        fn revert(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn reset(&self, _: &str, _: ResetMode) -> Result<()> {
+            Ok(())
+        }
+        fn checkout_file(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn branches(&self) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn checkout_branch(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn create_branch(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn push(&self, _: &str, _: &PushOpts) -> Result<()> {
+            Ok(())
+        }
+        fn fetch(&self) -> Result<()> {
+            Ok(())
+        }
+        fn pull(&self) -> Result<()> {
+            Ok(())
+        }
+        fn rebase_onto(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn rebase_continue(&self) -> Result<()> {
+            Ok(())
+        }
+        fn rebase_skip(&self) -> Result<()> {
+            Ok(())
+        }
+        fn rebase_abort(&self) -> Result<()> {
+            Ok(())
+        }
+        fn conflicts(&self) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn repo_root(&self) -> &Path {
+            &self.root
+        }
     }
 
     #[test]
     fn builds_grouped_rows_navigates_and_marks() {
-        let mock = Mock { root: std::env::temp_dir().join("mygit-app-test-norepo") };
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-app-test-norepo"),
+        };
         let mut app = App::new(&mock);
 
         // Default header + a.rs + b.rs, both synced into the active Default list.
@@ -978,7 +1087,9 @@ mod tests {
 
     #[test]
     fn changelist_ops_create_move_and_persist() {
-        let mock = Mock { root: std::env::temp_dir().join("mygit-app-test-ops") };
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-app-test-ops"),
+        };
         let mut app = App::new(&mock);
         // create "WIP" (becomes active)
         app.on_action(Action::NewList);
@@ -1003,8 +1114,16 @@ mod tests {
             }
         }
         app.handle_key(key(event::KeyCode::Enter));
-        let wip = app.store.changelists.iter().find(|c| c.name == "WIP").unwrap();
-        assert!(wip.files.iter().any(|f| f == "a.rs"), "a.rs should be in WIP");
+        let wip = app
+            .store
+            .changelists
+            .iter()
+            .find(|c| c.name == "WIP")
+            .unwrap();
+        assert!(
+            wip.files.iter().any(|f| f == "a.rs"),
+            "a.rs should be in WIP"
+        );
     }
 
     fn key(code: event::KeyCode) -> event::KeyEvent {
@@ -1020,7 +1139,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let run = |a: &[&str]| {
-            assert!(Command::new("git").current_dir(&dir).args(a).output().unwrap().status.success());
+            assert!(Command::new("git")
+                .current_dir(&dir)
+                .args(a)
+                .output()
+                .unwrap()
+                .status
+                .success());
         };
         run(&["init", "-q"]);
         run(&["config", "user.email", "t@t"]);
@@ -1054,9 +1179,20 @@ mod tests {
         let log = engine.log(10).unwrap();
         assert_eq!(log.len(), 1, "exactly one commit expected");
         let changed = engine.status().unwrap();
-        assert!(!changed.iter().any(|f| f.path == "a.txt"), "a.txt should be committed");
-        assert!(changed.iter().any(|f| f.path == "b.txt"), "b.txt must remain changed");
-        let nfc_list = app.store.changelists.iter().find(|c| c.name == "Not for commit").unwrap();
+        assert!(
+            !changed.iter().any(|f| f.path == "a.txt"),
+            "a.txt should be committed"
+        );
+        assert!(
+            changed.iter().any(|f| f.path == "b.txt"),
+            "b.txt must remain changed"
+        );
+        let nfc_list = app
+            .store
+            .changelists
+            .iter()
+            .find(|c| c.name == "Not for commit")
+            .unwrap();
         assert!(nfc_list.files.iter().any(|f| f == "b.txt"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1089,7 +1225,11 @@ mod tests {
         app.handle_key(key(event::KeyCode::Enter)); // -> confirm
         assert!(matches!(app.overlay, Overlay::Confirm(_)));
         app.handle_key(key_char('y')); // confirm hard reset
-        assert_eq!(engine.log(10).unwrap().len(), 1, "hard reset to oldest -> one commit");
+        assert_eq!(
+            engine.log(10).unwrap().len(),
+            1,
+            "hard reset to oldest -> one commit"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1112,7 +1252,10 @@ mod tests {
         // Now confirm with 'y' -> file restored to HEAD
         app.on_action(Action::Rollback);
         app.handle_key(key_char('y'));
-        assert!(!engine.status().unwrap().iter().any(|f| f.path == "a.txt"), "rollback restores HEAD");
+        assert!(
+            !engine.status().unwrap().iter().any(|f| f.path == "a.txt"),
+            "rollback restores HEAD"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1138,7 +1281,13 @@ mod tests {
         let remote = init_bare("push-remote");
         let dir = init_repo("push");
         let run = |a: &[&str]| {
-            assert!(Command::new("git").current_dir(&dir).args(a).output().unwrap().status.success());
+            assert!(Command::new("git")
+                .current_dir(&dir)
+                .args(a)
+                .output()
+                .unwrap()
+                .status
+                .success());
         };
         run(&["remote", "add", "origin", remote.to_str().unwrap()]);
         std::fs::write(dir.join("a.txt"), "1").unwrap();
@@ -1146,7 +1295,10 @@ mod tests {
         engine.commit(&["a.txt".to_string()], "c1", false).unwrap();
 
         let mut app = App::new(&engine);
-        assert!(app.branch.upstream.is_none(), "no upstream before first push");
+        assert!(
+            app.branch.upstream.is_none(),
+            "no upstream before first push"
+        );
         app.on_action(Action::Push); // no upstream -> push -u
         assert!(
             engine.branch_state().unwrap().upstream.is_some(),
@@ -1156,7 +1308,11 @@ mod tests {
         // A new local commit makes the branch ahead by 1.
         std::fs::write(dir.join("a.txt"), "2").unwrap();
         engine.commit(&["a.txt".to_string()], "c2", false).unwrap();
-        assert_eq!(engine.branch_state().unwrap().ahead, 1, "ahead reflects the new commit");
+        assert_eq!(
+            engine.branch_state().unwrap().ahead,
+            1,
+            "ahead reflects the new commit"
+        );
 
         // Create + checkout a new branch via the branches picker.
         app.on_action(Action::Branches);
@@ -1168,14 +1324,21 @@ mod tests {
         }
         app.handle_key(key(event::KeyCode::Enter));
         assert!(engine.branches().unwrap().iter().any(|b| b == "feature-x"));
-        assert_eq!(engine.branch_state().unwrap().current_branch.as_deref(), Some("feature-x"));
+        assert_eq!(
+            engine.branch_state().unwrap().current_branch.as_deref(),
+            Some("feature-x")
+        );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&remote);
     }
 
     fn select_picker(app: &mut App, label: &str) {
         if let Overlay::Picker(p) = &mut app.overlay {
-            p.cursor = p.items.iter().position(|i| i.label == label).expect("picker item");
+            p.cursor = p
+                .items
+                .iter()
+                .position(|i| i.label == label)
+                .expect("picker item");
         }
         app.handle_key(key(event::KeyCode::Enter));
     }
@@ -1186,26 +1349,41 @@ mod tests {
         use std::process::Command;
         let dir = init_repo("rebase-clean");
         let run = |a: &[&str]| {
-            assert!(Command::new("git").current_dir(&dir).args(a).output().unwrap().status.success());
+            assert!(Command::new("git")
+                .current_dir(&dir)
+                .args(a)
+                .output()
+                .unwrap()
+                .status
+                .success());
         };
         let engine = GixEngine::discover(&dir).unwrap();
         std::fs::write(dir.join("base.txt"), "base").unwrap();
-        engine.commit(&["base.txt".to_string()], "base", false).unwrap();
+        engine
+            .commit(&["base.txt".to_string()], "base", false)
+            .unwrap();
         let base = engine.branch_state().unwrap().current_branch.unwrap();
 
         run(&["checkout", "-q", "-b", "feature"]);
         std::fs::write(dir.join("feat.txt"), "feat").unwrap();
-        engine.commit(&["feat.txt".to_string()], "feat", false).unwrap();
+        engine
+            .commit(&["feat.txt".to_string()], "feat", false)
+            .unwrap();
         run(&["checkout", "-q", &base]);
         std::fs::write(dir.join("other.txt"), "other").unwrap();
-        engine.commit(&["other.txt".to_string()], "other", false).unwrap();
+        engine
+            .commit(&["other.txt".to_string()], "other", false)
+            .unwrap();
         run(&["checkout", "-q", "feature"]);
 
         let mut app = App::new(&engine);
         app.on_action(Action::Rebase);
         select_picker(&mut app, &base);
         assert!(app.branch.rebase.is_none(), "clean rebase should complete");
-        assert!(dir.join("other.txt").exists(), "base commit replayed under feature");
+        assert!(
+            dir.join("other.txt").exists(),
+            "base commit replayed under feature"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1215,25 +1393,40 @@ mod tests {
         use std::process::Command;
         let dir = init_repo("rebase-conflict");
         let run = |a: &[&str]| {
-            assert!(Command::new("git").current_dir(&dir).args(a).output().unwrap().status.success());
+            assert!(Command::new("git")
+                .current_dir(&dir)
+                .args(a)
+                .output()
+                .unwrap()
+                .status
+                .success());
         };
         let engine = GixEngine::discover(&dir).unwrap();
         std::fs::write(dir.join("f.txt"), "base\n").unwrap();
-        engine.commit(&["f.txt".to_string()], "base", false).unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "base", false)
+            .unwrap();
         let base = engine.branch_state().unwrap().current_branch.unwrap();
 
         run(&["checkout", "-q", "-b", "feature"]);
         std::fs::write(dir.join("f.txt"), "feature version\n").unwrap();
-        engine.commit(&["f.txt".to_string()], "feat", false).unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "feat", false)
+            .unwrap();
         run(&["checkout", "-q", &base]);
         std::fs::write(dir.join("f.txt"), "base version\n").unwrap();
-        engine.commit(&["f.txt".to_string()], "base2", false).unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "base2", false)
+            .unwrap();
         run(&["checkout", "-q", "feature"]);
 
         let mut app = App::new(&engine);
         app.on_action(Action::Rebase);
         select_picker(&mut app, &base); // conflicts -> rebase stops
-        assert!(app.branch.rebase.is_some(), "conflicting rebase stops in progress");
+        assert!(
+            app.branch.rebase.is_some(),
+            "conflicting rebase stops in progress"
+        );
 
         // Abort via the in-progress control picker.
         app.on_action(Action::Rebase);
@@ -1257,7 +1450,10 @@ mod tests {
         app.cursor = 0;
         app.on_action(Action::Commit);
         app.handle_key(key(event::KeyCode::Enter)); // empty message
-        assert!(matches!(app.overlay, Overlay::Input(_)), "overlay stays open on empty message");
+        assert!(
+            matches!(app.overlay, Overlay::Input(_)),
+            "overlay stays open on empty message"
+        );
         assert_eq!(engine.log(10).unwrap().len(), 0, "no commit created");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1265,7 +1461,9 @@ mod tests {
     #[test]
     fn renders_frame_with_panels_and_content() {
         use ratatui::{backend::TestBackend, Terminal};
-        let mock = Mock { root: std::env::temp_dir().join("mygit-app-test-render") };
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-app-test-render"),
+        };
         let mut app = App::new(&mock);
         app.on_action(Action::Down); // select a.rs so the diff title shows it
 
@@ -1286,36 +1484,84 @@ mod tests {
             root: std::path::PathBuf,
         }
         impl GitEngine for Clean {
-            fn status(&self) -> Result<Vec<ChangedFile>> { Ok(vec![]) }
-            fn diff(&self, _: &str) -> Result<String> { Ok(String::new()) }
-            fn branch_state(&self) -> Result<BranchState> {
-                Ok(BranchState { current_branch: Some("main".into()), ..Default::default() })
+            fn status(&self) -> Result<Vec<ChangedFile>> {
+                Ok(vec![])
             }
-            fn stage(&self, _: &[String]) -> Result<()> { Ok(()) }
-            fn commit(&self, _: &[String], _: &str, _: bool) -> Result<String> { Ok("x".into()) }
-            fn log(&self, _: usize) -> Result<Vec<Commit>> { Ok(vec![]) }
-            fn revert(&self, _: &str) -> Result<()> { Ok(()) }
-            fn reset(&self, _: &str, _: ResetMode) -> Result<()> { Ok(()) }
-            fn checkout_file(&self, _: &str) -> Result<()> { Ok(()) }
-            fn branches(&self) -> Result<Vec<String>> { Ok(vec![]) }
-            fn checkout_branch(&self, _: &str) -> Result<()> { Ok(()) }
-            fn create_branch(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
-            fn push(&self, _: &str, _: &PushOpts) -> Result<()> { Ok(()) }
-            fn fetch(&self) -> Result<()> { Ok(()) }
-            fn pull(&self) -> Result<()> { Ok(()) }
-            fn rebase_onto(&self, _: &str) -> Result<()> { Ok(()) }
-            fn rebase_continue(&self) -> Result<()> { Ok(()) }
-            fn rebase_skip(&self) -> Result<()> { Ok(()) }
-            fn rebase_abort(&self) -> Result<()> { Ok(()) }
-            fn conflicts(&self) -> Result<Vec<String>> { Ok(vec![]) }
-            fn repo_root(&self) -> &std::path::Path { &self.root }
+            fn diff(&self, _: &str) -> Result<String> {
+                Ok(String::new())
+            }
+            fn branch_state(&self) -> Result<BranchState> {
+                Ok(BranchState {
+                    current_branch: Some("main".into()),
+                    ..Default::default()
+                })
+            }
+            fn stage(&self, _: &[String]) -> Result<()> {
+                Ok(())
+            }
+            fn commit(&self, _: &[String], _: &str, _: bool) -> Result<String> {
+                Ok("x".into())
+            }
+            fn log(&self, _: usize) -> Result<Vec<Commit>> {
+                Ok(vec![])
+            }
+            fn revert(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn reset(&self, _: &str, _: ResetMode) -> Result<()> {
+                Ok(())
+            }
+            fn checkout_file(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn branches(&self) -> Result<Vec<String>> {
+                Ok(vec![])
+            }
+            fn checkout_branch(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn create_branch(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn push(&self, _: &str, _: &PushOpts) -> Result<()> {
+                Ok(())
+            }
+            fn fetch(&self) -> Result<()> {
+                Ok(())
+            }
+            fn pull(&self) -> Result<()> {
+                Ok(())
+            }
+            fn rebase_onto(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn rebase_continue(&self) -> Result<()> {
+                Ok(())
+            }
+            fn rebase_skip(&self) -> Result<()> {
+                Ok(())
+            }
+            fn rebase_abort(&self) -> Result<()> {
+                Ok(())
+            }
+            fn conflicts(&self) -> Result<Vec<String>> {
+                Ok(vec![])
+            }
+            fn repo_root(&self) -> &std::path::Path {
+                &self.root
+            }
         }
-        let clean = Clean { root: std::env::temp_dir().join("mygit-app-test-clean") };
+        let clean = Clean {
+            root: std::env::temp_dir().join("mygit-app-test-clean"),
+        };
         let app = App::new(&clean);
         let mut terminal = Terminal::new(TestBackend::new(90, 12)).unwrap();
         terminal.draw(|f| super::ui::render(f, &app)).unwrap();
         let buf = terminal.backend().buffer().clone();
         let text: String = buf.content.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("No changes"), "expected empty state, got: {text}");
+        assert!(
+            text.contains("No changes"),
+            "expected empty state, got: {text}"
+        );
     }
 }

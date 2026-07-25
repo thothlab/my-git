@@ -181,8 +181,7 @@ impl GixEngine {
 
 impl GitEngine for GixEngine {
     fn status(&self) -> Result<Vec<ChangedFile>> {
-        let out = self
-            .git(&["status", "--porcelain", "-z", "--untracked-files=all"])?;
+        let out = self.git(&["status", "--porcelain", "-z", "--untracked-files=all"])?;
         anyhow::ensure!(
             out.status.success(),
             "git status failed: {}",
@@ -251,7 +250,12 @@ impl GitEngine for GixEngine {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
                     .collect();
-                Some(Commit { hash, summary, author, refs })
+                Some(Commit {
+                    hash,
+                    summary,
+                    author,
+                    refs,
+                })
             })
             .collect();
         Ok(commits)
@@ -288,9 +292,12 @@ impl GitEngine for GixEngine {
                 st.current_branch = Some(format!("detached@{}", h.trim()));
             }
         }
-        if let Ok(up) =
-            self.git_check(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
-        {
+        if let Ok(up) = self.git_check(&[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ]) {
             st.upstream = Some(up.trim().to_string());
             if let Ok(counts) =
                 self.git_check(&["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
@@ -306,7 +313,11 @@ impl GitEngine for GixEngine {
 
     fn branches(&self) -> Result<Vec<String>> {
         let text = self.git_check(&["branch", "--format=%(refname:short)"])?;
-        Ok(text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        Ok(text
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect())
     }
 
     fn checkout_branch(&self, name: &str) -> Result<()> {
@@ -368,7 +379,11 @@ impl GitEngine for GixEngine {
 
     fn conflicts(&self) -> Result<Vec<String>> {
         let text = self.git_check(&["diff", "--name-only", "--diff-filter=U"])?;
-        Ok(text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        Ok(text
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect())
     }
 
     fn repo_root(&self) -> &Path {
@@ -394,7 +409,10 @@ fn parse_porcelain_z(bytes: &[u8]) -> Vec<ChangedFile> {
         if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
             i += 1; // skip the original path of a rename/copy
         }
-        out.push(ChangedFile { path, status: map_status(x, y) });
+        out.push(ChangedFile {
+            path,
+            status: map_status(x, y),
+        });
     }
     out
 }
@@ -437,8 +455,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let run = |args: &[&str]| {
-            let ok = Command::new("git").current_dir(&dir).args(args).output().unwrap();
-            assert!(ok.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ok.stderr));
+            let ok = Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                ok.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&ok.stderr)
+            );
         };
         run(&["init", "-q"]);
         run(&["config", "user.email", "t@t"]);
@@ -455,8 +481,10 @@ mod tests {
     #[test]
     fn parses_porcelain_statuses() {
         let raw = b" M a.rs\0?? b.txt\0A  c.rs\0 D d.rs\0UU e.rs\0";
-        let got: Vec<(String, FileStatus)> =
-            parse_porcelain_z(raw).into_iter().map(|f| (f.path, f.status)).collect();
+        let got: Vec<(String, FileStatus)> = parse_porcelain_z(raw)
+            .into_iter()
+            .map(|f| (f.path, f.status))
+            .collect();
         assert_eq!(
             got,
             vec![
@@ -491,7 +519,9 @@ mod tests {
         std::fs::write(dir.join("hello.txt"), b"hi").unwrap();
         let engine = GixEngine::discover(&dir).unwrap();
         let files = engine.status().unwrap();
-        assert!(files.iter().any(|f| f.path == "hello.txt" && f.status == FileStatus::Untracked));
+        assert!(files
+            .iter()
+            .any(|f| f.path == "hello.txt" && f.status == FileStatus::Untracked));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -500,7 +530,9 @@ mod tests {
         let dir = init_repo();
         std::fs::write(dir.join("a.txt"), b"one").unwrap();
         let engine = GixEngine::discover(&dir).unwrap();
-        let hash = engine.commit(&["a.txt".to_string()], "first", false).unwrap();
+        let hash = engine
+            .commit(&["a.txt".to_string()], "first", false)
+            .unwrap();
         assert_eq!(hash.len(), 40);
         let log = engine.log(10).unwrap();
         assert_eq!(log.len(), 1);
@@ -537,7 +569,10 @@ mod tests {
         store.sync(&engine.status().unwrap());
         store.persist(&sp).unwrap();
         let reloaded = ChangelistStore::load(&sp).unwrap();
-        assert!(reloaded.changelists.iter().any(|c| c.files.iter().any(|f| f == "b.txt")));
+        assert!(reloaded
+            .changelists
+            .iter()
+            .any(|c| c.files.iter().any(|f| f == "b.txt")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

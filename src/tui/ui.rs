@@ -38,7 +38,10 @@ pub fn render(f: &mut Frame, app: &App<'_>) {
 fn render_status_bar(f: &mut Frame, app: &App<'_>, area: Rect) {
     let t = &app.theme;
     let b = &app.branch;
-    let branch = b.current_branch.clone().unwrap_or_else(|| "(no branch)".into());
+    let branch = b
+        .current_branch
+        .clone()
+        .unwrap_or_else(|| "(no branch)".into());
     let mut spans = vec![Span::styled(
         format!(" {branch} "),
         Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
@@ -232,7 +235,10 @@ fn render_confirm(f: &mut Frame, app: &App<'_>, area: Rect, c: &ConfirmState) {
     f.render_widget(block, rect);
     let lines = vec![
         Line::from(""),
-        Line::from(Span::styled(format!("  {}", c.body), Style::default().fg(t.fg))),
+        Line::from(Span::styled(
+            format!("  {}", c.body),
+            Style::default().fg(t.fg),
+        )),
         Line::from(""),
         Line::from(Span::styled(
             "  [y] confirm    [n / Esc] cancel (default)",
@@ -372,5 +378,10 @@ fn panel_block(title: &str, focused: bool, t: &Theme) -> Block<'static> {
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.y + area.height.saturating_sub(h) / 2;
-    Rect { x, y, width: w, height: h }
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
 }
