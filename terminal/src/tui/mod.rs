@@ -24,7 +24,8 @@ pub enum Focus {
 
 pub enum Overlay {
     None,
-    Help,
+    /// Interactive help / command palette; the `usize` is the selected row.
+    Help(usize),
     Input(InputState),
     Picker(PickerState),
     Confirm(ConfirmState),
@@ -287,7 +288,7 @@ impl<'e> App<'e> {
             return;
         }
         match self.overlay {
-            Overlay::Help => self.overlay = Overlay::None,
+            Overlay::Help(_) => self.handle_help_key(key),
             Overlay::Input(_) => self.handle_input_key(key),
             Overlay::Picker(_) => self.handle_picker_key(key),
             Overlay::Confirm(_) => self.handle_confirm_key(key),
@@ -324,7 +325,7 @@ impl<'e> App<'e> {
                 self.refresh();
                 self.message = "refreshed".into();
             }
-            Help => self.overlay = Overlay::Help,
+            Help => self.overlay = Overlay::Help(0),
             NewList => self.open_new_list(),
             RenameList => self.open_rename_list(),
             DeleteList => self.delete_current_list(),
@@ -594,6 +595,43 @@ impl<'e> App<'e> {
             });
         } else {
             self.message = "no file selected".into();
+        }
+    }
+
+    /// Interactive help / command palette: ↑↓ (or j/k) move, Enter runs the
+    /// selected action, Esc/q/? close.
+    fn handle_help_key(&mut self, key: event::KeyEvent) {
+        use event::KeyCode;
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Overlay::Help(c) = &mut self.overlay {
+                    *c = c.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Overlay::Help(c) = &mut self.overlay {
+                    if *c + 1 < keymap::BINDINGS.len() {
+                        *c += 1;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                let action = match self.overlay {
+                    Overlay::Help(c) => keymap::BINDINGS.get(c).map(|(_, a)| *a),
+                    _ => None,
+                };
+                self.overlay = Overlay::None;
+                // Don't let the palette re-open itself.
+                if let Some(a) = action {
+                    if !matches!(a, Action::Help) {
+                        self.on_action(a);
+                    }
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                self.overlay = Overlay::None;
+            }
+            _ => {}
         }
     }
 
@@ -1126,7 +1164,32 @@ mod tests {
         assert!(app.marked.contains("a.rs"));
 
         app.on_action(Action::Help);
-        assert!(matches!(app.overlay, Overlay::Help));
+        assert!(matches!(app.overlay, Overlay::Help(_)));
+    }
+
+    #[test]
+    fn help_palette_runs_selected_action() {
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-app-test-help"),
+        };
+        let mut app = App::new(&mock);
+        app.on_action(Action::Help);
+        assert!(matches!(app.overlay, Overlay::Help(0)));
+
+        // Move down to the "new changelist" row and run it with Enter.
+        let target = keymap::BINDINGS
+            .iter()
+            .position(|(_, a)| *a == Action::NewList)
+            .unwrap();
+        for _ in 0..target {
+            app.handle_key(key(event::KeyCode::Down));
+        }
+        assert!(matches!(app.overlay, Overlay::Help(c) if c == target));
+        app.handle_key(key(event::KeyCode::Enter));
+        assert!(
+            matches!(app.overlay, Overlay::Input(_)),
+            "Enter on 'new changelist' opens the name input"
+        );
     }
 
     #[test]
@@ -1510,7 +1573,7 @@ mod tests {
             .any(|r| matches!(r, Row::File { path, .. } if path == "new.txt")));
 
         // Auto-refresh must not run while an overlay is open.
-        app.overlay = Overlay::Help;
+        app.overlay = Overlay::Help(0);
         std::fs::write(dir.join("another.txt"), "y").unwrap();
         app.auto_refresh();
         assert!(

@@ -27,7 +27,7 @@ pub fn render(f: &mut Frame, app: &App<'_>) {
     render_main(f, app, rows[1]);
     render_footer(f, app, rows[2]);
     match &app.overlay {
-        Overlay::Help => render_help(f, app, area),
+        Overlay::Help(cursor) => render_help(f, app, area, *cursor),
         Overlay::Input(s) => render_input(f, app, area, s),
         Overlay::Picker(p) => render_picker(f, app, area, p),
         Overlay::Confirm(c) => render_confirm(f, app, area, c),
@@ -268,7 +268,7 @@ fn render_footer(f: &mut Frame, app: &App<'_>, area: Rect) {
     let hints = if app.right == RightView::Log {
         "[v]revert [x]reset [j/k]nav [L]back [?]help [q]quit"
     } else {
-        "[space]mark [m]move [c]commit [u]rollback [P]push [R]rebase [L]log [?]help [q]quit"
+        "[n]new [m]move [s]active [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [?]help [q]quit"
     };
     let line = if app.message.is_empty() {
         Line::from(Span::styled(hints, Style::default().fg(t.fg_muted)))
@@ -281,7 +281,7 @@ fn render_footer(f: &mut Frame, app: &App<'_>, area: Rect) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-fn render_help(f: &mut Frame, app: &App<'_>, area: Rect) {
+fn render_help(f: &mut Frame, app: &App<'_>, area: Rect, cursor: usize) {
     let t = &app.theme;
     let w = 48.min(area.width.saturating_sub(4));
     let h = (BINDINGS.len() as u16 + 4).min(area.height.saturating_sub(2));
@@ -295,16 +295,21 @@ fn render_help(f: &mut Frame, app: &App<'_>, area: Rect) {
     f.render_widget(block, rect);
     let mut lines: Vec<Line> = BINDINGS
         .iter()
-        .map(|(key, action)| {
-            Line::from(vec![
-                Span::styled(format!(" {key:<6}"), Style::default().fg(t.accent)),
+        .enumerate()
+        .map(|(i, (key, action))| {
+            let mut line = Line::from(vec![
+                Span::styled(format!(" {key:<10}"), Style::default().fg(t.accent)),
                 Span::styled(action.label(), Style::default().fg(t.fg)),
-            ])
+            ]);
+            if i == cursor {
+                line = line.style(Style::default().bg(t.sel_bg));
+            }
+            line
         })
         .collect();
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        " any key to close",
+        " ↑↓ select · Enter run · Esc close",
         Style::default().fg(t.fg_muted),
     )));
     f.render_widget(Paragraph::new(lines), inner);
