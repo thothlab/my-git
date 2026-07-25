@@ -4,7 +4,7 @@
 
 use super::keymap::BINDINGS;
 use super::theme::Theme;
-use super::{App, ConfirmState, Focus, InputState, Overlay, PickerState, Row};
+use super::{App, ConfirmState, Focus, InputState, Overlay, PickerState, Row, StashState};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -62,8 +62,41 @@ pub fn render(f: &mut Frame, app: &App<'_>) {
         Overlay::Input(s) => render_input(f, app, area, s),
         Overlay::Picker(p) => render_picker(f, app, area, p),
         Overlay::Confirm(c) => render_confirm(f, app, area, c),
+        Overlay::Stashes(s) => render_stashes(f, app, area, s),
         Overlay::None => {}
     }
+}
+
+fn render_stashes(f: &mut Frame, app: &App<'_>, area: Rect, s: &StashState) {
+    let t = &app.theme;
+    let w = 66.min(area.width.saturating_sub(4));
+    let h = (s.items.len() as u16 + 4).min(area.height.saturating_sub(2));
+    let rect = centered(area, w, h);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(Line::from(" Stashes "))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.accent));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let mut lines: Vec<Line> = s
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let mut line = Line::from(format!("  {}", item.label));
+            if i == s.cursor {
+                line = line.style(Style::default().bg(t.sel_bg).fg(t.accent));
+            }
+            line
+        })
+        .collect();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Enter/p pop · a apply · d drop · Esc close",
+        Style::default().fg(t.fg_muted),
+    )));
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_log_help(f: &mut Frame, app: &App<'_>, area: Rect) {
@@ -81,6 +114,7 @@ fn render_log_help(f: &mut Frame, app: &App<'_>, area: Rect) {
         ("u", "undo the last reword/squash"),
         ("v", "revert the selected commit"),
         ("x", "reset to the selected commit"),
+        ("S", "stashes (create / apply / pop / drop)"),
         (
             "mouse",
             "click to select · click a folder to fold · wheel scrolls",
@@ -281,9 +315,9 @@ fn diff_line(l: &str, t: &Theme) -> Line<'static> {
 fn render_footer(f: &mut Frame, app: &App<'_>, area: Rect) {
     let t = &app.theme;
     let hints = if app.log.is_some() {
-        "[c]checkout [P]push [R]rebase [b]branch [r]reword [s]squash [u]undo [v]revert [x]reset [?]help [L/Esc]back"
+        "[c]checkout [P]push [R]rebase [b]branch [r]reword [s]squash [u]undo [v]revert [x]reset [S]stash [?]help [L/Esc]back"
     } else {
-        "[n]new [m]move [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [?]help [q]quit"
+        "[n]new [m]move [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [S]stash [?]help [q]quit"
     };
     let line = if app.message.is_empty() {
         Line::from(Span::styled(hints, Style::default().fg(t.fg_muted)))

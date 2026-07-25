@@ -40,6 +40,8 @@ pub enum LogAction {
     Squash(String),
     /// Undo the last history rewrite (reword/squash).
     Undo,
+    /// Open the stash manager.
+    Stashes,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -298,6 +300,7 @@ impl LogView {
                 }
             }
             KeyCode::Char('u') => return LogAction::Undo,
+            KeyCode::Char('S') => return LogAction::Stashes,
             KeyCode::Char('c') => {
                 if let Some(t) = self.checkout_target() {
                     return LogAction::Checkout(t);

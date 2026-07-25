@@ -128,6 +128,11 @@ pub trait GitEngine {
     fn has_backup(&self) -> bool;
     /// Reset HEAD back to the saved undo point.
     fn restore_backup(&self) -> Result<()>;
+    /// List stashes as `(selector, subject)` pairs, e.g. `("stash@{0}", "On main: wip")`.
+    fn stash_list(&self) -> Result<Vec<(String, String)>>;
+    fn stash_apply(&self, stash: &str) -> Result<()>;
+    fn stash_pop(&self, stash: &str) -> Result<()>;
+    fn stash_drop(&self, stash: &str) -> Result<()>;
     fn rebase_onto(&self, target: &str) -> Result<()>;
     fn rebase_continue(&self) -> Result<()>;
     fn rebase_skip(&self) -> Result<()>;
@@ -504,6 +509,34 @@ impl GitEngine for GixEngine {
         Ok(())
     }
 
+    fn stash_list(&self) -> Result<Vec<(String, String)>> {
+        let text = self.git_check(&["stash", "list", "--format=%gd%x1f%s"])?;
+        Ok(text
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.splitn(2, '\u{1f}');
+                let sel = f.next()?.trim().to_string();
+                let msg = f.next().unwrap_or("").trim().to_string();
+                (!sel.is_empty()).then_some((sel, msg))
+            })
+            .collect())
+    }
+
+    fn stash_apply(&self, stash: &str) -> Result<()> {
+        self.git_check(&["stash", "apply", stash])?;
+        Ok(())
+    }
+
+    fn stash_pop(&self, stash: &str) -> Result<()> {
+        self.git_check(&["stash", "pop", stash])?;
+        Ok(())
+    }
+
+    fn stash_drop(&self, stash: &str) -> Result<()> {
+        self.git_check(&["stash", "drop", stash])?;
+        Ok(())
+    }
+
     fn reword_commit(&self, hash: &str, message: &str) -> Result<()> {
         anyhow::ensure!(self.is_on_head(hash), "commit is not on the current branch");
         let target = self.git_check(&["rev-parse", hash])?.trim().to_string();
@@ -779,6 +812,27 @@ mod tests {
         assert_eq!(log.len(), 2, "3 commits -> 2 after squash");
         assert!(log.iter().any(|c| c.summary == "c2 + c3"));
         assert!(log.iter().any(|c| c.summary == "c1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stash_roundtrip() {
+        let dir = init_repo();
+        let engine = GixEngine::discover(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "1").unwrap();
+        engine.commit(&["a.txt".to_string()], "c1", false).unwrap();
+        std::fs::write(dir.join("a.txt"), "2").unwrap();
+        engine.stash_push("wip").unwrap();
+        assert!(
+            engine.status().unwrap().is_empty(),
+            "stash cleared the tree"
+        );
+        let list = engine.stash_list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].1.contains("wip"), "named stash: {}", list[0].1);
+        engine.stash_pop(&list[0].0).unwrap();
+        assert!(engine.status().unwrap().iter().any(|f| f.path == "a.txt"));
+        assert!(engine.stash_list().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

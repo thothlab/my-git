@@ -34,6 +34,19 @@ pub enum Overlay {
     Input(InputState),
     Picker(PickerState),
     Confirm(ConfirmState),
+    /// Stash manager: list named stashes; create / apply / pop / drop.
+    Stashes(StashState),
+}
+
+pub struct StashState {
+    pub cursor: usize,
+    pub items: Vec<StashItem>,
+}
+
+pub struct StashItem {
+    /// `"__new__"` for the create row, else a stash selector like `stash@{0}`.
+    pub id: String,
+    pub label: String,
 }
 
 /// Destructive-action confirmation. Following the gwm-cli lesson, the default is
@@ -79,6 +92,8 @@ pub enum InputPurpose {
     StashName(String),
     /// Commit all changes with this message, then checkout the given branch.
     CommitAndSwitch(String),
+    /// Stash the working tree under this name (from the stash manager).
+    StashCreate,
 }
 
 /// A choose-one list overlay (move target, active list; branch/reset in later waves).
@@ -313,6 +328,7 @@ impl<'e> App<'e> {
             Overlay::Input(_) => self.handle_input_key(key),
             Overlay::Picker(_) => self.handle_picker_key(key),
             Overlay::Confirm(_) => self.handle_confirm_key(key),
+            Overlay::Stashes(_) => self.handle_stashes_key(key),
             Overlay::None => {
                 if self.log.is_some() {
                     self.handle_log_key_event(key);
@@ -432,7 +448,90 @@ impl<'e> App<'e> {
             Fetch => self.fetch_action(),
             Branches => self.open_branches(),
             Rebase => self.open_rebase(),
+            Stashes => self.open_stashes(),
             Confirm | Cancel => {} // only meaningful inside overlays
+        }
+    }
+
+    // ----- stash manager ------------------------------------------------------
+
+    fn open_stashes(&mut self) {
+        let mut items = vec![StashItem {
+            id: "__new__".into(),
+            label: "＋ Stash current changes…".into(),
+        }];
+        for (sel, msg) in self.engine.stash_list().unwrap_or_default() {
+            items.push(StashItem {
+                id: sel.clone(),
+                label: format!("{sel}  {msg}"),
+            });
+        }
+        self.overlay = Overlay::Stashes(StashState { cursor: 0, items });
+    }
+
+    fn selected_stash(&self) -> Option<String> {
+        match &self.overlay {
+            Overlay::Stashes(s) => s.items.get(s.cursor).map(|i| i.id.clone()),
+            _ => None,
+        }
+    }
+
+    fn handle_stashes_key(&mut self, key: event::KeyEvent) {
+        use event::KeyCode;
+        match key.code {
+            KeyCode::Esc => self.overlay = Overlay::None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Overlay::Stashes(s) = &mut self.overlay {
+                    s.cursor = s.cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Overlay::Stashes(s) = &mut self.overlay {
+                    if s.cursor + 1 < s.items.len() {
+                        s.cursor += 1;
+                    }
+                }
+            }
+            KeyCode::Enter => match self.selected_stash().as_deref() {
+                Some("__new__") => {
+                    self.overlay = Overlay::Input(InputState {
+                        title: "Stash name".into(),
+                        value: String::new(),
+                        purpose: InputPurpose::StashCreate,
+                    });
+                }
+                Some(_) => self.stash_op("pop"),
+                None => {}
+            },
+            KeyCode::Char('p') => self.stash_op("pop"),
+            KeyCode::Char('a') => self.stash_op("apply"),
+            KeyCode::Char('d') => self.stash_op("drop"),
+            _ => {}
+        }
+    }
+
+    fn stash_op(&mut self, kind: &str) {
+        let Some(id) = self.selected_stash() else {
+            return;
+        };
+        if id == "__new__" {
+            return; // create is via Enter only
+        }
+        let r = match kind {
+            "pop" => self.engine.stash_pop(&id),
+            "apply" => self.engine.stash_apply(&id),
+            _ => self.engine.stash_drop(&id),
+        };
+        match r {
+            Ok(()) => {
+                self.refresh();
+                self.open_stashes(); // re-list, stay in the manager
+                self.message = format!("stash {kind}");
+            }
+            Err(e) => {
+                self.overlay = Overlay::None;
+                self.message = e.to_string();
+            }
         }
     }
 
@@ -630,6 +729,7 @@ impl<'e> App<'e> {
             LogAction::Reword(hash) => self.open_reword(hash),
             LogAction::Squash(hash) => self.open_squash(hash),
             LogAction::Undo => self.do_undo(),
+            LogAction::Stashes => self.open_stashes(),
         }
     }
 
@@ -1229,6 +1329,23 @@ impl<'e> App<'e> {
                     Err(e) => self.message = e.to_string(),
                 }
             }
+            InputPurpose::StashCreate => {
+                if value.is_empty() {
+                    self.message = "stash name required".into();
+                    return;
+                }
+                match self.engine.stash_push(&value) {
+                    Ok(()) => {
+                        self.refresh();
+                        self.open_stashes();
+                        self.message = "stashed".into();
+                    }
+                    Err(e) => {
+                        self.overlay = Overlay::None;
+                        self.message = e.to_string();
+                    }
+                }
+            }
         }
     }
 
@@ -1490,6 +1607,18 @@ mod tests {
         fn restore_backup(&self) -> Result<()> {
             Ok(())
         }
+        fn stash_list(&self) -> Result<Vec<(String, String)>> {
+            Ok(vec![])
+        }
+        fn stash_apply(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn stash_pop(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn stash_drop(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
         fn rebase_onto(&self, _: &str) -> Result<()> {
             Ok(())
         }
@@ -1713,6 +1842,24 @@ mod tests {
             "changes were stashed away"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stashes_overlay_open_and_create() {
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-app-test-stash"),
+        };
+        let mut app = App::new(&mock);
+        app.on_action(Action::Stashes);
+        assert!(matches!(app.overlay, Overlay::Stashes(_)));
+        // Enter on the "＋ create" row opens the name input.
+        app.handle_key(key(event::KeyCode::Enter));
+        assert!(matches!(app.overlay, Overlay::Input(_)));
+        for c in "wip".chars() {
+            app.handle_key(key_char(c));
+        }
+        app.handle_key(key(event::KeyCode::Enter)); // stash_push (mock) -> re-list
+        assert!(matches!(app.overlay, Overlay::Stashes(_)));
     }
 
     #[test]
@@ -2243,6 +2390,18 @@ mod tests {
                 false
             }
             fn restore_backup(&self) -> Result<()> {
+                Ok(())
+            }
+            fn stash_list(&self) -> Result<Vec<(String, String)>> {
+                Ok(vec![])
+            }
+            fn stash_apply(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn stash_pop(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn stash_drop(&self, _: &str) -> Result<()> {
                 Ok(())
             }
             fn rebase_onto(&self, _: &str) -> Result<()> {
