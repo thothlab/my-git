@@ -165,7 +165,9 @@ impl<'e> App<'e> {
         match self.engine.status() {
             Ok(changed) => {
                 self.store.sync(&changed);
-                let _ = self.store.persist(&self.store_path);
+                if let Err(e) = self.store.persist(&self.store_path) {
+                    self.message = format!("⚠ save failed: {e}");
+                }
                 self.status_map = changed.into_iter().map(|f| (f.path, f.status)).collect();
             }
             Err(e) => self.message = format!("git status failed: {e}"),
@@ -664,12 +666,16 @@ impl<'e> App<'e> {
             .collect()
     }
 
-    /// Persist the store and rebuild the view (working tree is unchanged).
+    /// Persist the store and rebuild the view (working tree is unchanged). A
+    /// write failure is surfaced rather than swallowed (ТЗ §5 resilience).
     fn commit_store_change(&mut self, msg: &str) {
-        let _ = self.store.persist(&self.store_path);
+        let persisted = self.store.persist(&self.store_path);
         self.rebuild_rows();
         self.update_diff();
-        self.message = msg.into();
+        self.message = match persisted {
+            Ok(()) => msg.into(),
+            Err(e) => format!("⚠ save failed: {e}"),
+        };
     }
 
     fn handle_input_key(&mut self, key: event::KeyEvent) {

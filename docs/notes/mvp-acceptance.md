@@ -16,7 +16,7 @@ a measurement on the release binary.
 | AC | Criterion | Verified by | Result |
 |----|-----------|-------------|--------|
 | 1 | Grouped display in a repo; clear error outside a repo | `engine::tests` non-repo path + `tui::tests::renders_frame_with_panels_and_content` / `renders_empty_state_when_no_changes` | ✅ |
-| 2 | Move file → persists in `.git/changelists.json`, survives restart, GUI-compatible | `changelists::tests` (schema freeze, GUI-fixture round-trip, first-run) + `tui::tests::changelist_ops_create_move_and_persist` + `engine::tests::…startup_pipeline_persists` | ✅ |
+| 2 | Move file → persists in `.git/changelists.json`, survives restart, GUI-compatible | disk persist+reload: `engine::tests::startup_pipeline_persists_assignments`, `reset_moves_head_and_startup_pipeline_persists`; GUI-schema compat: `changelists::tests` (`schema_freeze`, GUI-fixture round-trip, first-run); move logic: `tui::tests::changelist_ops_create_move_and_persist` (in-memory) | ✅ |
 | 3 | Commit Default; "Not for commit" stays uncommitted | `tui::tests::commit_default_excludes_not_for_commit`, `commit_requires_nonempty_message` | ✅ |
 | 4 | Push new `-u`; update; ahead/behind indicator | `tui::tests::push_new_branch_sets_upstream_and_create_checkout` (bare remote) | ✅ |
 | 5 | Revert + (confirmed) reset from mini-log | `tui::tests::revert_and_reset_from_log`, `rollback_confirm_defaults_to_cancel` | ✅ |
