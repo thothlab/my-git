@@ -71,6 +71,10 @@ pub enum InputPurpose {
     NewBranchFrom(String),
     /// Reword (amend) the HEAD commit message.
     RewordHead,
+    /// Reword an older commit via interactive rebase.
+    RewordCommit(String),
+    /// Squash the given commit into its parent with this combined message.
+    SquashCommit(String),
     /// Stash the working tree under this name, then checkout the given branch.
     StashName(String),
     /// Commit all changes with this message, then checkout the given branch.
@@ -624,6 +628,46 @@ impl<'e> App<'e> {
             }
             LogAction::RebaseOnto(target) => self.log_rebase_onto(&target),
             LogAction::Reword(hash) => self.open_reword(hash),
+            LogAction::Squash(hash) => self.open_squash(hash),
+            LogAction::Undo => self.do_undo(),
+        }
+    }
+
+    fn open_squash(&mut self, hash: String) {
+        if !self.engine.is_on_head(&hash) {
+            self.message = "checkout this branch to edit its history".into();
+            return;
+        }
+        let this = self.engine.commit_body(&hash).unwrap_or_default();
+        let parent = self
+            .engine
+            .commit_body(&format!("{hash}^"))
+            .unwrap_or_default();
+        let value = format!(
+            "{} {}",
+            parent.lines().next().unwrap_or(""),
+            this.lines().next().unwrap_or("")
+        )
+        .trim()
+        .to_string();
+        self.overlay = Overlay::Input(InputState {
+            title: "Squash into parent — combined message".into(),
+            value,
+            purpose: InputPurpose::SquashCommit(hash),
+        });
+    }
+
+    fn do_undo(&mut self) {
+        if !self.engine.has_backup() {
+            self.message = "nothing to undo".into();
+            return;
+        }
+        match self.engine.restore_backup() {
+            Ok(()) => {
+                self.rebuild_log_view();
+                self.message = "undone".into();
+            }
+            Err(e) => self.message = e.to_string(),
         }
     }
 
@@ -701,8 +745,10 @@ impl<'e> App<'e> {
             .ok()
             .and_then(|c| c.into_iter().next())
             .map(|c| c.hash);
-        if head.as_deref() != Some(hash.as_str()) {
-            self.message = "reword of older commits comes in a later phase".into();
+        let is_head = head.as_deref() == Some(hash.as_str());
+        // HEAD is a fast amend; older commits go through interactive rebase.
+        if !is_head && !self.engine.is_on_head(&hash) {
+            self.message = "checkout this branch to edit its history".into();
             return;
         }
         let value = self
@@ -713,10 +759,15 @@ impl<'e> App<'e> {
             .next()
             .unwrap_or("")
             .to_string();
+        let purpose = if is_head {
+            InputPurpose::RewordHead
+        } else {
+            InputPurpose::RewordCommit(hash)
+        };
         self.overlay = Overlay::Input(InputState {
-            title: "Reword last commit".into(),
+            title: "Reword commit".into(),
             value,
-            purpose: InputPurpose::RewordHead,
+            purpose,
         });
     }
 
@@ -1112,6 +1163,40 @@ impl<'e> App<'e> {
                     Err(e) => self.message = e.to_string(),
                 }
             }
+            InputPurpose::RewordCommit(hash) => {
+                if value.is_empty() {
+                    self.message = "commit message required".into();
+                    return;
+                }
+                match self.engine.reword_commit(&hash, &value) {
+                    Ok(()) => {
+                        self.overlay = Overlay::None;
+                        self.rebuild_log_view();
+                        self.message = "reworded (u to undo)".into();
+                    }
+                    Err(e) => {
+                        self.overlay = Overlay::None;
+                        self.message = e.to_string();
+                    }
+                }
+            }
+            InputPurpose::SquashCommit(hash) => {
+                if value.is_empty() {
+                    self.message = "commit message required".into();
+                    return;
+                }
+                match self.engine.squash_into_parent(&hash, &value) {
+                    Ok(()) => {
+                        self.overlay = Overlay::None;
+                        self.rebuild_log_view();
+                        self.message = "squashed (u to undo)".into();
+                    }
+                    Err(e) => {
+                        self.overlay = Overlay::None;
+                        self.message = e.to_string();
+                    }
+                }
+            }
             InputPurpose::StashName(target) => {
                 if value.is_empty() {
                     self.message = "stash name required".into();
@@ -1387,6 +1472,24 @@ mod tests {
         fn stash_push(&self, _: &str) -> Result<()> {
             Ok(())
         }
+        fn is_on_head(&self, _: &str) -> bool {
+            true
+        }
+        fn reword_commit(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn squash_into_parent(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn backup_head(&self) -> Result<()> {
+            Ok(())
+        }
+        fn has_backup(&self) -> bool {
+            false
+        }
+        fn restore_backup(&self) -> Result<()> {
+            Ok(())
+        }
         fn rebase_onto(&self, _: &str) -> Result<()> {
             Ok(())
         }
@@ -1609,6 +1712,40 @@ mod tests {
             engine.status().unwrap().is_empty(),
             "changes were stashed away"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_reword_older_commit_then_undo() {
+        use crate::engine::GixEngine;
+        let dir = init_repo("logreword");
+        let engine = GixEngine::discover(&dir).unwrap();
+        for (f, m) in [("a.txt", "c1"), ("b.txt", "c2"), ("c.txt", "c3")] {
+            std::fs::write(dir.join(f), m).unwrap();
+            engine.commit(&[f.to_string()], m, false).unwrap();
+        }
+        let mut app = App::new(&engine);
+        app.on_action(Action::Log); // Commits focus, newest (c3) selected
+        app.handle_key(key(event::KeyCode::Down)); // -> c2 (older)
+        app.handle_key(key_char('r')); // reword -> interactive-rebase input
+        assert!(matches!(app.overlay, Overlay::Input(_)));
+        for _ in 0..8 {
+            app.handle_key(key(event::KeyCode::Backspace)); // clear prefill
+        }
+        for c in "c2 new".chars() {
+            app.handle_key(key_char(c));
+        }
+        app.handle_key(key(event::KeyCode::Enter));
+        assert!(engine
+            .log(10)
+            .unwrap()
+            .iter()
+            .any(|c| c.summary == "c2 new"));
+
+        app.handle_key(key_char('u')); // undo
+        let log = engine.log(10).unwrap();
+        assert!(log.iter().any(|c| c.summary == "c2"));
+        assert!(!log.iter().any(|c| c.summary == "c2 new"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2088,6 +2225,24 @@ mod tests {
                 Ok(())
             }
             fn stash_push(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn is_on_head(&self, _: &str) -> bool {
+                true
+            }
+            fn reword_commit(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn squash_into_parent(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn backup_head(&self) -> Result<()> {
+                Ok(())
+            }
+            fn has_backup(&self) -> bool {
+                false
+            }
+            fn restore_backup(&self) -> Result<()> {
                 Ok(())
             }
             fn rebase_onto(&self, _: &str) -> Result<()> {

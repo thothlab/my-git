@@ -76,7 +76,9 @@ fn render_log_help(f: &mut Frame, app: &App<'_>, area: Rect) {
         ("R", "rebase current branch onto selected branch"),
         ("P", "push current branch (force-with-lease if diverged)"),
         ("b", "new branch from the selected commit"),
-        ("r", "reword the last commit (amend)"),
+        ("r", "reword commit (amend HEAD / rebase older)"),
+        ("s", "squash the selected commit into its parent"),
+        ("u", "undo the last reword/squash"),
         ("v", "revert the selected commit"),
         ("x", "reset to the selected commit"),
         (
@@ -279,7 +281,7 @@ fn diff_line(l: &str, t: &Theme) -> Line<'static> {
 fn render_footer(f: &mut Frame, app: &App<'_>, area: Rect) {
     let t = &app.theme;
     let hints = if app.log.is_some() {
-        "[Tab]pane [c]checkout [P]push [b]branch [R]rebase [r]reword [v]revert [x]reset [?]help [L/Esc]back"
+        "[c]checkout [P]push [R]rebase [b]branch [r]reword [s]squash [u]undo [v]revert [x]reset [?]help [L/Esc]back"
     } else {
         "[n]new [m]move [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [?]help [q]quit"
     };

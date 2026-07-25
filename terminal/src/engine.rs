@@ -114,6 +114,20 @@ pub trait GitEngine {
     fn pull(&self) -> Result<()>;
     /// Stash the working tree (incl. untracked) under a name — the "shelve" op.
     fn stash_push(&self, message: &str) -> Result<()>;
+    /// True if `hash` is reachable from HEAD (on the current branch's history).
+    fn is_on_head(&self, hash: &str) -> bool;
+    /// Reword (change the message of) any commit on the current branch via an
+    /// interactive rebase. Saves an undo point first.
+    fn reword_commit(&self, hash: &str, message: &str) -> Result<()>;
+    /// Squash a commit into its parent (message = the combined message). Saves an
+    /// undo point first.
+    fn squash_into_parent(&self, hash: &str, message: &str) -> Result<()>;
+    /// Save the current HEAD as the undo point before a history rewrite.
+    fn backup_head(&self) -> Result<()>;
+    /// Whether an undo point exists.
+    fn has_backup(&self) -> bool;
+    /// Reset HEAD back to the saved undo point.
+    fn restore_backup(&self) -> Result<()>;
     fn rebase_onto(&self, target: &str) -> Result<()>;
     fn rebase_continue(&self) -> Result<()>;
     fn rebase_skip(&self) -> Result<()>;
@@ -171,6 +185,55 @@ impl GixEngine {
         self.git_check(&["rev-parse", "--absolute-git-dir"])
             .ok()
             .map(|s| PathBuf::from(s.trim()))
+    }
+
+    fn write_temp(&self, name: &str, content: &str) -> Result<PathBuf> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("mygit-{}-{n}-{name}", std::process::id()));
+        std::fs::write(&p, content).with_context(|| format!("writing {}", p.display()))?;
+        Ok(p)
+    }
+
+    /// Run a non-interactive `git rebase -i` by feeding a prebuilt todo file via
+    /// `GIT_SEQUENCE_EDITOR=cp <todo>` and (optionally) a commit message via
+    /// `GIT_EDITOR=cp <msg>`. On failure the rebase is aborted so the tree is
+    /// left clean.
+    fn run_rebase_todo(&self, base: &str, todo: &str, message: Option<&str>) -> Result<()> {
+        let todo_path = self.write_temp("rebase-todo", todo)?;
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(&self.root)
+            .env(
+                "GIT_SEQUENCE_EDITOR",
+                format!("cp \"{}\"", todo_path.display()),
+            )
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(["rebase", "-i", "--autostash", base]);
+        let msg_path = match message {
+            Some(m) => {
+                let p = self.write_temp("rebase-msg", m)?;
+                cmd.env("GIT_EDITOR", format!("cp \"{}\"", p.display()));
+                Some(p)
+            }
+            None => {
+                cmd.env("GIT_EDITOR", "true");
+                None
+            }
+        };
+        let out = cmd.output().context("running git rebase -i")?;
+        let _ = std::fs::remove_file(&todo_path);
+        if let Some(p) = &msg_path {
+            let _ = std::fs::remove_file(p);
+        }
+        if !out.status.success() {
+            let _ = self.git(&["rebase", "--abort"]);
+            anyhow::bail!(
+                "rebase failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
     }
 
     fn detect_rebase(&self) -> Option<RebaseState> {
@@ -418,6 +481,73 @@ impl GitEngine for GixEngine {
         Ok(())
     }
 
+    fn is_on_head(&self, hash: &str) -> bool {
+        self.git(&["merge-base", "--is-ancestor", hash, "HEAD"])
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn backup_head(&self) -> Result<()> {
+        self.git_check(&["update-ref", "refs/mygit/undo", "HEAD"])?;
+        Ok(())
+    }
+
+    fn has_backup(&self) -> bool {
+        self.git(&["rev-parse", "--verify", "--quiet", "refs/mygit/undo"])
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn restore_backup(&self) -> Result<()> {
+        anyhow::ensure!(self.has_backup(), "nothing to undo");
+        self.git_check(&["reset", "--hard", "refs/mygit/undo"])?;
+        Ok(())
+    }
+
+    fn reword_commit(&self, hash: &str, message: &str) -> Result<()> {
+        anyhow::ensure!(self.is_on_head(hash), "commit is not on the current branch");
+        let target = self.git_check(&["rev-parse", hash])?.trim().to_string();
+        let base = format!("{target}^");
+        anyhow::ensure!(
+            self.git(&["rev-parse", "--verify", "--quiet", &base])?
+                .status
+                .success(),
+            "cannot reword the root commit here"
+        );
+        let list = self.git_check(&["rev-list", "--reverse", &format!("{base}..HEAD")])?;
+        let mut todo = String::new();
+        for h in list.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let action = if h == target { "reword" } else { "pick" };
+            todo.push_str(&format!("{action} {h}\n"));
+        }
+        self.backup_head()?;
+        self.run_rebase_todo(&base, &todo, Some(message))
+    }
+
+    fn squash_into_parent(&self, hash: &str, message: &str) -> Result<()> {
+        anyhow::ensure!(self.is_on_head(hash), "commit is not on the current branch");
+        let target = self.git_check(&["rev-parse", hash])?.trim().to_string();
+        let parent = self
+            .git_check(&["rev-parse", &format!("{target}^")])?
+            .trim()
+            .to_string();
+        let base = format!("{parent}^");
+        anyhow::ensure!(
+            self.git(&["rev-parse", "--verify", "--quiet", &base])?
+                .status
+                .success(),
+            "cannot squash into the root commit here"
+        );
+        let list = self.git_check(&["rev-list", "--reverse", &format!("{base}..HEAD")])?;
+        let mut todo = String::new();
+        for h in list.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let action = if h == target { "squash" } else { "pick" };
+            todo.push_str(&format!("{action} {h}\n"));
+        }
+        self.backup_head()?;
+        self.run_rebase_todo(&base, &todo, Some(message))
+    }
+
     fn rebase_onto(&self, target: &str) -> Result<()> {
         self.git_check(&["rebase", target])?;
         Ok(())
@@ -606,6 +736,49 @@ mod tests {
         assert!(bs.upstream.is_none());
         assert!(bs.rebase.is_none());
         assert!(!bs.detached);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn three_commits(engine: &GixEngine, dir: &Path) {
+        for (f, m) in [("a.txt", "c1"), ("b.txt", "c2"), ("c.txt", "c3")] {
+            std::fs::write(dir.join(f), m).unwrap();
+            engine.commit(&[f.to_string()], m, false).unwrap();
+        }
+    }
+
+    #[test]
+    fn reword_older_commit_and_undo() {
+        let dir = init_repo();
+        let engine = GixEngine::discover(&dir).unwrap();
+        three_commits(&engine, &dir);
+        let c2 = engine.log(10).unwrap()[1].hash.clone(); // [c3, c2, c1]
+        engine.reword_commit(&c2, "c2 reworded").unwrap();
+        let log = engine.log(10).unwrap();
+        assert_eq!(log.len(), 3, "reword keeps the commit count");
+        assert!(log.iter().any(|c| c.summary == "c2 reworded"));
+        assert!(log.iter().any(|c| c.summary == "c1"));
+        assert!(log.iter().any(|c| c.summary == "c3"));
+        // undo restores the original message
+        engine.restore_backup().unwrap();
+        let log = engine.log(10).unwrap();
+        assert!(log.iter().any(|c| c.summary == "c2"));
+        assert!(!log.iter().any(|c| c.summary == "c2 reworded"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn squash_commit_into_parent() {
+        let dir = init_repo();
+        let engine = GixEngine::discover(&dir).unwrap();
+        three_commits(&engine, &dir);
+        // Squash c3 into c2 (c2's parent c1 is the root, so squashing c2 itself
+        // isn't supported — squashing into a non-root parent is).
+        let c3 = engine.log(10).unwrap()[0].hash.clone();
+        engine.squash_into_parent(&c3, "c2 + c3").unwrap();
+        let log = engine.log(10).unwrap();
+        assert_eq!(log.len(), 2, "3 commits -> 2 after squash");
+        assert!(log.iter().any(|c| c.summary == "c2 + c3"));
+        assert!(log.iter().any(|c| c.summary == "c1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

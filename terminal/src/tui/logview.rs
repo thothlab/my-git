@@ -36,6 +36,10 @@ pub enum LogAction {
     RebaseOnto(String),
     /// Reword (amend the message of) the given commit.
     Reword(String),
+    /// Squash the given commit into its parent.
+    Squash(String),
+    /// Undo the last history rewrite (reword/squash).
+    Undo,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -288,6 +292,12 @@ impl LogView {
                     return LogAction::NewBranchFrom(h);
                 }
             }
+            KeyCode::Char('s') => {
+                if let Some(h) = self.selected_commit_hash() {
+                    return LogAction::Squash(h);
+                }
+            }
+            KeyCode::Char('u') => return LogAction::Undo,
             KeyCode::Char('c') => {
                 if let Some(t) = self.checkout_target() {
                     return LogAction::Checkout(t);
