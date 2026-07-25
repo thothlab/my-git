@@ -4,7 +4,7 @@
 
 use super::keymap::BINDINGS;
 use super::theme::Theme;
-use super::{App, Focus, Overlay, Row};
+use super::{App, Focus, InputState, Overlay, PickerState, Row};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -26,8 +26,11 @@ pub fn render(f: &mut Frame, app: &App<'_>) {
     render_status_bar(f, app, rows[0]);
     render_main(f, app, rows[1]);
     render_footer(f, app, rows[2]);
-    if app.overlay == Overlay::Help {
-        render_help(f, app, area);
+    match &app.overlay {
+        Overlay::Help => render_help(f, app, area),
+        Overlay::Input(s) => render_input(f, app, area, s),
+        Overlay::Picker(p) => render_picker(f, app, area, p),
+        Overlay::None => {}
     }
 }
 
@@ -220,6 +223,63 @@ fn render_help(f: &mut Frame, app: &App<'_>, area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " any key to close",
+        Style::default().fg(t.fg_muted),
+    )));
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_input(f: &mut Frame, app: &App<'_>, area: Rect, s: &InputState) {
+    let t = &app.theme;
+    let w = 50.min(area.width.saturating_sub(4));
+    let rect = centered(area, w, 5);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(Line::from(format!(" {} ", s.title)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.accent));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(t.accent)),
+            Span::styled(format!("{}\u{2588}", s.value), Style::default().fg(t.fg)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Enter: confirm   Esc: cancel",
+            Style::default().fg(t.fg_muted),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_picker(f: &mut Frame, app: &App<'_>, area: Rect, p: &PickerState) {
+    let t = &app.theme;
+    let w = 46.min(area.width.saturating_sub(4));
+    let h = (p.items.len() as u16 + 4).min(area.height.saturating_sub(2));
+    let rect = centered(area, w, h);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(Line::from(format!(" {} ", p.title)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.accent));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let mut lines: Vec<Line> = p
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let mut line = Line::from(format!("  {}", item.label));
+            if i == p.cursor {
+                line = line.style(Style::default().bg(t.sel_bg).fg(t.accent));
+            }
+            line
+        })
+        .collect();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " ↑↓ select   Enter: confirm   Esc: cancel",
         Style::default().fg(t.fg_muted),
     )));
     f.render_widget(Paragraph::new(lines), inner);

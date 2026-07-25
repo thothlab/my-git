@@ -21,10 +21,43 @@ pub enum Focus {
     Detail,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
     None,
     Help,
+    Input(InputState),
+    Picker(PickerState),
+}
+
+/// Single-line text entry (new/rename changelist; commit message in a later wave).
+pub struct InputState {
+    pub title: String,
+    pub value: String,
+    pub purpose: InputPurpose,
+}
+
+#[derive(Clone)]
+pub enum InputPurpose {
+    NewList,
+    RenameList(String),
+}
+
+/// A choose-one list overlay (move target, active list; branch/reset in later waves).
+pub struct PickerState {
+    pub title: String,
+    pub items: Vec<PickerItem>,
+    pub cursor: usize,
+    pub purpose: PickerPurpose,
+}
+
+pub struct PickerItem {
+    pub label: String,
+    pub id: String,
+}
+
+#[derive(Clone)]
+pub enum PickerPurpose {
+    SetActive,
+    MoveFiles(Vec<String>),
 }
 
 /// A rendered row in the Changes panel: a changelist header or a file under it.
@@ -158,14 +191,18 @@ impl<'e> App<'e> {
     }
 
     fn handle_key(&mut self, key: event::KeyEvent) {
-        if self.overlay == Overlay::Help {
-            if key.kind != event::KeyEventKind::Release {
-                self.overlay = Overlay::None;
-            }
+        if key.kind == event::KeyEventKind::Release {
             return;
         }
-        if let Some(action) = resolve(key) {
-            self.on_action(action);
+        match self.overlay {
+            Overlay::Help => self.overlay = Overlay::None,
+            Overlay::Input(_) => self.handle_input_key(key),
+            Overlay::Picker(_) => self.handle_picker_key(key),
+            Overlay::None => {
+                if let Some(action) = resolve(key) {
+                    self.on_action(action);
+                }
+            }
         }
     }
 
@@ -188,8 +225,195 @@ impl<'e> App<'e> {
                 self.message = "refreshed".into();
             }
             Help => self.overlay = Overlay::Help,
-            // Operations land in later waves; announce so the key is discoverable.
+            NewList => self.open_new_list(),
+            RenameList => self.open_rename_list(),
+            DeleteList => self.delete_current_list(),
+            SetActive => self.open_set_active(),
+            MoveFiles => self.open_move_files(),
+            // Git operations land in later waves; announce so the key is discoverable.
             other => self.message = format!("{}: следующая волна", other.label()),
+        }
+    }
+
+    // ----- changelist operations (Task 05) -------------------------------------
+
+    /// The changelist index for the row under the cursor (header or file).
+    fn current_list(&self) -> Option<usize> {
+        match self.rows.get(self.cursor) {
+            Some(Row::Header { list }) | Some(Row::File { list, .. }) => Some(*list),
+            None => None,
+        }
+    }
+
+    /// Files an operation applies to: the marked set, or the file under the cursor.
+    fn action_files(&self) -> Vec<String> {
+        if !self.marked.is_empty() {
+            self.marked.iter().cloned().collect()
+        } else {
+            self.selected_path().map(|p| vec![p.to_string()]).unwrap_or_default()
+        }
+    }
+
+    fn open_new_list(&mut self) {
+        self.overlay = Overlay::Input(InputState {
+            title: "New changelist".into(),
+            value: String::new(),
+            purpose: InputPurpose::NewList,
+        });
+    }
+
+    fn open_rename_list(&mut self) {
+        if let Some(li) = self.current_list() {
+            let cl = &self.store.changelists[li];
+            self.overlay = Overlay::Input(InputState {
+                title: format!("Rename '{}'", cl.name),
+                value: cl.name.clone(),
+                purpose: InputPurpose::RenameList(cl.id.clone()),
+            });
+        }
+    }
+
+    fn delete_current_list(&mut self) {
+        if let Some(li) = self.current_list() {
+            let id = self.store.changelists[li].id.clone();
+            match self.store.delete(&id) {
+                Ok(()) => self.commit_store_change("changelist deleted"),
+                Err(e) => self.message = e.to_string(),
+            }
+        }
+    }
+
+    fn open_set_active(&mut self) {
+        let items = self.picker_items_all_lists();
+        self.overlay = Overlay::Picker(PickerState {
+            title: "Set active changelist".into(),
+            items,
+            cursor: 0,
+            purpose: PickerPurpose::SetActive,
+        });
+    }
+
+    fn open_move_files(&mut self) {
+        let files = self.action_files();
+        if files.is_empty() {
+            self.message = "no file selected".into();
+            return;
+        }
+        let items = self.picker_items_all_lists();
+        self.overlay = Overlay::Picker(PickerState {
+            title: format!("Move {} file(s) to…", files.len()),
+            items,
+            cursor: 0,
+            purpose: PickerPurpose::MoveFiles(files),
+        });
+    }
+
+    fn picker_items_all_lists(&self) -> Vec<PickerItem> {
+        self.store
+            .changelists
+            .iter()
+            .map(|c| PickerItem { label: c.name.clone(), id: c.id.clone() })
+            .collect()
+    }
+
+    /// Persist the store and rebuild the view (working tree is unchanged).
+    fn commit_store_change(&mut self, msg: &str) {
+        let _ = self.store.persist(&self.store_path);
+        self.rebuild_rows();
+        self.update_diff();
+        self.message = msg.into();
+    }
+
+    fn handle_input_key(&mut self, key: event::KeyEvent) {
+        use event::KeyCode;
+        match key.code {
+            KeyCode::Esc => self.overlay = Overlay::None,
+            KeyCode::Enter => self.submit_input(),
+            KeyCode::Backspace => {
+                if let Overlay::Input(s) = &mut self.overlay {
+                    s.value.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Overlay::Input(s) = &mut self.overlay {
+                    s.value.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn submit_input(&mut self) {
+        let Overlay::Input(s) = &self.overlay else { return };
+        let value = s.value.trim().to_string();
+        let purpose = s.purpose.clone();
+        if value.is_empty() {
+            self.message = "name must not be empty".into();
+            return;
+        }
+        let result = match &purpose {
+            InputPurpose::NewList => self.store.create(&value).map(|id| {
+                let _ = self.store.set_active(&id);
+            }),
+            InputPurpose::RenameList(id) => self.store.rename(id, &value),
+        };
+        match result {
+            Ok(()) => {
+                self.overlay = Overlay::None;
+                let msg = match purpose {
+                    InputPurpose::NewList => "changelist created",
+                    InputPurpose::RenameList(_) => "changelist renamed",
+                };
+                self.commit_store_change(msg);
+            }
+            // Keep the overlay open on rejection (e.g. duplicate name) so the
+            // user can correct the value.
+            Err(e) => self.message = e.to_string(),
+        }
+    }
+
+    fn handle_picker_key(&mut self, key: event::KeyEvent) {
+        use event::KeyCode;
+        match key.code {
+            KeyCode::Esc => self.overlay = Overlay::None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Overlay::Picker(p) = &mut self.overlay {
+                    p.cursor = p.cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Overlay::Picker(p) = &mut self.overlay {
+                    if p.cursor + 1 < p.items.len() {
+                        p.cursor += 1;
+                    }
+                }
+            }
+            KeyCode::Enter => self.submit_picker(),
+            _ => {}
+        }
+    }
+
+    fn submit_picker(&mut self) {
+        let Overlay::Picker(p) = &self.overlay else { return };
+        let Some(item) = p.items.get(p.cursor) else {
+            self.overlay = Overlay::None;
+            return;
+        };
+        let id = item.id.clone();
+        let purpose = p.purpose.clone();
+        self.overlay = Overlay::None;
+        match purpose {
+            PickerPurpose::SetActive => {
+                let _ = self.store.set_active(&id);
+                self.commit_store_change("active changelist set");
+            }
+            PickerPurpose::MoveFiles(paths) => match self.store.move_files(&paths, &id) {
+                Ok(()) => {
+                    self.marked.clear();
+                    self.commit_store_change("files moved");
+                }
+                Err(e) => self.message = e.to_string(),
+            },
         }
     }
 
@@ -284,7 +508,45 @@ mod tests {
         assert!(app.marked.contains("a.rs"));
 
         app.on_action(Action::Help);
-        assert_eq!(app.overlay, Overlay::Help);
+        assert!(matches!(app.overlay, Overlay::Help));
+    }
+
+    #[test]
+    fn changelist_ops_create_move_and_persist() {
+        let mock = Mock { root: std::env::temp_dir().join("mygit-app-test-ops") };
+        let mut app = App::new(&mock);
+        // create "WIP" (becomes active)
+        app.on_action(Action::NewList);
+        for c in "WIP".chars() {
+            app.handle_key(key_char(c));
+        }
+        app.handle_key(key(event::KeyCode::Enter));
+        assert!(app.store.changelists.iter().any(|c| c.name == "WIP"));
+        assert!(matches!(app.overlay, Overlay::None));
+
+        // move a.rs into WIP: select the file, mark it, open move picker, choose WIP
+        app.cursor = 1; // a.rs under Default
+        app.update_diff();
+        app.on_action(Action::Mark);
+        app.on_action(Action::MoveFiles);
+        assert!(matches!(app.overlay, Overlay::Picker(_)));
+        // cursor to WIP entry
+        if let Overlay::Picker(p) = &app.overlay {
+            let wip_idx = p.items.iter().position(|i| i.label == "WIP").unwrap();
+            for _ in 0..wip_idx {
+                app.handle_key(key(event::KeyCode::Down));
+            }
+        }
+        app.handle_key(key(event::KeyCode::Enter));
+        let wip = app.store.changelists.iter().find(|c| c.name == "WIP").unwrap();
+        assert!(wip.files.iter().any(|f| f == "a.rs"), "a.rs should be in WIP");
+    }
+
+    fn key(code: event::KeyCode) -> event::KeyEvent {
+        event::KeyEvent::new(code, event::KeyModifiers::NONE)
+    }
+    fn key_char(c: char) -> event::KeyEvent {
+        key(event::KeyCode::Char(c))
     }
 
     #[test]
