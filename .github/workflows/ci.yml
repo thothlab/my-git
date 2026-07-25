@@ -1,0 +1,41 @@
+name: ci
+
+# Format, lint and test the terminal (TUI) crate on every push/PR.
+# A gui/ job will be added here when the GUI lands.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  terminal:
+    name: terminal (fmt / clippy / test)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: terminal
+
+      - name: fmt
+        working-directory: terminal
+        run: cargo fmt --check
+
+      - name: clippy
+        working-directory: terminal
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: test
+        working-directory: terminal
+        run: cargo test --locked
