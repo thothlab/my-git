@@ -3,14 +3,16 @@
 //! in later waves — overlay state). Rendering lives in `ui`.
 
 mod keymap;
+mod logview;
 mod theme;
 mod ui;
 
 use crate::changelists::{store_path, ChangelistStore, UNVERSIONED_ID};
-use crate::engine::{BranchState, Commit, FileStatus, GitEngine, PushOpts, ResetMode};
+use crate::engine::{BranchState, FileStatus, GitEngine, PushOpts, ResetMode};
 use anyhow::Result;
 use crossterm::event::{self, Event};
 use keymap::{resolve, Action};
+use logview::{LogAction, LogView};
 use ratatui::layout::Rect;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -30,13 +32,6 @@ pub enum Overlay {
     Input(InputState),
     Picker(PickerState),
     Confirm(ConfirmState),
-}
-
-/// What the right-hand panel shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RightView {
-    Diff,
-    Log,
 }
 
 /// Destructive-action confirmation. Following the gwm-cli lesson, the default is
@@ -121,9 +116,8 @@ pub struct App<'e> {
     diff_path: Option<String>,
     diff_scroll: u16,
 
-    right: RightView,
-    commits: Vec<Commit>,
-    log_cursor: usize,
+    /// When `Some`, the full-screen Git Log browser is active.
+    log: Option<LogView>,
 
     /// Left (Changes) panel width as a percent of the main area; the vertical
     /// divider drag adjusts it.
@@ -165,9 +159,7 @@ impl<'e> App<'e> {
             diff: String::new(),
             diff_path: None,
             diff_scroll: 0,
-            right: RightView::Diff,
-            commits: Vec::new(),
-            log_cursor: 0,
+            log: None,
             split_pct: 50,
             dragging: false,
             message: String::new(),
@@ -201,15 +193,12 @@ impl<'e> App<'e> {
         self.reload_status();
         self.diff_path = None; // force diff recompute for the current selection
         self.update_diff();
-        if self.right == RightView::Log {
-            self.reload_log();
-        }
     }
 
     /// Periodic background refresh: reflect on-disk edits without disturbing an
-    /// open overlay or the diff scroll position.
+    /// open overlay, the log browser, or the diff scroll position.
     fn auto_refresh(&mut self) {
-        if !matches!(self.overlay, Overlay::None) {
+        if !matches!(self.overlay, Overlay::None) || self.log.is_some() {
             return;
         }
         self.reload_status();
@@ -223,9 +212,6 @@ impl<'e> App<'e> {
         } else {
             self.diff.clear();
             self.diff_path = None;
-        }
-        if self.right == RightView::Log {
-            self.reload_log();
         }
     }
 
@@ -308,14 +294,9 @@ impl<'e> App<'e> {
             Overlay::Picker(_) => self.handle_picker_key(key),
             Overlay::Confirm(_) => self.handle_confirm_key(key),
             Overlay::None => {
-                // Log-context keys (revert/reset) take priority when the log is focused.
-                if self.right == RightView::Log
-                    && self.focus == Focus::Detail
-                    && self.handle_log_key(key)
-                {
-                    return;
-                }
-                if let Some(action) = resolve(key) {
+                if self.log.is_some() {
+                    self.handle_log_key_event(key);
+                } else if let Some(action) = resolve(key) {
                     self.on_action(action);
                 }
             }
@@ -328,6 +309,16 @@ impl<'e> App<'e> {
         use event::{MouseButton, MouseEventKind};
         if !matches!(self.overlay, Overlay::None) {
             return; // let overlays own the interaction
+        }
+        if let Some(l) = self.log.as_mut() {
+            let body = Rect::new(
+                area.x,
+                area.y + 1,
+                area.width,
+                area.height.saturating_sub(2),
+            );
+            l.handle_mouse(m, body, self.engine);
+            return;
         }
         let [_, changes, detail, _] = ui::regions(area, self.split_pct);
         let divider = detail.x as i32;
@@ -383,14 +374,6 @@ impl<'e> App<'e> {
                 self.cursor -= 1;
                 self.update_diff();
             }
-        } else if self.right == RightView::Log {
-            if down {
-                if self.log_cursor + 1 < self.commits.len() {
-                    self.log_cursor += 1;
-                }
-            } else {
-                self.log_cursor = self.log_cursor.saturating_sub(1);
-            }
         } else if down {
             self.diff_scroll = self.diff_scroll.saturating_add(1);
         } else {
@@ -423,7 +406,7 @@ impl<'e> App<'e> {
             MoveFiles => self.open_move_files(),
             Commit => self.open_commit(false),
             Amend => self.open_commit(true),
-            Log => self.toggle_log(),
+            Log => self.toggle_log_mode(),
             Rollback => self.open_rollback(),
             Push => self.push_action(),
             Fetch => self.fetch_action(),
@@ -585,64 +568,47 @@ impl<'e> App<'e> {
         });
     }
 
-    // ----- mini-log, revert, reset, rollback (Task 07) -------------------------
+    // ----- log browser + revert/reset -----------------------------------------
 
-    fn toggle_log(&mut self) {
-        if self.right == RightView::Log {
-            self.right = RightView::Diff;
-            self.focus = Focus::Changes;
+    fn toggle_log_mode(&mut self) {
+        if self.log.is_some() {
+            self.log = None;
         } else {
-            self.reload_log();
-            self.right = RightView::Log;
-            self.focus = Focus::Detail;
-            self.log_cursor = 0;
+            self.log = Some(LogView::new(self.engine));
         }
     }
 
-    fn reload_log(&mut self) {
-        self.commits = self.engine.log(50).unwrap_or_default();
-        if self.log_cursor >= self.commits.len() {
-            self.log_cursor = self.commits.len().saturating_sub(1);
-        }
-    }
-
-    /// Log-context keys: `v` revert, `x` reset. Returns true if consumed.
-    fn handle_log_key(&mut self, key: event::KeyEvent) -> bool {
-        match key.code {
-            event::KeyCode::Char('v') => {
-                self.revert_selected();
-                true
-            }
-            event::KeyCode::Char('x') => {
-                self.open_reset_picker();
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn selected_commit_hash(&self) -> Option<String> {
-        self.commits.get(self.log_cursor).map(|c| c.hash.clone())
-    }
-
-    fn revert_selected(&mut self) {
-        let Some(hash) = self.selected_commit_hash() else {
-            return;
+    /// Route a key to the log browser and act on what it returns.
+    fn handle_log_key_event(&mut self, key: event::KeyEvent) {
+        let engine = self.engine;
+        let action = match self.log.as_mut() {
+            Some(l) => l.handle_key(key, engine),
+            None => return,
         };
-        match self.engine.revert(&hash) {
-            Ok(()) => {
-                self.reload_log();
-                self.refresh();
-                self.message = "reverted".into();
-            }
-            Err(e) => self.message = e.to_string(),
+        match action {
+            LogAction::None => {}
+            LogAction::Exit => self.log = None,
+            LogAction::Revert(hash) => match engine.revert(&hash) {
+                Ok(()) => {
+                    self.reload_log_and_state();
+                    self.message = "reverted".into();
+                }
+                Err(e) => self.message = e.to_string(),
+            },
+            LogAction::Reset(hash) => self.open_reset_picker(hash),
         }
     }
 
-    fn open_reset_picker(&mut self) {
-        let Some(hash) = self.selected_commit_hash() else {
-            return;
-        };
+    /// Refresh changes-mode state and, if the log browser is open, its commits.
+    fn reload_log_and_state(&mut self) {
+        self.refresh();
+        let engine = self.engine;
+        if let Some(l) = self.log.as_mut() {
+            l.reload_commits(engine);
+        }
+    }
+
+    fn open_reset_picker(&mut self, hash: String) {
         let items = vec![
             PickerItem {
                 label: "soft  (keep index + worktree)".into(),
@@ -668,8 +634,7 @@ impl<'e> App<'e> {
     fn do_reset(&mut self, hash: &str, mode: ResetMode) {
         match self.engine.reset(hash, mode) {
             Ok(()) => {
-                self.reload_log();
-                self.refresh();
+                self.reload_log_and_state();
                 self.message = "reset done".into();
             }
             Err(e) => self.message = e.to_string(),
@@ -1099,13 +1064,7 @@ impl<'e> App<'e> {
 
     fn move_down(&mut self) {
         if self.focus == Focus::Detail {
-            if self.right == RightView::Log {
-                if self.log_cursor + 1 < self.commits.len() {
-                    self.log_cursor += 1;
-                }
-            } else {
-                self.diff_scroll = self.diff_scroll.saturating_add(1);
-            }
+            self.diff_scroll = self.diff_scroll.saturating_add(1);
             return;
         }
         if !self.rows.is_empty() && self.cursor + 1 < self.rows.len() {
@@ -1116,11 +1075,7 @@ impl<'e> App<'e> {
 
     fn move_up(&mut self) {
         if self.focus == Focus::Detail {
-            if self.right == RightView::Log {
-                self.log_cursor = self.log_cursor.saturating_sub(1);
-            } else {
-                self.diff_scroll = self.diff_scroll.saturating_sub(1);
-            }
+            self.diff_scroll = self.diff_scroll.saturating_sub(1);
             return;
         }
         if self.cursor > 0 {
@@ -1141,7 +1096,7 @@ impl<'e> App<'e> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{ChangedFile, Commit, PushOpts, ResetMode};
+    use crate::engine::{ChangedFile, Commit, CommitFile, PushOpts, ResetMode};
     use std::path::Path;
 
     /// A canned engine so the App logic can be tested without a terminal.
@@ -1178,6 +1133,21 @@ mod tests {
         }
         fn log(&self, _: usize) -> Result<Vec<Commit>> {
             Ok(vec![])
+        }
+        fn remote_branches(&self) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn log_for(&self, _: &str, _: usize) -> Result<Vec<Commit>> {
+            Ok(vec![])
+        }
+        fn commit_files(&self, _: &str) -> Result<Vec<CommitFile>> {
+            Ok(vec![])
+        }
+        fn commit_body(&self, _: &str) -> Result<String> {
+            Ok(String::new())
+        }
+        fn commit_file_diff(&self, _: &str, _: &str) -> Result<String> {
+            Ok(String::new())
         }
         fn revert(&self, _: &str) -> Result<()> {
             Ok(())
@@ -1363,6 +1333,25 @@ mod tests {
         assert!(!app.dragging);
     }
 
+    #[test]
+    fn renders_log_browser_panes() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-app-test-logui"),
+        };
+        let mut app = App::new(&mock);
+        app.on_action(Action::Log);
+        assert!(app.log.is_some());
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| super::ui::render(f, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = buf.content.iter().map(|c| c.symbol()).collect();
+        for needle in ["BRANCHES", "COMMITS", "COMMIT", "DIFF"] {
+            assert!(text.contains(needle), "log frame missing {needle:?}");
+        }
+    }
+
     fn init_repo(tag: &str) -> std::path::PathBuf {
         use std::process::Command;
         let dir = std::env::temp_dir().join(format!("mygit-tui-{}-{tag}", std::process::id()));
@@ -1446,16 +1435,17 @@ mod tests {
         engine.commit(&["a.txt".to_string()], "c2", false).unwrap();
 
         let mut app = App::new(&engine);
-        app.on_action(Action::Log);
-        assert_eq!(app.right, RightView::Log);
-        assert_eq!(app.commits.len(), 2);
+        app.on_action(Action::Log); // enter the Log browser
+        assert!(app.log.is_some());
 
-        // Revert the newest commit -> inverse commit added, history preserved.
+        // Revert the newest commit (log defaults to the current branch, newest
+        // first) -> inverse commit added, history preserved.
         app.handle_key(key_char('v'));
         assert_eq!(engine.log(10).unwrap().len(), 3);
 
-        // Hard-reset to the oldest commit via picker -> confirm -> execute.
-        app.log_cursor = app.commits.len() - 1;
+        // Move down to the oldest commit (c1) and hard-reset to it.
+        app.handle_key(key(event::KeyCode::Down));
+        app.handle_key(key(event::KeyCode::Down));
         app.handle_key(key_char('x'));
         assert!(matches!(app.overlay, Overlay::Picker(_)));
         app.handle_key(key(event::KeyCode::Down)); // mixed
@@ -1794,6 +1784,21 @@ mod tests {
             }
             fn log(&self, _: usize) -> Result<Vec<Commit>> {
                 Ok(vec![])
+            }
+            fn remote_branches(&self) -> Result<Vec<String>> {
+                Ok(vec![])
+            }
+            fn log_for(&self, _: &str, _: usize) -> Result<Vec<Commit>> {
+                Ok(vec![])
+            }
+            fn commit_files(&self, _: &str) -> Result<Vec<CommitFile>> {
+                Ok(vec![])
+            }
+            fn commit_body(&self, _: &str) -> Result<String> {
+                Ok(String::new())
+            }
+            fn commit_file_diff(&self, _: &str, _: &str) -> Result<String> {
+                Ok(String::new())
             }
             fn revert(&self, _: &str) -> Result<()> {
                 Ok(())

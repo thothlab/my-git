@@ -49,6 +49,13 @@ pub struct Commit {
     pub refs: Vec<String>,
 }
 
+/// One changed file within a commit (name-status vs its first parent).
+#[derive(Debug, Clone)]
+pub struct CommitFile {
+    pub status: char,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResetMode {
     Soft,
@@ -92,6 +99,11 @@ pub trait GitEngine {
     fn checkout_file(&self, path: &str) -> Result<()>;
     fn branch_state(&self) -> Result<BranchState>;
     fn branches(&self) -> Result<Vec<String>>;
+    fn remote_branches(&self) -> Result<Vec<String>>;
+    fn log_for(&self, refname: &str, limit: usize) -> Result<Vec<Commit>>;
+    fn commit_files(&self, hash: &str) -> Result<Vec<CommitFile>>;
+    fn commit_body(&self, hash: &str) -> Result<String>;
+    fn commit_file_diff(&self, hash: &str, path: &str) -> Result<String>;
     fn checkout_branch(&self, name: &str) -> Result<()>;
     fn create_branch(&self, name: &str, from: &str) -> Result<()>;
     fn push(&self, branch: &str, opts: &PushOpts) -> Result<()>;
@@ -228,10 +240,14 @@ impl GitEngine for GixEngine {
     }
 
     fn log(&self, limit: usize) -> Result<Vec<Commit>> {
+        self.log_for("HEAD", limit)
+    }
+
+    fn log_for(&self, refname: &str, limit: usize) -> Result<Vec<Commit>> {
         let n = format!("-n{limit}");
         let pretty = "--pretty=format:%H%x1f%s%x1f%an%x1f%D";
-        // A repo with no commits makes `git log` fail; treat as empty.
-        let out = self.git(&["log", &n, pretty])?;
+        // A missing ref / repo with no commits makes `git log` fail; treat as empty.
+        let out = self.git(&["log", &n, pretty, refname])?;
         if !out.status.success() {
             return Ok(Vec::new());
         }
@@ -259,6 +275,34 @@ impl GitEngine for GixEngine {
             })
             .collect();
         Ok(commits)
+    }
+
+    fn commit_files(&self, hash: &str) -> Result<Vec<CommitFile>> {
+        // name-status of the commit vs its first parent.
+        let text = self.git_check(&["show", "--no-color", "--name-status", "--format=", hash])?;
+        Ok(text
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.is_empty() {
+                    return None;
+                }
+                let mut parts = line.split('\t');
+                let status = parts.next()?.chars().next().unwrap_or('?');
+                // Rename/copy rows are "R100\told\tnew" — the new path is last.
+                let path = parts.next_back()?.to_string();
+                (!path.is_empty()).then_some(CommitFile { status, path })
+            })
+            .collect())
+    }
+
+    fn commit_body(&self, hash: &str) -> Result<String> {
+        self.git_check(&["show", "-s", "--format=%B", hash])
+    }
+
+    fn commit_file_diff(&self, hash: &str, path: &str) -> Result<String> {
+        let out = self.git(&["show", "--no-color", "--format=", hash, "--", path])?;
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     fn revert(&self, hash: &str) -> Result<()> {
@@ -317,6 +361,16 @@ impl GitEngine for GixEngine {
             .lines()
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
+            .collect())
+    }
+
+    fn remote_branches(&self) -> Result<Vec<String>> {
+        let text = self.git_check(&["branch", "-r", "--format=%(refname:short)"])?;
+        Ok(text
+            .lines()
+            .map(|l| l.trim().to_string())
+            // Drop empties and the "origin/HEAD -> origin/main" alias row.
+            .filter(|l| !l.is_empty() && !l.ends_with("/HEAD") && !l.contains("->"))
             .collect())
     }
 

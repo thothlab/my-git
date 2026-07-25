@@ -4,7 +4,7 @@
 
 use super::keymap::BINDINGS;
 use super::theme::Theme;
-use super::{App, ConfirmState, Focus, InputState, Overlay, PickerState, RightView, Row};
+use super::{App, ConfirmState, Focus, InputState, Overlay, PickerState, Row};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -36,15 +36,26 @@ pub(super) fn regions(area: Rect, split_pct: u16) -> [Rect; 4] {
 
 pub fn render(f: &mut Frame, app: &App<'_>) {
     let area = f.area();
-    let [status, changes, detail, footer] = regions(area, app.split_pct);
-    render_status_bar(f, app, status);
-    render_changes(f, app, changes);
-    if app.right == RightView::Log {
-        render_log(f, app, detail);
+    if let Some(log) = &app.log {
+        // Log browser mode: status bar + full-width browser + footer.
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+        render_status_bar(f, app, rows[0]);
+        log.render(f, rows[1], &app.theme);
+        render_footer(f, app, rows[2]);
     } else {
+        let [status, changes, detail, footer] = regions(area, app.split_pct);
+        render_status_bar(f, app, status);
+        render_changes(f, app, changes);
         render_detail(f, app, detail);
+        render_footer(f, app, footer);
     }
-    render_footer(f, app, footer);
     match &app.overlay {
         Overlay::Help(cursor) => render_help(f, app, area, *cursor),
         Overlay::Input(s) => render_input(f, app, area, s),
@@ -176,52 +187,6 @@ fn render_detail(f: &mut Frame, app: &App<'_>, area: Rect) {
     f.render_widget(Paragraph::new(lines).scroll((app.diff_scroll, 0)), inner);
 }
 
-fn render_log(f: &mut Frame, app: &App<'_>, area: Rect) {
-    let t = &app.theme;
-    let focused = app.focus == Focus::Detail;
-    let block = panel_block("LOG", focused, t);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    if app.commits.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                "  no commits on this branch",
-                Style::default().fg(t.fg_muted),
-            )),
-            inner,
-        );
-        return;
-    }
-    let height = inner.height as usize;
-    let start = app.log_cursor.saturating_sub(height.saturating_sub(1));
-    let mut lines = Vec::new();
-    for (i, c) in app.commits.iter().enumerate().skip(start).take(height) {
-        let selected = i == app.log_cursor && focused;
-        let short = &c.hash[..c.hash.len().min(8)];
-        let mut spans = vec![
-            Span::styled(format!("{short} "), Style::default().fg(t.warn)),
-            Span::styled(c.summary.clone(), Style::default().fg(t.fg)),
-        ];
-        if !c.refs.is_empty() {
-            spans.push(Span::styled(
-                format!("  ({})", c.refs.join(", ")),
-                Style::default().fg(t.accent),
-            ));
-        }
-        spans.push(Span::styled(
-            format!("  — {}", c.author),
-            Style::default().fg(t.fg_muted),
-        ));
-        let mut line = Line::from(spans);
-        if selected {
-            line = line.style(Style::default().bg(t.sel_bg));
-        }
-        lines.push(line);
-    }
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
 fn render_confirm(f: &mut Frame, app: &App<'_>, area: Rect, c: &ConfirmState) {
     let t = &app.theme;
     let w = 56.min(area.width.saturating_sub(4));
@@ -265,8 +230,8 @@ fn diff_line(l: &str, t: &Theme) -> Line<'static> {
 
 fn render_footer(f: &mut Frame, app: &App<'_>, area: Rect) {
     let t = &app.theme;
-    let hints = if app.right == RightView::Log {
-        "[v]revert [x]reset [j/k]nav [L]back [?]help [q]quit"
+    let hints = if app.log.is_some() {
+        "[Tab]pane [j/k]nav [Enter]branch/folder [v]revert [x]reset drag dividers · [L/Esc]back"
     } else {
         "[n]new [m]move [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [?]help [q]quit"
     };
