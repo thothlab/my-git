@@ -39,6 +39,7 @@ pub struct InputState {
 pub enum InputPurpose {
     NewList,
     RenameList(String),
+    CommitMessage { files: Vec<String>, amend: bool },
 }
 
 /// A choose-one list overlay (move target, active list; branch/reset in later waves).
@@ -230,9 +231,57 @@ impl<'e> App<'e> {
             DeleteList => self.delete_current_list(),
             SetActive => self.open_set_active(),
             MoveFiles => self.open_move_files(),
-            // Git operations land in later waves; announce so the key is discoverable.
+            Commit => self.open_commit(false),
+            Amend => self.open_commit(true),
+            // Remaining git operations land in later waves.
             other => self.message = format!("{}: следующая волна", other.label()),
         }
+    }
+
+    // ----- commit by changelist (Task 06) --------------------------------------
+
+    /// Files to commit: the marked subset, else all currently-changed files of
+    /// the changelist under the cursor. Staging only these guarantees other
+    /// lists (including "Not for commit") are never included.
+    fn commit_files(&self) -> Vec<String> {
+        if !self.marked.is_empty() {
+            return self.marked.iter().cloned().collect();
+        }
+        match self.current_list() {
+            Some(li) => self.store.changelists[li]
+                .files
+                .iter()
+                .filter(|p| self.status_map.contains_key(*p))
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    fn open_commit(&mut self, amend: bool) {
+        let files = self.commit_files();
+        if files.is_empty() {
+            self.message = "nothing to commit in this changelist".into();
+            return;
+        }
+        let mut value = String::new();
+        if amend {
+            if let Ok(log) = self.engine.log(1) {
+                if let Some(c) = log.first() {
+                    value = c.summary.clone();
+                }
+            }
+        }
+        let title = if amend {
+            format!("Amend last commit — {} file(s)", files.len())
+        } else {
+            format!("Commit — {} file(s)", files.len())
+        };
+        self.overlay = Overlay::Input(InputState {
+            title,
+            value,
+            purpose: InputPurpose::CommitMessage { files, amend },
+        });
     }
 
     // ----- changelist operations (Task 05) -------------------------------------
@@ -347,28 +396,53 @@ impl<'e> App<'e> {
         let Overlay::Input(s) = &self.overlay else { return };
         let value = s.value.trim().to_string();
         let purpose = s.purpose.clone();
-        if value.is_empty() {
-            self.message = "name must not be empty".into();
-            return;
-        }
-        let result = match &purpose {
-            InputPurpose::NewList => self.store.create(&value).map(|id| {
-                let _ = self.store.set_active(&id);
-            }),
-            InputPurpose::RenameList(id) => self.store.rename(id, &value),
-        };
-        match result {
-            Ok(()) => {
-                self.overlay = Overlay::None;
-                let msg = match purpose {
-                    InputPurpose::NewList => "changelist created",
-                    InputPurpose::RenameList(_) => "changelist renamed",
-                };
-                self.commit_store_change(msg);
+        // On rejection the overlay stays open so the user can correct the value.
+        match purpose {
+            InputPurpose::NewList => {
+                if value.is_empty() {
+                    self.message = "name must not be empty".into();
+                    return;
+                }
+                match self.store.create(&value) {
+                    Ok(id) => {
+                        let _ = self.store.set_active(&id);
+                        self.overlay = Overlay::None;
+                        self.commit_store_change("changelist created");
+                    }
+                    Err(e) => self.message = e.to_string(),
+                }
             }
-            // Keep the overlay open on rejection (e.g. duplicate name) so the
-            // user can correct the value.
-            Err(e) => self.message = e.to_string(),
+            InputPurpose::RenameList(id) => {
+                if value.is_empty() {
+                    self.message = "name must not be empty".into();
+                    return;
+                }
+                match self.store.rename(&id, &value) {
+                    Ok(()) => {
+                        self.overlay = Overlay::None;
+                        self.commit_store_change("changelist renamed");
+                    }
+                    Err(e) => self.message = e.to_string(),
+                }
+            }
+            InputPurpose::CommitMessage { files, amend } => {
+                if value.is_empty() {
+                    self.message = "commit message required".into();
+                    return;
+                }
+                match self.engine.commit(&files, &value, amend) {
+                    Ok(_hash) => {
+                        // Only the committed files leave their list; files in
+                        // other lists (incl. "Not for commit") are untouched.
+                        self.store.remove_files(&files);
+                        self.overlay = Overlay::None;
+                        self.marked.clear();
+                        self.refresh();
+                        self.message = if amend { "amended".into() } else { "committed".into() };
+                    }
+                    Err(e) => self.message = e.to_string(),
+                }
+            }
         }
     }
 
@@ -547,6 +621,68 @@ mod tests {
     }
     fn key_char(c: char) -> event::KeyEvent {
         key(event::KeyCode::Char(c))
+    }
+
+    fn init_repo(tag: &str) -> std::path::PathBuf {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("mygit-tui-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |a: &[&str]| {
+            assert!(Command::new("git").current_dir(&dir).args(a).output().unwrap().status.success());
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        dir
+    }
+
+    #[test]
+    fn commit_default_excludes_not_for_commit() {
+        use crate::engine::GixEngine;
+        let dir = init_repo("commit");
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        std::fs::write(dir.join("b.txt"), "b").unwrap();
+        let engine = GixEngine::discover(&dir).unwrap();
+        let mut app = App::new(&engine); // a.txt, b.txt -> Default
+
+        let nfc = app.store.create("Not for commit").unwrap();
+        app.store.move_files(&["b.txt".to_string()], &nfc).unwrap();
+        let _ = app.store.persist(&app.store_path);
+        app.rebuild_rows();
+
+        // Commit the Default list (cursor on its header, no marks).
+        app.cursor = 0;
+        app.on_action(Action::Commit);
+        assert!(matches!(app.overlay, Overlay::Input(_)));
+        for c in "add a".chars() {
+            app.handle_key(key_char(c));
+        }
+        app.handle_key(key(event::KeyCode::Enter));
+
+        let log = engine.log(10).unwrap();
+        assert_eq!(log.len(), 1, "exactly one commit expected");
+        let changed = engine.status().unwrap();
+        assert!(!changed.iter().any(|f| f.path == "a.txt"), "a.txt should be committed");
+        assert!(changed.iter().any(|f| f.path == "b.txt"), "b.txt must remain changed");
+        let nfc_list = app.store.changelists.iter().find(|c| c.name == "Not for commit").unwrap();
+        assert!(nfc_list.files.iter().any(|f| f == "b.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_requires_nonempty_message() {
+        use crate::engine::GixEngine;
+        let dir = init_repo("emptymsg");
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        let engine = GixEngine::discover(&dir).unwrap();
+        let mut app = App::new(&engine);
+        app.cursor = 0;
+        app.on_action(Action::Commit);
+        app.handle_key(key(event::KeyCode::Enter)); // empty message
+        assert!(matches!(app.overlay, Overlay::Input(_)), "overlay stays open on empty message");
+        assert_eq!(engine.log(10).unwrap().len(), 0, "no commit created");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
