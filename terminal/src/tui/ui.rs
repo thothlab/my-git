@@ -72,6 +72,11 @@ fn render_log_help(f: &mut Frame, app: &App<'_>, area: Rect) {
         ("Tab", "switch pane (Branches / Commits / Files)"),
         ("j / k / ↑↓", "navigate the focused pane"),
         ("Enter", "select branch · expand/collapse folder"),
+        ("c", "checkout selected branch (asks about local changes)"),
+        ("R", "rebase current branch onto selected branch"),
+        ("P", "push current branch (force-with-lease if diverged)"),
+        ("b", "new branch from the selected commit"),
+        ("r", "reword the last commit (amend)"),
         ("v", "revert the selected commit"),
         ("x", "reset to the selected commit"),
         (
@@ -274,7 +279,7 @@ fn diff_line(l: &str, t: &Theme) -> Line<'static> {
 fn render_footer(f: &mut Frame, app: &App<'_>, area: Rect) {
     let t = &app.theme;
     let hints = if app.log.is_some() {
-        "[Tab]pane [j/k]nav [Enter]branch/folder [v]revert [x]reset [?]help · drag dividers · [L/Esc]back"
+        "[Tab]pane [c]checkout [P]push [b]branch [R]rebase [r]reword [v]revert [x]reset [?]help [L/Esc]back"
     } else {
         "[n]new [m]move [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [?]help [q]quit"
     };

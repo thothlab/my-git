@@ -26,6 +26,16 @@ pub enum LogAction {
     Help,
     Revert(String),
     Reset(String),
+    /// Checkout the given (already remote-stripped) branch name.
+    Checkout(String),
+    /// Push the current branch.
+    Push,
+    /// Create a new branch starting at the given commit.
+    NewBranchFrom(String),
+    /// Rebase the current branch onto the given branch ref.
+    RebaseOnto(String),
+    /// Reword (amend the message of) the given commit.
+    Reword(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -268,9 +278,55 @@ impl LogView {
                     return LogAction::Reset(h);
                 }
             }
+            KeyCode::Char('r') => {
+                if let Some(h) = self.selected_commit_hash() {
+                    return LogAction::Reword(h);
+                }
+            }
+            KeyCode::Char('b') => {
+                if let Some(h) = self.selected_commit_hash() {
+                    return LogAction::NewBranchFrom(h);
+                }
+            }
+            KeyCode::Char('c') => {
+                if let Some(t) = self.checkout_target() {
+                    return LogAction::Checkout(t);
+                }
+            }
+            KeyCode::Char('R') => {
+                if let Some((refname, _)) = self.selected_branch_ref() {
+                    return LogAction::RebaseOnto(refname);
+                }
+            }
+            KeyCode::Char('P') => return LogAction::Push,
             _ => {}
         }
         LogAction::None
+    }
+
+    fn selected_branch_ref(&self) -> Option<(String, bool)> {
+        match self.rows.get(self.b_cursor).map(|r| &r.kind) {
+            Some(RowKind::Branch { refname, .. }) => {
+                let remote = self.remote.iter().any(|r| r == refname);
+                Some((refname.clone(), remote))
+            }
+            _ => None,
+        }
+    }
+
+    /// The branch to check out: for a remote branch, strip the remote prefix so
+    /// `git checkout` creates/switches to the local tracking branch.
+    fn checkout_target(&self) -> Option<String> {
+        self.selected_branch_ref().map(|(refname, remote)| {
+            if remote {
+                refname
+                    .split_once('/')
+                    .map(|(_, rest)| rest.to_string())
+                    .unwrap_or(refname)
+            } else {
+                refname
+            }
+        })
     }
 
     fn move_focus(&mut self, delta: i32, engine: &dyn GitEngine) {

@@ -112,6 +112,8 @@ pub trait GitEngine {
     /// incremental path. Wired to a key in a later iteration.
     #[allow(dead_code)]
     fn pull(&self) -> Result<()>;
+    /// Stash the working tree (incl. untracked) under a name — the "shelve" op.
+    fn stash_push(&self, message: &str) -> Result<()>;
     fn rebase_onto(&self, target: &str) -> Result<()>;
     fn rebase_continue(&self) -> Result<()>;
     fn rebase_skip(&self) -> Result<()>;
@@ -408,6 +410,11 @@ impl GitEngine for GixEngine {
 
     fn pull(&self) -> Result<()> {
         self.git_check(&["pull"])?;
+        Ok(())
+    }
+
+    fn stash_push(&self, message: &str) -> Result<()> {
+        self.git_check(&["stash", "push", "-u", "-m", message])?;
         Ok(())
     }
 

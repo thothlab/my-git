@@ -62,8 +62,19 @@ pub struct InputState {
 pub enum InputPurpose {
     NewList,
     RenameList(String),
-    CommitMessage { files: Vec<String>, amend: bool },
+    CommitMessage {
+        files: Vec<String>,
+        amend: bool,
+    },
     NewBranch,
+    /// Create a new branch starting at the given commit (from the log).
+    NewBranchFrom(String),
+    /// Reword (amend) the HEAD commit message.
+    RewordHead,
+    /// Stash the working tree under this name, then checkout the given branch.
+    StashName(String),
+    /// Commit all changes with this message, then checkout the given branch.
+    CommitAndSwitch(String),
 }
 
 /// A choose-one list overlay (move target, active list; branch/reset in later waves).
@@ -86,6 +97,8 @@ pub enum PickerPurpose {
     Checkout,
     RebaseOnto,
     RebaseControl,
+    /// Uncommitted changes exist — choose how to switch to the given branch.
+    DirtyCheckout(String),
 }
 
 /// A rendered row in the Changes panel: a changelist header or a file under it.
@@ -600,6 +613,119 @@ impl<'e> App<'e> {
                 Err(e) => self.message = e.to_string(),
             },
             LogAction::Reset(hash) => self.open_reset_picker(hash),
+            LogAction::Checkout(target) => self.log_checkout(target),
+            LogAction::Push => self.push_action(),
+            LogAction::NewBranchFrom(hash) => {
+                self.overlay = Overlay::Input(InputState {
+                    title: format!("New branch from {}", &hash[..hash.len().min(8)]),
+                    value: String::new(),
+                    purpose: InputPurpose::NewBranchFrom(hash),
+                });
+            }
+            LogAction::RebaseOnto(target) => self.log_rebase_onto(&target),
+            LogAction::Reword(hash) => self.open_reword(hash),
+        }
+    }
+
+    /// Checkout a branch from the log; if the working tree has tracked changes,
+    /// ask how to handle them first (commit / stash / switch anyway).
+    fn log_checkout(&mut self, target: String) {
+        let dirty = self
+            .engine
+            .status()
+            .map(|s| s.iter().any(|f| f.status != FileStatus::Untracked))
+            .unwrap_or(false);
+        if !dirty {
+            self.do_checkout(&target);
+            return;
+        }
+        let items = vec![
+            PickerItem {
+                label: "Stash (shelve) & switch".into(),
+                id: "stash".into(),
+            },
+            PickerItem {
+                label: "Commit & switch".into(),
+                id: "commit".into(),
+            },
+            PickerItem {
+                label: "Switch anyway (keep changes)".into(),
+                id: "switch".into(),
+            },
+            PickerItem {
+                label: "Cancel".into(),
+                id: "cancel".into(),
+            },
+        ];
+        self.overlay = Overlay::Picker(PickerState {
+            title: format!("Uncommitted changes — switch to {target}?"),
+            items,
+            cursor: 0,
+            purpose: PickerPurpose::DirtyCheckout(target),
+        });
+    }
+
+    fn do_checkout(&mut self, target: &str) {
+        match self.engine.checkout_branch(target) {
+            Ok(()) => {
+                self.rebuild_log_view();
+                self.message = format!("switched to {target}");
+            }
+            Err(e) => self.message = e.to_string(),
+        }
+    }
+
+    fn log_rebase_onto(&mut self, target: &str) {
+        match self.engine.rebase_onto(target) {
+            Ok(()) => {
+                self.rebuild_log_view();
+                self.message = format!("rebased onto {target}");
+            }
+            Err(_) => {
+                self.refresh();
+                self.message = if self.branch.rebase.is_some() {
+                    "rebase stopped — resolve in Changes (R), then continue".into()
+                } else {
+                    "rebase failed".into()
+                };
+            }
+        }
+    }
+
+    /// Reword only the HEAD commit in this phase (amend); older commits need an
+    /// interactive rebase (a later phase).
+    fn open_reword(&mut self, hash: String) {
+        let head = self
+            .engine
+            .log_for("HEAD", 1)
+            .ok()
+            .and_then(|c| c.into_iter().next())
+            .map(|c| c.hash);
+        if head.as_deref() != Some(hash.as_str()) {
+            self.message = "reword of older commits comes in a later phase".into();
+            return;
+        }
+        let value = self
+            .engine
+            .commit_body(&hash)
+            .unwrap_or_default()
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        self.overlay = Overlay::Input(InputState {
+            title: "Reword last commit".into(),
+            value,
+            purpose: InputPurpose::RewordHead,
+        });
+    }
+
+    /// Rebuild the whole log browser (branch list, current, commits) after an
+    /// operation that changed the repo structure.
+    fn rebuild_log_view(&mut self) {
+        self.refresh();
+        if self.log.is_some() {
+            self.log = Some(LogView::new(self.engine));
         }
     }
 
@@ -958,6 +1084,66 @@ impl<'e> App<'e> {
                     Err(e) => self.message = e.to_string(),
                 }
             }
+            InputPurpose::NewBranchFrom(start) => {
+                if value.is_empty() {
+                    self.message = "branch name must not be empty".into();
+                    return;
+                }
+                match self.engine.create_branch(&value, &start) {
+                    Ok(()) => {
+                        self.overlay = Overlay::None;
+                        self.rebuild_log_view();
+                        self.message = format!("created & switched to {value}");
+                    }
+                    Err(e) => self.message = e.to_string(),
+                }
+            }
+            InputPurpose::RewordHead => {
+                if value.is_empty() {
+                    self.message = "commit message required".into();
+                    return;
+                }
+                match self.engine.commit(&[], &value, true) {
+                    Ok(_) => {
+                        self.overlay = Overlay::None;
+                        self.reload_log_and_state();
+                        self.message = "reworded".into();
+                    }
+                    Err(e) => self.message = e.to_string(),
+                }
+            }
+            InputPurpose::StashName(target) => {
+                if value.is_empty() {
+                    self.message = "stash name required".into();
+                    return;
+                }
+                match self.engine.stash_push(&value) {
+                    Ok(()) => {
+                        self.overlay = Overlay::None;
+                        self.do_checkout(&target);
+                    }
+                    Err(e) => self.message = e.to_string(),
+                }
+            }
+            InputPurpose::CommitAndSwitch(target) => {
+                if value.is_empty() {
+                    self.message = "commit message required".into();
+                    return;
+                }
+                let files: Vec<String> = self
+                    .status_map
+                    .iter()
+                    .filter(|(_, s)| **s != FileStatus::Untracked)
+                    .map(|(p, _)| p.clone())
+                    .collect();
+                match self.engine.commit(&files, &value, false) {
+                    Ok(_) => {
+                        self.overlay = Overlay::None;
+                        self.do_checkout(&target);
+                    }
+                    Err(e) => self.message = e.to_string(),
+                }
+            }
         }
     }
 
@@ -1062,6 +1248,24 @@ impl<'e> App<'e> {
                     self.after_rebase_step(r, "aborted");
                 }
                 _ => self.message = "resolve conflicts in your editor, then Continue".into(),
+            },
+            PickerPurpose::DirtyCheckout(target) => match id.as_str() {
+                "stash" => {
+                    self.overlay = Overlay::Input(InputState {
+                        title: format!("Stash name (then switch to {target})"),
+                        value: String::new(),
+                        purpose: InputPurpose::StashName(target),
+                    });
+                }
+                "commit" => {
+                    self.overlay = Overlay::Input(InputState {
+                        title: format!("Commit message (then switch to {target})"),
+                        value: String::new(),
+                        purpose: InputPurpose::CommitAndSwitch(target),
+                    });
+                }
+                "switch" => self.do_checkout(&target),
+                _ => {} // cancel
             },
         }
     }
@@ -1178,6 +1382,9 @@ mod tests {
             Ok(())
         }
         fn pull(&self) -> Result<()> {
+            Ok(())
+        }
+        fn stash_push(&self, _: &str) -> Result<()> {
             Ok(())
         }
         fn rebase_onto(&self, _: &str) -> Result<()> {
@@ -1368,6 +1575,41 @@ mod tests {
         app.handle_key(key_char('x')); // any key closes
         assert!(matches!(app.overlay, Overlay::None));
         assert!(app.log.is_some(), "closing help stays in the log browser");
+    }
+
+    #[test]
+    fn log_checkout_stashes_dirty_then_switches() {
+        use crate::engine::GixEngine;
+        let dir = init_repo("logco");
+        let engine = GixEngine::discover(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "1").unwrap();
+        engine.commit(&["a.txt".to_string()], "c1", false).unwrap();
+        let base = engine.branch_state().unwrap().current_branch.unwrap();
+        engine.create_branch("feature", "HEAD").unwrap(); // switches to feature
+        engine.checkout_branch(&base).unwrap(); // back to base
+        std::fs::write(dir.join("a.txt"), "dirty").unwrap(); // tracked change
+
+        let mut app = App::new(&engine);
+        app.on_action(Action::Log);
+        app.log_checkout("feature".to_string());
+        // dirty -> the how-to-switch picker opens
+        assert!(matches!(app.overlay, Overlay::Picker(_)));
+        app.handle_key(key(event::KeyCode::Enter)); // "Stash (shelve) & switch"
+        assert!(matches!(app.overlay, Overlay::Input(_)));
+        for c in "wip".chars() {
+            app.handle_key(key_char(c));
+        }
+        app.handle_key(key(event::KeyCode::Enter)); // stash + checkout
+
+        assert_eq!(
+            engine.branch_state().unwrap().current_branch.as_deref(),
+            Some("feature")
+        );
+        assert!(
+            engine.status().unwrap().is_empty(),
+            "changes were stashed away"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn init_repo(tag: &str) -> std::path::PathBuf {
@@ -1843,6 +2085,9 @@ mod tests {
                 Ok(())
             }
             fn pull(&self) -> Result<()> {
+                Ok(())
+            }
+            fn stash_push(&self, _: &str) -> Result<()> {
                 Ok(())
             }
             fn rebase_onto(&self, _: &str) -> Result<()> {
