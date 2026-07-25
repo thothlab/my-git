@@ -98,8 +98,10 @@ impl ChangelistStore {
 
     /// Reconcile the store with the current working tree (ТЗ §6.2 rules 1–4):
     /// prune vanished files, enforce one-list membership, and route unassigned
-    /// changed files into the active list (or Default).
-    pub fn sync(&mut self, changed: &[ChangedFile]) {
+    /// changed files into the active list (or Default). Returns `true` if the
+    /// store was modified (so callers can skip persisting on an idle tick).
+    pub fn sync(&mut self, changed: &[ChangedFile]) -> bool {
+        let before = self.changelists.clone();
         let changed_paths: BTreeSet<&str> = changed.iter().map(|f| f.path.as_str()).collect();
 
         // Prune vanished files; enforce at-most-one-list by tracking what we keep.
@@ -117,6 +119,7 @@ impl ChangelistStore {
                 kept.insert(f.path.clone());
             }
         }
+        before != self.changelists
     }
 
     /// Index of the active list, falling back to the Default list.

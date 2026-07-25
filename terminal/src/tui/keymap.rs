@@ -88,7 +88,7 @@ pub const BINDINGS: &[(&str, Action)] = &[
     ("B", Action::Branches),
     ("L", Action::Log),
     ("R", Action::Rebase),
-    ("F5", Action::Refresh),
+    ("F5 / ^R", Action::Refresh),
     ("?", Action::Help),
     ("q", Action::Quit),
 ];
@@ -102,6 +102,10 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
     }
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return Some(Quit);
+    }
+    // Ctrl-R is a reliable refresh (F5 is intercepted by macOS by default).
+    if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return Some(Refresh);
     }
     let action = match key.code {
         KeyCode::Char('q') => Quit,

@@ -13,6 +13,7 @@ use crossterm::event::{self, Event};
 use keymap::{resolve, Action};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use theme::Theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -165,14 +166,16 @@ impl<'e> App<'e> {
         app
     }
 
-    /// Reconcile with the real working tree (ТЗ §6.2), refresh branch state, and
-    /// rebuild the view. Called on start, on refresh, and after operations.
-    fn refresh(&mut self) {
+    /// Re-scan the working tree (ТЗ §6.2) and branch state, and rebuild the rows.
+    /// Persists the store only when reconciliation actually changed it, so idle
+    /// auto-refresh ticks don't churn `.git/changelists.json`.
+    fn reload_status(&mut self) {
         match self.engine.status() {
             Ok(changed) => {
-                self.store.sync(&changed);
-                if let Err(e) = self.store.persist(&self.store_path) {
-                    self.message = format!("⚠ save failed: {e}");
+                if self.store.sync(&changed) {
+                    if let Err(e) = self.store.persist(&self.store_path) {
+                        self.message = format!("⚠ save failed: {e}");
+                    }
                 }
                 self.status_map = changed.into_iter().map(|f| (f.path, f.status)).collect();
             }
@@ -180,8 +183,39 @@ impl<'e> App<'e> {
         }
         self.branch = self.engine.branch_state().unwrap_or_default();
         self.rebuild_rows();
+    }
+
+    /// Full manual refresh (F5 / Ctrl-R): re-scan and recompute the diff.
+    fn refresh(&mut self) {
+        self.reload_status();
         self.diff_path = None; // force diff recompute for the current selection
         self.update_diff();
+        if self.right == RightView::Log {
+            self.reload_log();
+        }
+    }
+
+    /// Periodic background refresh: reflect on-disk edits without disturbing an
+    /// open overlay or the diff scroll position.
+    fn auto_refresh(&mut self) {
+        if !matches!(self.overlay, Overlay::None) {
+            return;
+        }
+        self.reload_status();
+        // Recompute the diff for the current selection, keeping the scroll offset.
+        if let Some(p) = self.selected_path().map(str::to_string) {
+            self.diff = self
+                .engine
+                .diff(&p)
+                .unwrap_or_else(|e| format!("(diff unavailable: {e})"));
+            self.diff_path = Some(p);
+        } else {
+            self.diff.clear();
+            self.diff_path = None;
+        }
+        if self.right == RightView::Log {
+            self.reload_log();
+        }
     }
 
     fn rebuild_rows(&mut self) {
@@ -229,10 +263,20 @@ impl<'e> App<'e> {
     }
 
     fn event_loop(&mut self, term: &mut ratatui::DefaultTerminal) -> Result<()> {
+        let auto_every = Duration::from_millis(1500);
+        let mut last_auto = Instant::now();
         while !self.quit {
             term.draw(|f| ui::render(f, self))?;
-            if let Event::Key(key) = event::read()? {
-                self.handle_key(key);
+            // Poll with a timeout so the panel can auto-refresh while idle
+            // (F5 is unreliable on macOS; this keeps the view live regardless).
+            if event::poll(Duration::from_millis(250))? {
+                if let Event::Key(key) = event::read()? {
+                    self.handle_key(key);
+                }
+            }
+            if last_auto.elapsed() >= auto_every {
+                self.auto_refresh();
+                last_auto = Instant::now();
             }
         }
         Ok(())
@@ -1436,6 +1480,42 @@ mod tests {
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
             "feature version\n",
             "abort restores the pre-rebase feature state"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_refresh_picks_up_new_file() {
+        use crate::engine::GixEngine;
+        let dir = init_repo("autorefresh");
+        std::fs::write(dir.join("committed.txt"), "x").unwrap();
+        let engine = GixEngine::discover(&dir).unwrap();
+        engine
+            .commit(&["committed.txt".to_string()], "init", false)
+            .unwrap();
+
+        let mut app = App::new(&engine);
+        assert!(app.status_map.is_empty(), "clean tree at start");
+
+        // User edits a file on disk; no key pressed — the background tick catches it.
+        std::fs::write(dir.join("new.txt"), "hello").unwrap();
+        app.auto_refresh();
+        assert!(
+            app.status_map.contains_key("new.txt"),
+            "auto-refresh picks up new.txt"
+        );
+        assert!(app
+            .rows
+            .iter()
+            .any(|r| matches!(r, Row::File { path, .. } if path == "new.txt")));
+
+        // Auto-refresh must not run while an overlay is open.
+        app.overlay = Overlay::Help;
+        std::fs::write(dir.join("another.txt"), "y").unwrap();
+        app.auto_refresh();
+        assert!(
+            !app.status_map.contains_key("another.txt"),
+            "no refresh while an overlay is open"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
