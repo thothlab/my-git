@@ -206,6 +206,10 @@ fn render_log(f: &mut Frame, app: &App<'_>, area: Rect) {
                 Style::default().fg(t.accent),
             ));
         }
+        spans.push(Span::styled(
+            format!("  — {}", c.author),
+            Style::default().fg(t.fg_muted),
+        ));
         let mut line = Line::from(spans);
         if selected {
             line = line.style(Style::default().bg(t.sel_bg));

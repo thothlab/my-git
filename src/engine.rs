@@ -96,6 +96,9 @@ pub trait GitEngine {
     fn create_branch(&self, name: &str, from: &str) -> Result<()>;
     fn push(&self, branch: &str, opts: &PushOpts) -> Result<()>;
     fn fetch(&self) -> Result<()>;
+    /// Reserved API (PRD "API list"); the UI currently uses fetch for the safe
+    /// incremental path. Wired to a key in a later iteration.
+    #[allow(dead_code)]
     fn pull(&self) -> Result<()>;
     fn rebase_onto(&self, target: &str) -> Result<()>;
     fn rebase_continue(&self) -> Result<()>;

@@ -105,13 +105,8 @@ impl ChangelistStore {
         // Prune vanished files; enforce at-most-one-list by tracking what we keep.
         let mut kept: BTreeSet<String> = BTreeSet::new();
         for list in &mut self.changelists {
-            list.files.retain(|f| {
-                if changed_paths.contains(f.as_str()) && kept.insert(f.clone()) {
-                    true
-                } else {
-                    false
-                }
-            });
+            list.files
+                .retain(|f| changed_paths.contains(f.as_str()) && kept.insert(f.clone()));
         }
 
         // Unassigned changed files → active list (or Default).
