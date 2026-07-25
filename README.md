@@ -18,7 +18,23 @@ JetBrains): изменённые файлы группируются в имен
 
 ## Установка — terminal (TUI)
 
-Скачайте готовый бинарник со страницы **[Releases](../../releases)** под вашу платформу,
+**Быстро (без Gatekeeper / `xattr`):**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/thothlab/my-git/main/install.sh | sh
+```
+
+Ставит в `/usr/local/bin` (может запросить `sudo`). Свой путь — флагом `--dir`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/thothlab/my-git/main/install.sh | sh -s -- --dir ~/bin
+```
+
+Установщик качает бинарник через `curl`, поэтому macOS **не** ставит карантин — команда
+`xattr` не нужна. Опции: `--dir <путь>` (по умолчанию `/usr/local/bin`),
+`--version vX.Y.Z` (по умолчанию последний релиз).
+
+**Вручную:** скачайте архив со страницы **[Releases](../../releases)** под вашу платформу,
 распакуйте и положите `mygit` в `PATH`. Затем запустите `mygit` внутри любого
 git-репозитория.
 

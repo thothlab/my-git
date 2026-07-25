@@ -16,8 +16,23 @@ Both tools operate on one repository and share the same
 
 ## Install — terminal (TUI)
 
-Download a prebuilt binary from **[Releases](../../releases)** for your platform, extract,
-and put `mygit` on your `PATH`. Then run `mygit` inside any git repository.
+**Quick (no Gatekeeper / `xattr`):**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/thothlab/my-git/main/install.sh | sh
+```
+
+Installs into `/usr/local/bin` (may prompt for `sudo`). For a different location use `--dir`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/thothlab/my-git/main/install.sh | sh -s -- --dir ~/bin
+```
+
+The installer downloads via `curl`, so macOS does **not** quarantine the binary — no `xattr`
+needed. Options: `--dir <path>` (default `/usr/local/bin`), `--version vX.Y.Z` (default: latest).
+
+**Manual:** download a prebuilt archive from **[Releases](../../releases)** for your platform,
+extract, and put `mygit` on your `PATH`. Then run `mygit` inside any git repository.
 
 - **macOS** (arm64 / x86_64):
   `tar -xzf mygit-*-macos-*.tar.gz && sudo mv mygit /usr/local/bin/`
