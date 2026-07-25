@@ -1,15 +1,17 @@
 name: release
 
 # Builds mygit (terminal / TUI) binaries for macOS, Linux and Windows.
-#   - On a `v*` tag: attaches the archives to a GitHub Release.
-#   - On manual dispatch: uploads them as downloadable workflow artifacts.
+#   - The matrix `build` job compiles each target and uploads it as an artifact.
+#   - A single `release` job then publishes ONE GitHub Release with all archives
+#     (on a v* tag). Doing the publish in one job avoids the create-release race
+#     you get when every matrix job tries to create the same tag's release.
+#   - On manual dispatch: the artifacts are downloadable from the run (no release).
 #
-# The GUI (gui/) will get its own job in this file once it exists.
+# The GUI (gui/) will get its own build entries here once it exists.
 #
 # Cut a release:
-#   1. Bump `version` in terminal/Cargo.toml, commit.
-#   2. git tag v0.x.y && git push --tags
-#   3. The matrix builds and attaches archives to the v0.x.y release.
+#   1. Bump `version` in terminal/Cargo.toml (and refresh Cargo.lock), commit.
+#   2. git tag v0.x.y && git push origin v0.x.y
 
 on:
   push:
@@ -20,8 +22,8 @@ permissions:
   contents: write
 
 jobs:
-  terminal:
-    name: terminal (${{ matrix.name }})
+  build:
+    name: build (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -39,7 +41,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Pinned to the local dev toolchain that builds the locked tree cleanly.
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -72,28 +73,43 @@ jobs:
           Compress-Archive -Path "$dir/mygit.exe" -DestinationPath "$pkg.zip"
           "ASSET=$pkg.zip" >> $env:GITHUB_ENV
 
-      - name: Upload workflow artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: ${{ env.ASSET }}
+          if-no-files-found: error
 
-      - name: Attach to GitHub Release (tags only)
-        if: startsWith(github.ref, 'refs/tags/')
+  release:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ASSET }}
+          files: dist/*
           draft: false
           fail_on_unmatched_files: true
           body: |
             **my-git — terminal (TUI)** binaries for `${{ github.ref_name }}`.
 
-            Download the archive for your platform, extract, and put `mygit` on your PATH,
+            Quick install (no Gatekeeper / `xattr`):
+
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/thothlab/my-git/main/install.sh | sh
+            ```
+
+            Or download an archive for your platform, extract, and put `mygit` on your PATH,
             then run `mygit` inside any git repository.
 
-            - **macOS** (arm64 / x86_64):
-              `tar -xzf mygit-*-macos-*.tar.gz && sudo mv mygit /usr/local/bin/`
-              (if Gatekeeper blocks it: `xattr -d com.apple.quarantine /usr/local/bin/mygit`)
-            - **Linux** (x86_64 / arm64):
-              `tar -xzf mygit-*-linux-*.tar.gz && sudo mv mygit /usr/local/bin/`
+            - **macOS** (arm64 / x86_64): `tar -xzf mygit-*-macos-*.tar.gz && sudo mv mygit /usr/local/bin/`
+            - **Linux** (x86_64 / arm64): `tar -xzf mygit-*-linux-*.tar.gz && sudo mv mygit /usr/local/bin/`
             - **Windows** (x86_64): unzip and put `mygit.exe` on your PATH.
