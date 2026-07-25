@@ -6,7 +6,7 @@ mod keymap;
 mod theme;
 mod ui;
 
-use crate::changelists::{store_path, ChangelistStore};
+use crate::changelists::{store_path, ChangelistStore, UNVERSIONED_ID};
 use crate::engine::{BranchState, Commit, FileStatus, GitEngine, PushOpts, ResetMode};
 use anyhow::Result;
 use crossterm::event::{self, Event};
@@ -83,7 +83,6 @@ pub struct PickerItem {
 
 #[derive(Clone)]
 pub enum PickerPurpose {
-    SetActive,
     MoveFiles(Vec<String>),
     ResetMode(String),
     Checkout,
@@ -329,7 +328,6 @@ impl<'e> App<'e> {
             NewList => self.open_new_list(),
             RenameList => self.open_rename_list(),
             DeleteList => self.delete_current_list(),
-            SetActive => self.open_set_active(),
             MoveFiles => self.open_move_files(),
             Commit => self.open_commit(false),
             Amend => self.open_commit(true),
@@ -748,6 +746,10 @@ impl<'e> App<'e> {
     fn open_rename_list(&mut self) {
         if let Some(li) = self.current_list() {
             let cl = &self.store.changelists[li];
+            if cl.id == UNVERSIONED_ID {
+                self.message = "Unversioned Files is managed automatically".into();
+                return;
+            }
             self.overlay = Overlay::Input(InputState {
                 title: format!("Rename '{}'", cl.name),
                 value: cl.name.clone(),
@@ -766,16 +768,6 @@ impl<'e> App<'e> {
         }
     }
 
-    fn open_set_active(&mut self) {
-        let items = self.picker_items_all_lists();
-        self.overlay = Overlay::Picker(PickerState {
-            title: "Set active changelist".into(),
-            items,
-            cursor: 0,
-            purpose: PickerPurpose::SetActive,
-        });
-    }
-
     fn open_move_files(&mut self) {
         let files = self.action_files();
         if files.is_empty() {
@@ -791,10 +783,12 @@ impl<'e> App<'e> {
         });
     }
 
+    /// Real (movable) lists — excludes the auto-managed Unversioned Files list.
     fn picker_items_all_lists(&self) -> Vec<PickerItem> {
         self.store
             .changelists
             .iter()
+            .filter(|c| c.id != UNVERSIONED_ID)
             .map(|c| PickerItem {
                 label: c.name.clone(),
                 id: c.id.clone(),
@@ -847,8 +841,7 @@ impl<'e> App<'e> {
                     return;
                 }
                 match self.store.create(&value) {
-                    Ok(id) => {
-                        let _ = self.store.set_active(&id);
+                    Ok(_) => {
                         self.overlay = Overlay::None;
                         self.commit_store_change("changelist created");
                     }
@@ -940,10 +933,6 @@ impl<'e> App<'e> {
         let purpose = p.purpose.clone();
         self.overlay = Overlay::None;
         match purpose {
-            PickerPurpose::SetActive => {
-                let _ = self.store.set_active(&id);
-                self.commit_store_change("active changelist set");
-            }
             PickerPurpose::MoveFiles(paths) => match self.store.move_files(&paths, &id) {
                 Ok(()) => {
                     self.marked.clear();
@@ -1152,8 +1141,9 @@ mod tests {
         };
         let mut app = App::new(&mock);
 
-        // Default header + a.rs + b.rs, both synced into the active Default list.
-        assert_eq!(app.rows.len(), 3);
+        // Default header + a.rs (modified), then Unversioned Files header + b.rs
+        // (untracked): 4 rows.
+        assert_eq!(app.rows.len(), 4);
         assert!(matches!(app.rows[0], Row::Header { .. }));
 
         app.on_action(Action::Down); // onto a.rs
@@ -1264,10 +1254,18 @@ mod tests {
     fn commit_default_excludes_not_for_commit() {
         use crate::engine::GixEngine;
         let dir = init_repo("commit");
+        // Seed both files as tracked, then modify them so they land in Default
+        // (modified/tracked), not Unversioned (which is only for untracked).
         std::fs::write(dir.join("a.txt"), "a").unwrap();
         std::fs::write(dir.join("b.txt"), "b").unwrap();
         let engine = GixEngine::discover(&dir).unwrap();
-        let mut app = App::new(&engine); // a.txt, b.txt -> Default
+        engine
+            .commit(&["a.txt".to_string(), "b.txt".to_string()], "seed", false)
+            .unwrap();
+        std::fs::write(dir.join("a.txt"), "a2").unwrap();
+        std::fs::write(dir.join("b.txt"), "b2").unwrap();
+
+        let mut app = App::new(&engine); // a.txt, b.txt (modified) -> Default
 
         let nfc = app.store.create("Not for commit").unwrap();
         app.store.move_files(&["b.txt".to_string()], &nfc).unwrap();
@@ -1278,13 +1276,13 @@ mod tests {
         app.cursor = 0;
         app.on_action(Action::Commit);
         assert!(matches!(app.overlay, Overlay::Input(_)));
-        for c in "add a".chars() {
+        for c in "edit a".chars() {
             app.handle_key(key_char(c));
         }
         app.handle_key(key(event::KeyCode::Enter));
 
         let log = engine.log(10).unwrap();
-        assert_eq!(log.len(), 1, "exactly one commit expected");
+        assert_eq!(log.len(), 2, "seed + the Default commit");
         let changed = engine.status().unwrap();
         assert!(
             !changed.iter().any(|f| f.path == "a.txt"),
@@ -1589,6 +1587,11 @@ mod tests {
         let dir = init_repo("emptymsg");
         std::fs::write(dir.join("a.txt"), "a").unwrap();
         let engine = GixEngine::discover(&dir).unwrap();
+        engine
+            .commit(&["a.txt".to_string()], "seed", false)
+            .unwrap();
+        std::fs::write(dir.join("a.txt"), "a2").unwrap(); // modified -> Default
+
         let mut app = App::new(&engine);
         app.cursor = 0;
         app.on_action(Action::Commit);
@@ -1597,7 +1600,11 @@ mod tests {
             matches!(app.overlay, Overlay::Input(_)),
             "overlay stays open on empty message"
         );
-        assert_eq!(engine.log(10).unwrap().len(), 0, "no commit created");
+        assert_eq!(
+            engine.log(10).unwrap().len(),
+            1,
+            "no new commit created (only seed)"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1615,7 +1622,14 @@ mod tests {
         let buf = terminal.backend().buffer().clone();
         let text: String = buf.content.iter().map(|c| c.symbol()).collect();
 
-        for needle in ["CHANGES", "DIFF", "main", "a.rs", "active:", "Default"] {
+        for needle in [
+            "CHANGES",
+            "DIFF",
+            "main",
+            "a.rs",
+            "Default",
+            "Unversioned Files",
+        ] {
             assert!(text.contains(needle), "rendered frame missing {needle:?}");
         }
     }

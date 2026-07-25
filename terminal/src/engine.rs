@@ -561,18 +561,31 @@ mod tests {
         // mixed reset back one commit -> b.txt becomes an uncommitted change
         engine.reset("HEAD~1", ResetMode::Mixed).unwrap();
         assert_eq!(engine.log(10).unwrap().len(), 1);
+        // b.txt is now untracked (the reset dropped c2); it shows in status but
+        // lives in the derived, non-persisted Unversioned list.
         assert!(engine.status().unwrap().iter().any(|f| f.path == "b.txt"));
 
-        // startup pipeline persists assignments (AC#2 path)
+        // A tracked modification persists through the startup pipeline (AC#2).
+        std::fs::write(dir.join("a.txt"), b"one-modified").unwrap();
         let sp = store_path(engine.repo_root());
         let mut store = ChangelistStore::load(&sp).unwrap();
         store.sync(&engine.status().unwrap());
         store.persist(&sp).unwrap();
         let reloaded = ChangelistStore::load(&sp).unwrap();
-        assert!(reloaded
-            .changelists
-            .iter()
-            .any(|c| c.files.iter().any(|f| f == "b.txt")));
+        assert!(
+            reloaded
+                .changelists
+                .iter()
+                .any(|c| c.files.iter().any(|f| f == "a.txt")),
+            "modified tracked file persists to Default"
+        );
+        assert!(
+            !reloaded
+                .changelists
+                .iter()
+                .any(|c| c.files.iter().any(|f| f == "b.txt")),
+            "untracked file is not persisted"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

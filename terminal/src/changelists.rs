@@ -6,7 +6,7 @@
 //! and atomic conflict-tolerant persistence. It is pure logic — `sync` takes the
 //! current changed files as input, so it is decoupled from the engine backend.
 
-use crate::engine::ChangedFile;
+use crate::engine::{ChangedFile, FileStatus};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -18,6 +18,13 @@ use std::path::{Path, PathBuf};
 pub const STORE_VERSION: u32 = 1;
 /// Stable id of the always-present, non-deletable Default list.
 pub const DEFAULT_ID: &str = "default";
+/// Stable id of the auto-managed "Unversioned Files" list. It holds untracked
+/// (brand-new) files, is derived from `git status` on each sync, and is **never
+/// persisted** to `changelists.json` — so the two tools can't fight over
+/// untracked-file placement. It appears only when untracked files exist.
+pub const UNVERSIONED_ID: &str = "unversioned";
+/// Display name of the auto-managed unversioned list.
+pub const UNVERSIONED_NAME: &str = "Unversioned Files";
 
 /// One changelist. Field order matches the ТЗ §6.1 schema so serialized output
 /// stays byte-shape-compatible with the GUI version.
@@ -82,9 +89,13 @@ impl ChangelistStore {
 
     /// Atomic write (temp file + rename) so a concurrent GUI writer never sees a
     /// partial file; the rename makes the last writer win at file granularity.
+    /// The derived Unversioned Files list is stripped — untracked files are never
+    /// persisted.
     pub fn persist(&self, path: &Path) -> Result<()> {
         let dir = path.parent().context("store path has no parent")?;
-        let json = serde_json::to_string_pretty(self)?;
+        let mut persisted = self.clone();
+        persisted.changelists.retain(|c| c.id != UNVERSIONED_ID);
+        let json = serde_json::to_string_pretty(&persisted)?;
         let tmp = path.with_file_name(format!("changelists.json.{}.tmp", std::process::id()));
         std::fs::write(&tmp, json.as_bytes())
             .with_context(|| format!("writing {}", tmp.display()))?;
@@ -96,39 +107,65 @@ impl ChangelistStore {
         Ok(())
     }
 
-    /// Reconcile the store with the current working tree (ТЗ §6.2 rules 1–4):
-    /// prune vanished files, enforce one-list membership, and route unassigned
-    /// changed files into the active list (or Default). Returns `true` if the
-    /// store was modified (so callers can skip persisting on an idle tick).
+    /// Reconcile the store with the current working tree (ТЗ §6.2):
+    /// - **tracked** changed files (modified/added/deleted/renamed/conflicted)
+    ///   that aren't assigned anywhere fall into the **Default** list;
+    /// - **untracked** (brand-new) files go into the derived, non-persisted
+    ///   **Unversioned Files** list, which appears only while such files exist;
+    /// - vanished files are pruned and each file stays in at most one list.
+    ///
+    /// Returns `true` if the persisted (tracked) assignments changed, so callers
+    /// can skip rewriting `changelists.json` on an idle tick (untracked churn
+    /// alone does not trigger a write).
     pub fn sync(&mut self, changed: &[ChangedFile]) -> bool {
-        let before = self.changelists.clone();
-        let changed_paths: BTreeSet<&str> = changed.iter().map(|f| f.path.as_str()).collect();
+        // The Unversioned list is derived; drop any in-memory copy before
+        // reconciling the real (persisted, tracked) lists.
+        self.changelists.retain(|c| c.id != UNVERSIONED_ID);
 
-        // Prune vanished files; enforce at-most-one-list by tracking what we keep.
+        let tracked: BTreeSet<&str> = changed
+            .iter()
+            .filter(|f| f.status != FileStatus::Untracked)
+            .map(|f| f.path.as_str())
+            .collect();
+
+        let before = self.changelists.clone();
+
+        // Prune vanished/untracked from real lists; enforce at-most-one-list.
         let mut kept: BTreeSet<String> = BTreeSet::new();
         for list in &mut self.changelists {
             list.files
-                .retain(|f| changed_paths.contains(f.as_str()) && kept.insert(f.clone()));
+                .retain(|f| tracked.contains(f.as_str()) && kept.insert(f.clone()));
         }
 
-        // Unassigned changed files → active list (or Default).
-        let target = self.active_index();
+        // Unassigned tracked changes → Default.
+        let default = self.default_index();
         for f in changed {
-            if !kept.contains(&f.path) {
-                self.changelists[target].files.push(f.path.clone());
+            if f.status != FileStatus::Untracked && !kept.contains(&f.path) {
+                self.changelists[default].files.push(f.path.clone());
                 kept.insert(f.path.clone());
             }
         }
-        before != self.changelists
-    }
 
-    /// Index of the active list, falling back to the Default list.
-    fn active_index(&self) -> usize {
-        self.changelists
+        let tracked_changed = before != self.changelists;
+
+        // Rebuild the derived Unversioned Files list (untracked entries only).
+        let mut untracked: Vec<String> = changed
             .iter()
-            .position(|c| c.id == self.active_changelist_id)
-            .or_else(|| self.changelists.iter().position(|c| c.is_default))
-            .unwrap_or(0)
+            .filter(|f| f.status == FileStatus::Untracked)
+            .map(|f| f.path.clone())
+            .collect();
+        if !untracked.is_empty() {
+            untracked.sort();
+            self.changelists.push(Changelist {
+                id: UNVERSIONED_ID.to_string(),
+                name: UNVERSIONED_NAME.to_string(),
+                comment: String::new(),
+                is_default: false,
+                files: untracked,
+            });
+        }
+
+        tracked_changed
     }
 
     fn default_index(&self) -> usize {
@@ -140,6 +177,10 @@ impl ChangelistStore {
 
     /// Create a new (non-default) list. Rejects a duplicate name.
     pub fn create(&mut self, name: &str) -> Result<String> {
+        anyhow::ensure!(
+            name != UNVERSIONED_NAME,
+            "\"{UNVERSIONED_NAME}\" is a reserved list name"
+        );
         anyhow::ensure!(
             !self.changelists.iter().any(|c| c.name == name),
             "a changelist named {name:?} already exists"
@@ -158,6 +199,10 @@ impl ChangelistStore {
     /// Rename a list (id stays stable). Rejects a duplicate name.
     pub fn rename(&mut self, id: &str, name: &str) -> Result<()> {
         anyhow::ensure!(
+            id != UNVERSIONED_ID && name != UNVERSIONED_NAME,
+            "the Unversioned Files list is managed automatically"
+        );
+        anyhow::ensure!(
             !self
                 .changelists
                 .iter()
@@ -172,6 +217,10 @@ impl ChangelistStore {
     /// Delete a non-default list; its files fall back to Default. The Default
     /// list cannot be deleted.
     pub fn delete(&mut self, id: &str) -> Result<()> {
+        anyhow::ensure!(
+            id != UNVERSIONED_ID,
+            "the Unversioned Files list is managed automatically"
+        );
         let idx = self
             .changelists
             .iter()
@@ -185,25 +234,16 @@ impl ChangelistStore {
         self.changelists.remove(idx);
         let def = self.default_index();
         self.changelists[def].files.extend(orphaned);
-        if self.active_changelist_id == id {
-            self.active_changelist_id = self.changelists[self.default_index()].id.clone();
-        }
-        Ok(())
-    }
-
-    /// Set the active list (unassigned changed files land here on sync).
-    pub fn set_active(&mut self, id: &str) -> Result<()> {
-        anyhow::ensure!(
-            self.changelists.iter().any(|c| c.id == id),
-            "no changelist {id:?}"
-        );
-        self.active_changelist_id = id.to_string();
         Ok(())
     }
 
     /// Move files to `target_id`, removing them from every other list so each
     /// file belongs to at most one list.
     pub fn move_files(&mut self, paths: &[String], target_id: &str) -> Result<()> {
+        anyhow::ensure!(
+            target_id != UNVERSIONED_ID,
+            "the Unversioned Files list is managed automatically"
+        );
         let target = self
             .changelists
             .iter()
@@ -335,13 +375,61 @@ mod tests {
     }
 
     #[test]
-    fn active_list_captures_unassigned() {
+    fn modified_to_default_untracked_to_unversioned() {
         let mut s = ChangelistStore::default();
-        let wip = s.create("WIP").unwrap();
-        s.set_active(&wip).unwrap();
-        s.sync(&changed(&["src/ui.rs"]));
-        let wip_list = s.changelists.iter().find(|c| c.id == wip).unwrap();
-        assert_eq!(wip_list.files, vec!["src/ui.rs"]);
+        s.create("WIP").unwrap(); // a user list must NOT capture new changes
+        s.sync(&[
+            ChangedFile {
+                path: "src/ui.rs".into(),
+                status: FileStatus::Modified,
+            },
+            ChangedFile {
+                path: "new.rs".into(),
+                status: FileStatus::Untracked,
+            },
+        ]);
+        let def = s.changelists.iter().find(|c| c.is_default).unwrap();
+        assert!(
+            def.files.iter().any(|f| f == "src/ui.rs"),
+            "modified -> Default"
+        );
+        let wip = s.changelists.iter().find(|c| c.name == "WIP").unwrap();
+        assert!(
+            wip.files.is_empty(),
+            "new changes don't fall into a user list"
+        );
+        let unv = s
+            .changelists
+            .iter()
+            .find(|c| c.id == UNVERSIONED_ID)
+            .unwrap();
+        assert_eq!(unv.name, UNVERSIONED_NAME);
+        assert_eq!(unv.files, vec!["new.rs"], "untracked -> Unversioned Files");
+    }
+
+    #[test]
+    fn unversioned_is_auto_managed_and_not_persisted() {
+        let dir = std::env::temp_dir().join(format!("mygit-unv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("changelists.json");
+        let mut s = ChangelistStore::default();
+        s.sync(&[ChangedFile {
+            path: "new.rs".into(),
+            status: FileStatus::Untracked,
+        }]);
+        assert!(s.changelists.iter().any(|c| c.id == UNVERSIONED_ID));
+        s.persist(&path).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains(UNVERSIONED_ID),
+            "unversioned list not persisted"
+        );
+        assert!(!on_disk.contains("new.rs"), "untracked files not persisted");
+        s.sync(&[]); // the untracked file is gone
+        assert!(
+            !s.changelists.iter().any(|c| c.id == UNVERSIONED_ID),
+            "auto-removed when no untracked files remain"
+        );
     }
 
     #[test]
@@ -371,8 +459,8 @@ mod tests {
     fn files_survive_list_deletion() {
         let mut s = ChangelistStore::default();
         let wip = s.create("WIP").unwrap();
-        s.set_active(&wip).unwrap();
-        s.sync(&changed(&["src/ui.rs"]));
+        s.sync(&changed(&["src/ui.rs"])); // -> Default
+        s.move_files(&["src/ui.rs".to_string()], &wip).unwrap(); // -> WIP
         s.delete(&wip).unwrap();
         let def = s.changelists.iter().find(|c| c.is_default).unwrap();
         assert!(def.files.iter().any(|f| f == "src/ui.rs"));

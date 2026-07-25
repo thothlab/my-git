@@ -54,12 +54,18 @@ cargo build --release
 
 Requires a recent Rust toolchain (built and tested on 1.94).
 
+## Changelists
+
+Changed (tracked) files land in the **Default** list. Brand-new (untracked) files are
+collected automatically into an **Unversioned Files** list that appears and disappears on
+its own. Move files between lists with `m`; commits are made per list.
+
 ## Keys (TUI)
 
 `j/k` navigate · `Tab` switch panel · `space` mark · `n/r/d` new/rename/delete list ·
-`s` set active · `m` move files · `c` commit · `A` amend · `u` rollback file ·
+`m` move files · `c` commit · `A` amend · `u` rollback file ·
 `P` push · `F` fetch · `B` branches · `L` log (→ `v` revert / `x` reset) · `R` rebase ·
-`?` help · `q` quit.
+`Ctrl-R` refresh · `?` help · `q` quit.
 
 ## Docs
 

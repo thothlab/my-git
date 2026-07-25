@@ -59,15 +59,8 @@ fn render_status_bar(f: &mut Frame, app: &App<'_>, area: Rect) {
         format!("↑{} ↓{} ", b.ahead, b.behind),
         Style::default().fg(if b.behind > 0 { t.warn } else { t.success }),
     ));
-    let active = app
-        .store
-        .changelists
-        .iter()
-        .find(|c| c.id == app.store.active_changelist_id)
-        .map(|c| c.name.as_str())
-        .unwrap_or("Default");
     spans.push(Span::styled(
-        format!("active: {active}  "),
+        format!("{} changed  ", app.status_map.len()),
         Style::default().fg(t.fg_muted),
     ));
     spans.push(Span::styled("[? help]", Style::default().fg(t.fg_muted)));
@@ -123,14 +116,15 @@ fn render_changes(f: &mut Frame, app: &App<'_>, area: Rect) {
                     .iter()
                     .filter(|p| app.status_map.contains_key(*p))
                     .count();
-                let marker = if cl.id == app.store.active_changelist_id {
-                    "●"
+                // The auto Unversioned Files list is tinted to read as special.
+                let color = if cl.id == crate::changelists::UNVERSIONED_ID {
+                    t.warn
                 } else {
-                    "▸"
+                    t.accent
                 };
                 Line::from(Span::styled(
-                    format!("{marker} {} ({count})", cl.name),
-                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                    format!("▸ {} ({count})", cl.name),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ))
             }
             Row::File { path, status, .. } => {
@@ -268,7 +262,7 @@ fn render_footer(f: &mut Frame, app: &App<'_>, area: Rect) {
     let hints = if app.right == RightView::Log {
         "[v]revert [x]reset [j/k]nav [L]back [?]help [q]quit"
     } else {
-        "[n]new [m]move [s]active [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [?]help [q]quit"
+        "[n]new [m]move [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [?]help [q]quit"
     };
     let line = if app.message.is_empty() {
         Line::from(Span::styled(hints, Style::default().fg(t.fg_muted)))
