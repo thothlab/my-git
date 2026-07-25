@@ -58,11 +58,54 @@ pub fn render(f: &mut Frame, app: &App<'_>) {
     }
     match &app.overlay {
         Overlay::Help(cursor) => render_help(f, app, area, *cursor),
+        Overlay::LogHelp => render_log_help(f, app, area),
         Overlay::Input(s) => render_input(f, app, area, s),
         Overlay::Picker(p) => render_picker(f, app, area, p),
         Overlay::Confirm(c) => render_confirm(f, app, area, c),
         Overlay::None => {}
     }
+}
+
+fn render_log_help(f: &mut Frame, app: &App<'_>, area: Rect) {
+    let t = &app.theme;
+    let keys: &[(&str, &str)] = &[
+        ("Tab", "switch pane (Branches / Commits / Files)"),
+        ("j / k / ↑↓", "navigate the focused pane"),
+        ("Enter", "select branch · expand/collapse folder"),
+        ("v", "revert the selected commit"),
+        ("x", "reset to the selected commit"),
+        (
+            "mouse",
+            "click to select · click a folder to fold · wheel scrolls",
+        ),
+        ("drag", "drag the dividers to resize panels"),
+        ("L / Esc", "back to Changes"),
+    ];
+    let w = 62.min(area.width.saturating_sub(4));
+    let h = (keys.len() as u16 + 4).min(area.height.saturating_sub(2));
+    let rect = centered(area, w, h);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(Line::from(" Log browser — keys "))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.accent));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let mut lines: Vec<Line> = keys
+        .iter()
+        .map(|(k, d)| {
+            Line::from(vec![
+                Span::styled(format!(" {k:<12}"), Style::default().fg(t.accent)),
+                Span::styled(*d, Style::default().fg(t.fg)),
+            ])
+        })
+        .collect();
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " any key to close",
+        Style::default().fg(t.fg_muted),
+    )));
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_status_bar(f: &mut Frame, app: &App<'_>, area: Rect) {
@@ -231,7 +274,7 @@ fn diff_line(l: &str, t: &Theme) -> Line<'static> {
 fn render_footer(f: &mut Frame, app: &App<'_>, area: Rect) {
     let t = &app.theme;
     let hints = if app.log.is_some() {
-        "[Tab]pane [j/k]nav [Enter]branch/folder [v]revert [x]reset drag dividers · [L/Esc]back"
+        "[Tab]pane [j/k]nav [Enter]branch/folder [v]revert [x]reset [?]help · drag dividers · [L/Esc]back"
     } else {
         "[n]new [m]move [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [?]help [q]quit"
     };

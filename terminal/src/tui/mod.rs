@@ -29,6 +29,8 @@ pub enum Overlay {
     None,
     /// Interactive help / command palette; the `usize` is the selected row.
     Help(usize),
+    /// Static key reference for the Log browser (any key closes).
+    LogHelp,
     Input(InputState),
     Picker(PickerState),
     Confirm(ConfirmState),
@@ -290,6 +292,7 @@ impl<'e> App<'e> {
         }
         match self.overlay {
             Overlay::Help(_) => self.handle_help_key(key),
+            Overlay::LogHelp => self.overlay = Overlay::None, // any key closes
             Overlay::Input(_) => self.handle_input_key(key),
             Overlay::Picker(_) => self.handle_picker_key(key),
             Overlay::Confirm(_) => self.handle_confirm_key(key),
@@ -588,6 +591,7 @@ impl<'e> App<'e> {
         match action {
             LogAction::None => {}
             LogAction::Exit => self.log = None,
+            LogAction::Help => self.overlay = Overlay::LogHelp,
             LogAction::Revert(hash) => match engine.revert(&hash) {
                 Ok(()) => {
                     self.reload_log_and_state();
@@ -1350,6 +1354,20 @@ mod tests {
         for needle in ["BRANCHES", "COMMITS", "COMMIT", "DIFF"] {
             assert!(text.contains(needle), "log frame missing {needle:?}");
         }
+    }
+
+    #[test]
+    fn log_help_opens_and_closes() {
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-app-test-loghelp"),
+        };
+        let mut app = App::new(&mock);
+        app.on_action(Action::Log);
+        app.handle_key(key_char('?'));
+        assert!(matches!(app.overlay, Overlay::LogHelp));
+        app.handle_key(key_char('x')); // any key closes
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.log.is_some(), "closing help stays in the log browser");
     }
 
     fn init_repo(tag: &str) -> std::path::PathBuf {

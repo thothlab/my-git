@@ -23,6 +23,7 @@ const LOG_LIMIT: usize = 300;
 pub enum LogAction {
     None,
     Exit,
+    Help,
     Revert(String),
     Reset(String),
 }
@@ -242,6 +243,7 @@ impl LogView {
     pub fn handle_key(&mut self, key: KeyEvent, engine: &dyn GitEngine) -> LogAction {
         match key.code {
             KeyCode::Esc | KeyCode::Char('L') | KeyCode::Char('q') => return LogAction::Exit,
+            KeyCode::Char('?') => return LogAction::Help,
             KeyCode::Tab => {
                 self.focus = match self.focus {
                     Pane::Branches => Pane::Commits,
