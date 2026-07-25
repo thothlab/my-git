@@ -1,50 +1,55 @@
+**Русский** · [English](README.en.md)
+
 # my-git
 
-Keyboard-driven git tooling built around **named changelists** (like the JetBrains git
-panel): changed files are grouped into named lists, commits are made per list, and one list
-can be held as "not for commit".
+Клавиатурный инструментарий для git вокруг **именованных changelist'ов** (как git-панель в
+JetBrains): изменённые файлы группируются в именованные списки, коммит делается отдельно по
+каждому списку, один список можно держать как «не для коммита».
 
-- **[`terminal/`](terminal/)** — the TUI (Rust + [ratatui](https://ratatui.rs)).
-  Status: **MVP** — all acceptance criteria met (grouped changes, changelists, commit-by-list,
-  revert/reset, push/rebase). Lightweight: ~1 MB binary, single-digit-MB RAM, instant start.
-- **`gui/`** — desktop GUI (planned). Will share the changelist format with the TUI.
+- **[`terminal/`](terminal/)** — TUI (Rust + [ratatui](https://ratatui.rs)).
+  Статус: **MVP** — все критерии приёмки закрыты (группировка изменений, changelist'ы,
+  коммит по списку, revert/reset, push/rebase). Лёгкий: бинарник ~1 МБ, единицы МБ RAM,
+  мгновенный старт.
+- **`gui/`** — десктопный GUI (планируется). Будет использовать тот же формат
+  changelist'ов, что и TUI.
 
-Both tools operate on one repository and share the same
-`<repo>/.git/changelists.json` format, so they see the same lists.
+Оба инструмента работают на одном репозитории и делят формат
+`<repo>/.git/changelists.json`, поэтому видят одни и те же списки.
 
-## Install — terminal (TUI)
+## Установка — terminal (TUI)
 
-Download a prebuilt binary from **[Releases](../../releases)** for your platform, extract,
-and put `mygit` on your `PATH`. Then run `mygit` inside any git repository.
+Скачайте готовый бинарник со страницы **[Releases](../../releases)** под вашу платформу,
+распакуйте и положите `mygit` в `PATH`. Затем запустите `mygit` внутри любого
+git-репозитория.
 
 - **macOS** (arm64 / x86_64):
   `tar -xzf mygit-*-macos-*.tar.gz && sudo mv mygit /usr/local/bin/`
-  (if Gatekeeper blocks it: `xattr -d com.apple.quarantine /usr/local/bin/mygit`)
+  (если блокирует Gatekeeper: `xattr -d com.apple.quarantine /usr/local/bin/mygit`)
 - **Linux** (x86_64 / arm64):
   `tar -xzf mygit-*-linux-*.tar.gz && sudo mv mygit /usr/local/bin/`
-- **Windows** (x86_64): unzip and put `mygit.exe` on your `PATH`.
+- **Windows** (x86_64): распакуйте и положите `mygit.exe` в `PATH`.
 
-Prebuilt binaries are produced by CI (`.github/workflows/release.yml`) on every `v*` tag;
-a manual run also uploads them as downloadable workflow artifacts.
+Готовые бинарники собирает CI (`.github/workflows/release.yml`) на каждый тег `v*`; ручной
+запуск также выкладывает их как artifacts.
 
-## Build from source
+## Сборка из исходников
 
 ```sh
 cd terminal
 cargo build --release
-./target/release/mygit      # run inside a git repo
+./target/release/mygit      # запускать внутри git-репозитория
 ```
 
-Requires a recent Rust toolchain (built and tested on 1.94).
+Нужен свежий тулчейн Rust (собрано и протестировано на 1.94).
 
-## Keys (TUI)
+## Клавиши (TUI)
 
-`j/k` navigate · `Tab` switch panel · `space` mark · `n/r/d` new/rename/delete list ·
-`s` set active · `m` move files · `c` commit · `A` amend · `u` rollback file ·
-`P` push · `F` fetch · `B` branches · `L` log (→ `v` revert / `x` reset) · `R` rebase ·
-`?` help · `q` quit.
+`j/k` навигация · `Tab` переключить панель · `space` отметить · `n/r/d`
+новый/переименовать/удалить список · `s` сделать активным · `m` перенести файлы ·
+`c` коммит · `A` amend · `u` откатить файл к HEAD · `P` push · `F` fetch · `B` ветки ·
+`L` лог (→ `v` revert / `x` reset) · `R` rebase · `?` помощь · `q` выход.
 
-## Docs
+## Документация
 
-PRD, living specs and reports live in the team Obsidian vault under
-`Projects/my-git/terminal/` (see `terminal/docs/README.md`).
+PRD, living-спеки и отчёты хранятся в командном Obsidian vault в
+`Projects/my-git/terminal/` (см. `terminal/docs/README.md`).
