@@ -4,6 +4,7 @@
 //! the TUI. Running outside a git repository prints a clear error and a hint and
 //! exits non-zero without opening the TUI.
 
+mod changelists;
 mod engine;
 mod tui;
 
