@@ -4,7 +4,7 @@
 
 use super::keymap::BINDINGS;
 use super::theme::Theme;
-use super::{App, Focus, InputState, Overlay, PickerState, Row};
+use super::{App, ConfirmState, Focus, InputState, Overlay, PickerState, RightView, Row};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -30,6 +30,7 @@ pub fn render(f: &mut Frame, app: &App<'_>) {
         Overlay::Help => render_help(f, app, area),
         Overlay::Input(s) => render_input(f, app, area, s),
         Overlay::Picker(p) => render_picker(f, app, area, p),
+        Overlay::Confirm(c) => render_confirm(f, app, area, c),
         Overlay::None => {}
     }
 }
@@ -76,7 +77,11 @@ fn render_main(f: &mut Frame, app: &App<'_>, area: Rect) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
     render_changes(f, app, cols[0]);
-    render_detail(f, app, cols[1]);
+    if app.right == RightView::Log {
+        render_log(f, app, cols[1]);
+    } else {
+        render_detail(f, app, cols[1]);
+    }
 }
 
 fn render_changes(f: &mut Frame, app: &App<'_>, area: Rect) {
@@ -168,6 +173,71 @@ fn render_detail(f: &mut Frame, app: &App<'_>, area: Rect) {
     f.render_widget(Paragraph::new(lines).scroll((app.diff_scroll, 0)), inner);
 }
 
+fn render_log(f: &mut Frame, app: &App<'_>, area: Rect) {
+    let t = &app.theme;
+    let focused = app.focus == Focus::Detail;
+    let block = panel_block("LOG", focused, t);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if app.commits.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  no commits on this branch",
+                Style::default().fg(t.fg_muted),
+            )),
+            inner,
+        );
+        return;
+    }
+    let height = inner.height as usize;
+    let start = app.log_cursor.saturating_sub(height.saturating_sub(1));
+    let mut lines = Vec::new();
+    for (i, c) in app.commits.iter().enumerate().skip(start).take(height) {
+        let selected = i == app.log_cursor && focused;
+        let short = &c.hash[..c.hash.len().min(8)];
+        let mut spans = vec![
+            Span::styled(format!("{short} "), Style::default().fg(t.warn)),
+            Span::styled(c.summary.clone(), Style::default().fg(t.fg)),
+        ];
+        if !c.refs.is_empty() {
+            spans.push(Span::styled(
+                format!("  ({})", c.refs.join(", ")),
+                Style::default().fg(t.accent),
+            ));
+        }
+        let mut line = Line::from(spans);
+        if selected {
+            line = line.style(Style::default().bg(t.sel_bg));
+        }
+        lines.push(line);
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_confirm(f: &mut Frame, app: &App<'_>, area: Rect, c: &ConfirmState) {
+    let t = &app.theme;
+    let w = 56.min(area.width.saturating_sub(4));
+    let rect = centered(area, w, 6);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(Line::from(format!(" {} ", c.title)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.danger));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(format!("  {}", c.body), Style::default().fg(t.fg))),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  [y] confirm    [n / Esc] cancel (default)",
+            Style::default().fg(t.fg_muted),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn diff_line(l: &str, t: &Theme) -> Line<'static> {
     let style = if l.starts_with("+++") || l.starts_with("---") {
         Style::default().fg(t.fg_muted).add_modifier(Modifier::BOLD)
@@ -185,11 +255,13 @@ fn diff_line(l: &str, t: &Theme) -> Line<'static> {
 
 fn render_footer(f: &mut Frame, app: &App<'_>, area: Rect) {
     let t = &app.theme;
+    let hints = if app.right == RightView::Log {
+        "[v]revert [x]reset [j/k]nav [L]back [?]help [q]quit"
+    } else {
+        "[space]mark [m]move [c]commit [u]rollback [P]push [R]rebase [L]log [?]help [q]quit"
+    };
     let line = if app.message.is_empty() {
-        Line::from(Span::styled(
-            "[space]mark [m]move [c]commit [P]push [R]rebase [L]log [?]help [q]quit",
-            Style::default().fg(t.fg_muted),
-        ))
+        Line::from(Span::styled(hints, Style::default().fg(t.fg_muted)))
     } else {
         Line::from(Span::styled(
             format!(" {} ", app.message),

@@ -7,7 +7,7 @@ mod theme;
 mod ui;
 
 use crate::changelists::{store_path, ChangelistStore};
-use crate::engine::{BranchState, FileStatus, GitEngine};
+use crate::engine::{BranchState, Commit, FileStatus, GitEngine, ResetMode};
 use anyhow::Result;
 use crossterm::event::{self, Event};
 use keymap::{resolve, Action};
@@ -26,6 +26,28 @@ pub enum Overlay {
     Help,
     Input(InputState),
     Picker(PickerState),
+    Confirm(ConfirmState),
+}
+
+/// What the right-hand panel shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightView {
+    Diff,
+    Log,
+}
+
+/// Destructive-action confirmation. Following the gwm-cli lesson, the default is
+/// to cancel: only an explicit `y` proceeds; Esc / any other key cancels.
+pub struct ConfirmState {
+    pub title: String,
+    pub body: String,
+    pub purpose: ConfirmPurpose,
+}
+
+#[derive(Clone)]
+pub enum ConfirmPurpose {
+    ResetHard(String),
+    RollbackFile(String),
 }
 
 /// Single-line text entry (new/rename changelist; commit message in a later wave).
@@ -59,6 +81,7 @@ pub struct PickerItem {
 pub enum PickerPurpose {
     SetActive,
     MoveFiles(Vec<String>),
+    ResetMode(String),
 }
 
 /// A rendered row in the Changes panel: a changelist header or a file under it.
@@ -84,6 +107,10 @@ pub struct App<'e> {
     diff: String,
     diff_path: Option<String>,
     diff_scroll: u16,
+
+    right: RightView,
+    commits: Vec<Commit>,
+    log_cursor: usize,
 
     message: String,
     quit: bool,
@@ -117,6 +144,9 @@ impl<'e> App<'e> {
             diff: String::new(),
             diff_path: None,
             diff_scroll: 0,
+            right: RightView::Diff,
+            commits: Vec::new(),
+            log_cursor: 0,
             message: String::new(),
             quit: false,
         };
@@ -199,7 +229,15 @@ impl<'e> App<'e> {
             Overlay::Help => self.overlay = Overlay::None,
             Overlay::Input(_) => self.handle_input_key(key),
             Overlay::Picker(_) => self.handle_picker_key(key),
+            Overlay::Confirm(_) => self.handle_confirm_key(key),
             Overlay::None => {
+                // Log-context keys (revert/reset) take priority when the log is focused.
+                if self.right == RightView::Log
+                    && self.focus == Focus::Detail
+                    && self.handle_log_key(key)
+                {
+                    return;
+                }
                 if let Some(action) = resolve(key) {
                     self.on_action(action);
                 }
@@ -233,8 +271,125 @@ impl<'e> App<'e> {
             MoveFiles => self.open_move_files(),
             Commit => self.open_commit(false),
             Amend => self.open_commit(true),
+            Log => self.toggle_log(),
+            Rollback => self.open_rollback(),
             // Remaining git operations land in later waves.
             other => self.message = format!("{}: следующая волна", other.label()),
+        }
+    }
+
+    // ----- mini-log, revert, reset, rollback (Task 07) -------------------------
+
+    fn toggle_log(&mut self) {
+        if self.right == RightView::Log {
+            self.right = RightView::Diff;
+            self.focus = Focus::Changes;
+        } else {
+            self.reload_log();
+            self.right = RightView::Log;
+            self.focus = Focus::Detail;
+            self.log_cursor = 0;
+        }
+    }
+
+    fn reload_log(&mut self) {
+        self.commits = self.engine.log(50).unwrap_or_default();
+        if self.log_cursor >= self.commits.len() {
+            self.log_cursor = self.commits.len().saturating_sub(1);
+        }
+    }
+
+    /// Log-context keys: `v` revert, `x` reset. Returns true if consumed.
+    fn handle_log_key(&mut self, key: event::KeyEvent) -> bool {
+        match key.code {
+            event::KeyCode::Char('v') => {
+                self.revert_selected();
+                true
+            }
+            event::KeyCode::Char('x') => {
+                self.open_reset_picker();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn selected_commit_hash(&self) -> Option<String> {
+        self.commits.get(self.log_cursor).map(|c| c.hash.clone())
+    }
+
+    fn revert_selected(&mut self) {
+        let Some(hash) = self.selected_commit_hash() else { return };
+        match self.engine.revert(&hash) {
+            Ok(()) => {
+                self.reload_log();
+                self.refresh();
+                self.message = "reverted".into();
+            }
+            Err(e) => self.message = e.to_string(),
+        }
+    }
+
+    fn open_reset_picker(&mut self) {
+        let Some(hash) = self.selected_commit_hash() else { return };
+        let items = vec![
+            PickerItem { label: "soft  (keep index + worktree)".into(), id: "soft".into() },
+            PickerItem { label: "mixed (keep worktree)".into(), id: "mixed".into() },
+            PickerItem { label: "hard  (DISCARD changes)".into(), id: "hard".into() },
+        ];
+        self.overlay = Overlay::Picker(PickerState {
+            title: format!("Reset to {}…", &hash[..hash.len().min(8)]),
+            items,
+            cursor: 0,
+            purpose: PickerPurpose::ResetMode(hash),
+        });
+    }
+
+    fn do_reset(&mut self, hash: &str, mode: ResetMode) {
+        match self.engine.reset(hash, mode) {
+            Ok(()) => {
+                self.reload_log();
+                self.refresh();
+                self.message = "reset done".into();
+            }
+            Err(e) => self.message = e.to_string(),
+        }
+    }
+
+    fn open_rollback(&mut self) {
+        if let Some(p) = self.selected_path().map(str::to_string) {
+            self.overlay = Overlay::Confirm(ConfirmState {
+                title: "Rollback file to HEAD".into(),
+                body: format!("Discard local changes to {p}? This cannot be undone."),
+                purpose: ConfirmPurpose::RollbackFile(p),
+            });
+        } else {
+            self.message = "no file selected".into();
+        }
+    }
+
+    fn handle_confirm_key(&mut self, key: event::KeyEvent) {
+        // Default-cancel: only 'y' proceeds.
+        if key.code == event::KeyCode::Char('y') {
+            self.execute_confirm();
+        } else {
+            self.overlay = Overlay::None;
+        }
+    }
+
+    fn execute_confirm(&mut self) {
+        let Overlay::Confirm(c) = &self.overlay else { return };
+        let purpose = c.purpose.clone();
+        self.overlay = Overlay::None;
+        match purpose {
+            ConfirmPurpose::ResetHard(hash) => self.do_reset(&hash, ResetMode::Hard),
+            ConfirmPurpose::RollbackFile(path) => match self.engine.checkout_file(&path) {
+                Ok(()) => {
+                    self.refresh();
+                    self.message = "file rolled back".into();
+                }
+                Err(e) => self.message = e.to_string(),
+            },
         }
     }
 
@@ -488,12 +643,32 @@ impl<'e> App<'e> {
                 }
                 Err(e) => self.message = e.to_string(),
             },
+            PickerPurpose::ResetMode(hash) => match id.as_str() {
+                "hard" => {
+                    self.overlay = Overlay::Confirm(ConfirmState {
+                        title: "reset --hard".into(),
+                        body: format!(
+                            "Hard-reset to {} and DISCARD all uncommitted changes?",
+                            &hash[..hash.len().min(8)]
+                        ),
+                        purpose: ConfirmPurpose::ResetHard(hash),
+                    });
+                }
+                "soft" => self.do_reset(&hash, ResetMode::Soft),
+                _ => self.do_reset(&hash, ResetMode::Mixed),
+            },
         }
     }
 
     fn move_down(&mut self) {
         if self.focus == Focus::Detail {
-            self.diff_scroll = self.diff_scroll.saturating_add(1);
+            if self.right == RightView::Log {
+                if self.log_cursor + 1 < self.commits.len() {
+                    self.log_cursor += 1;
+                }
+            } else {
+                self.diff_scroll = self.diff_scroll.saturating_add(1);
+            }
             return;
         }
         if !self.rows.is_empty() && self.cursor + 1 < self.rows.len() {
@@ -504,7 +679,11 @@ impl<'e> App<'e> {
 
     fn move_up(&mut self) {
         if self.focus == Focus::Detail {
-            self.diff_scroll = self.diff_scroll.saturating_sub(1);
+            if self.right == RightView::Log {
+                self.log_cursor = self.log_cursor.saturating_sub(1);
+            } else {
+                self.diff_scroll = self.diff_scroll.saturating_sub(1);
+            }
             return;
         }
         if self.cursor > 0 {
@@ -667,6 +846,61 @@ mod tests {
         assert!(changed.iter().any(|f| f.path == "b.txt"), "b.txt must remain changed");
         let nfc_list = app.store.changelists.iter().find(|c| c.name == "Not for commit").unwrap();
         assert!(nfc_list.files.iter().any(|f| f == "b.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn revert_and_reset_from_log() {
+        use crate::engine::GixEngine;
+        let dir = init_repo("log");
+        let engine = GixEngine::discover(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "1").unwrap();
+        engine.commit(&["a.txt".to_string()], "c1", false).unwrap();
+        std::fs::write(dir.join("a.txt"), "2").unwrap();
+        engine.commit(&["a.txt".to_string()], "c2", false).unwrap();
+
+        let mut app = App::new(&engine);
+        app.on_action(Action::Log);
+        assert_eq!(app.right, RightView::Log);
+        assert_eq!(app.commits.len(), 2);
+
+        // Revert the newest commit -> inverse commit added, history preserved.
+        app.handle_key(key_char('v'));
+        assert_eq!(engine.log(10).unwrap().len(), 3);
+
+        // Hard-reset to the oldest commit via picker -> confirm -> execute.
+        app.log_cursor = app.commits.len() - 1;
+        app.handle_key(key_char('x'));
+        assert!(matches!(app.overlay, Overlay::Picker(_)));
+        app.handle_key(key(event::KeyCode::Down)); // mixed
+        app.handle_key(key(event::KeyCode::Down)); // hard
+        app.handle_key(key(event::KeyCode::Enter)); // -> confirm
+        assert!(matches!(app.overlay, Overlay::Confirm(_)));
+        app.handle_key(key_char('y')); // confirm hard reset
+        assert_eq!(engine.log(10).unwrap().len(), 1, "hard reset to oldest -> one commit");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rollback_confirm_defaults_to_cancel() {
+        use crate::engine::GixEngine;
+        let dir = init_repo("rollback");
+        let engine = GixEngine::discover(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "1").unwrap();
+        engine.commit(&["a.txt".to_string()], "c1", false).unwrap();
+        std::fs::write(dir.join("a.txt"), "changed").unwrap();
+        let mut app = App::new(&engine);
+        app.cursor = 1; // a.txt
+        app.update_diff();
+        app.on_action(Action::Rollback);
+        assert!(matches!(app.overlay, Overlay::Confirm(_)));
+        // Esc cancels -> file keeps changes
+        app.handle_key(key(event::KeyCode::Esc));
+        assert!(engine.status().unwrap().iter().any(|f| f.path == "a.txt"));
+        // Now confirm with 'y' -> file restored to HEAD
+        app.on_action(Action::Rollback);
+        app.handle_key(key_char('y'));
+        assert!(!engine.status().unwrap().iter().any(|f| f.path == "a.txt"), "rollback restores HEAD");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
