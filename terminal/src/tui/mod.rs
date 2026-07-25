@@ -11,12 +11,13 @@ use crate::engine::{BranchState, Commit, FileStatus, GitEngine, PushOpts, ResetM
 use anyhow::Result;
 use crossterm::event::{self, Event};
 use keymap::{resolve, Action};
+use ratatui::layout::Rect;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use theme::Theme;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Changes,
     Detail,
@@ -124,6 +125,11 @@ pub struct App<'e> {
     commits: Vec<Commit>,
     log_cursor: usize,
 
+    /// Left (Changes) panel width as a percent of the main area; the vertical
+    /// divider drag adjusts it.
+    split_pct: u16,
+    dragging: bool,
+
     message: String,
     quit: bool,
 }
@@ -132,7 +138,10 @@ pub struct App<'e> {
 pub fn run(engine: &dyn GitEngine) -> Result<()> {
     let mut app = App::new(engine);
     let mut term = ratatui::init();
+    // Enable mouse reporting so panels respond to clicks and the divider drags.
+    let _ = crossterm::execute!(std::io::stdout(), event::EnableMouseCapture);
     let result = app.event_loop(&mut term);
+    let _ = crossterm::execute!(std::io::stdout(), event::DisableMouseCapture);
     ratatui::restore();
     result
 }
@@ -159,6 +168,8 @@ impl<'e> App<'e> {
             right: RightView::Diff,
             commits: Vec::new(),
             log_cursor: 0,
+            split_pct: 50,
+            dragging: false,
             message: String::new(),
             quit: false,
         };
@@ -270,8 +281,13 @@ impl<'e> App<'e> {
             // Poll with a timeout so the panel can auto-refresh while idle
             // (F5 is unreliable on macOS; this keeps the view live regardless).
             if event::poll(Duration::from_millis(250))? {
-                if let Event::Key(key) = event::read()? {
-                    self.handle_key(key);
+                match event::read()? {
+                    Event::Key(key) => self.handle_key(key),
+                    Event::Mouse(m) => {
+                        let size = term.size()?;
+                        self.handle_mouse(m, Rect::new(0, 0, size.width, size.height));
+                    }
+                    _ => {}
                 }
             }
             if last_auto.elapsed() >= auto_every {
@@ -303,6 +319,82 @@ impl<'e> App<'e> {
                     self.on_action(action);
                 }
             }
+        }
+    }
+
+    /// Mouse: a click focuses (and, in Changes, selects) a panel, dragging the
+    /// divider resizes them, and the wheel scrolls the panel under the pointer.
+    fn handle_mouse(&mut self, m: event::MouseEvent, area: Rect) {
+        use event::{MouseButton, MouseEventKind};
+        if !matches!(self.overlay, Overlay::None) {
+            return; // let overlays own the interaction
+        }
+        let [_, changes, detail, _] = ui::regions(area, self.split_pct);
+        let divider = detail.x as i32;
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if (m.column as i32 - divider).abs() <= 1 {
+                    self.dragging = true;
+                } else if m.column < detail.x {
+                    self.focus = Focus::Changes;
+                    self.select_row_at(m.row, changes);
+                } else {
+                    self.focus = Focus::Detail;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
+                let total = changes.width + detail.width;
+                if total > 0 {
+                    let rel = m.column.saturating_sub(changes.x);
+                    let pct = (rel as u32 * 100 / total as u32) as u16;
+                    self.split_pct = pct.clamp(20, 80);
+                }
+            }
+            MouseEventKind::Up(_) => self.dragging = false,
+            MouseEventKind::ScrollDown => self.scroll_at(m.column, detail.x, true),
+            MouseEventKind::ScrollUp => self.scroll_at(m.column, detail.x, false),
+            _ => {}
+        }
+    }
+
+    /// Select the Changes row under a click, matching the render viewport.
+    fn select_row_at(&mut self, row: u16, changes: Rect) {
+        let inner_top = changes.y + 1; // skip the panel's top border
+        if row < inner_top {
+            return;
+        }
+        let inner_h = changes.height.saturating_sub(2) as usize;
+        let start = self.cursor.saturating_sub(inner_h.saturating_sub(1));
+        let idx = start + (row - inner_top) as usize;
+        if idx < self.rows.len() {
+            self.cursor = idx;
+            self.update_diff();
+        }
+    }
+
+    fn scroll_at(&mut self, col: u16, detail_x: u16, down: bool) {
+        if col < detail_x {
+            if down {
+                if self.cursor + 1 < self.rows.len() {
+                    self.cursor += 1;
+                    self.update_diff();
+                }
+            } else if self.cursor > 0 {
+                self.cursor -= 1;
+                self.update_diff();
+            }
+        } else if self.right == RightView::Log {
+            if down {
+                if self.log_cursor + 1 < self.commits.len() {
+                    self.log_cursor += 1;
+                }
+            } else {
+                self.log_cursor = self.log_cursor.saturating_sub(1);
+            }
+        } else if down {
+            self.diff_scroll = self.diff_scroll.saturating_add(1);
+        } else {
+            self.diff_scroll = self.diff_scroll.saturating_sub(1);
         }
     }
 
@@ -1228,6 +1320,47 @@ mod tests {
     }
     fn key_char(c: char) -> event::KeyEvent {
         key(event::KeyCode::Char(c))
+    }
+
+    fn mev(kind: event::MouseEventKind, column: u16, row: u16) -> event::MouseEvent {
+        event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: event::KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_click_focuses_and_drag_resizes() {
+        use event::{MouseButton, MouseEventKind};
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-app-test-mouse"),
+        };
+        let mut app = App::new(&mock);
+        let area = Rect::new(0, 0, 100, 30);
+
+        // Click the right half -> Detail focus; left half -> Changes focus.
+        app.handle_mouse(mev(MouseEventKind::Down(MouseButton::Left), 80, 10), area);
+        assert_eq!(app.focus, Focus::Detail);
+        app.handle_mouse(mev(MouseEventKind::Down(MouseButton::Left), 5, 10), area);
+        assert_eq!(app.focus, Focus::Changes);
+
+        // Drag the divider left -> the Changes panel gets narrower.
+        let [_, _changes, detail, _] = super::ui::regions(area, app.split_pct);
+        app.handle_mouse(
+            mev(MouseEventKind::Down(MouseButton::Left), detail.x, 10),
+            area,
+        );
+        assert!(app.dragging);
+        app.handle_mouse(mev(MouseEventKind::Drag(MouseButton::Left), 30, 10), area);
+        assert!(
+            (20..=40).contains(&app.split_pct),
+            "split now {}",
+            app.split_pct
+        );
+        app.handle_mouse(mev(MouseEventKind::Up(MouseButton::Left), 30, 10), area);
+        assert!(!app.dragging);
     }
 
     fn init_repo(tag: &str) -> std::path::PathBuf {

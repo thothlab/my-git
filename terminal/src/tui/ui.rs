@@ -13,8 +13,9 @@ use ratatui::{
     Frame,
 };
 
-pub fn render(f: &mut Frame, app: &App<'_>) {
-    let area = f.area();
+/// The four screen regions: `[status, changes, detail, footer]`. Shared by the
+/// renderer and the mouse hit-testing so clicks/drags map to what's drawn.
+pub(super) fn regions(area: Rect, split_pct: u16) -> [Rect; 4] {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -23,9 +24,27 @@ pub fn render(f: &mut Frame, app: &App<'_>) {
             Constraint::Length(1),
         ])
         .split(area);
-    render_status_bar(f, app, rows[0]);
-    render_main(f, app, rows[1]);
-    render_footer(f, app, rows[2]);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(split_pct),
+            Constraint::Percentage(100 - split_pct),
+        ])
+        .split(rows[1]);
+    [rows[0], cols[0], cols[1], rows[2]]
+}
+
+pub fn render(f: &mut Frame, app: &App<'_>) {
+    let area = f.area();
+    let [status, changes, detail, footer] = regions(area, app.split_pct);
+    render_status_bar(f, app, status);
+    render_changes(f, app, changes);
+    if app.right == RightView::Log {
+        render_log(f, app, detail);
+    } else {
+        render_detail(f, app, detail);
+    }
+    render_footer(f, app, footer);
     match &app.overlay {
         Overlay::Help(cursor) => render_help(f, app, area, *cursor),
         Overlay::Input(s) => render_input(f, app, area, s),
@@ -65,19 +84,6 @@ fn render_status_bar(f: &mut Frame, app: &App<'_>, area: Rect) {
     ));
     spans.push(Span::styled("[? help]", Style::default().fg(t.fg_muted)));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
-fn render_main(f: &mut Frame, app: &App<'_>, area: Rect) {
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-    render_changes(f, app, cols[0]);
-    if app.right == RightView::Log {
-        render_log(f, app, cols[1]);
-    } else {
-        render_detail(f, app, cols[1]);
-    }
 }
 
 fn render_changes(f: &mut Frame, app: &App<'_>, area: Rect) {
