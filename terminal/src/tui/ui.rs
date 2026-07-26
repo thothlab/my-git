@@ -106,12 +106,15 @@ fn render_log_help(f: &mut Frame, app: &App<'_>, area: Rect) {
         ("j / k / ↑↓", "navigate the focused pane"),
         ("Enter", "select branch · expand/collapse folder"),
         ("c", "checkout selected branch (asks about local changes)"),
-        ("R", "rebase current branch onto selected branch"),
+        ("R", "rebase onto selected branch · resolve a stopped op"),
         ("P", "push current branch (force-with-lease if diverged)"),
         ("b", "new branch from the selected commit"),
-        ("r", "reword commit (amend HEAD / rebase older)"),
-        ("s", "squash the selected commit into its parent"),
-        ("u", "undo the last reword/squash"),
+        ("r", "reword commit (amend HEAD / rebase older / root)"),
+        ("space", "mark commits for a multi-squash"),
+        ("s", "squash marked commits (or selected into its parent)"),
+        ("d", "drop the selected commit"),
+        ("C", "cherry-pick the selected commit onto this branch"),
+        ("u", "undo the last reword/squash/drop/cherry-pick"),
         ("v", "revert the selected commit"),
         ("x", "reset to the selected commit"),
         ("S", "stashes (create / apply / pop / drop)"),
@@ -315,7 +318,7 @@ fn diff_line(l: &str, t: &Theme) -> Line<'static> {
 fn render_footer(f: &mut Frame, app: &App<'_>, area: Rect) {
     let t = &app.theme;
     let hints = if app.log.is_some() {
-        "[c]checkout [P]push [R]rebase [b]branch [r]reword [s]squash [u]undo [v]revert [x]reset [S]stash [?]help [L/Esc]back"
+        "[space]mark [s]squash [d]drop [C]pick [r]reword [c]checkout [P]push [R]rebase/resolve [b]branch [u]undo [v]revert [x]reset [?]help [L/Esc]back"
     } else {
         "[n]new [m]move [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [S]stash [?]help [q]quit"
     };

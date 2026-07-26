@@ -122,6 +122,15 @@ pub trait GitEngine {
     /// Squash a commit into its parent (message = the combined message). Saves an
     /// undo point first.
     fn squash_into_parent(&self, hash: &str, message: &str) -> Result<()>;
+    /// Squash a contiguous set of commits on the current branch into one (the
+    /// oldest is kept as the base; message = combined). Saves an undo point first.
+    fn squash_commits(&self, hashes: &[String], message: &str) -> Result<()>;
+    /// Drop a commit from the current branch's history via interactive rebase.
+    /// Saves an undo point first; aborts cleanly if dropping would conflict.
+    fn drop_commit(&self, hash: &str) -> Result<()>;
+    /// Cherry-pick a commit (from any branch) onto HEAD. Saves an undo point
+    /// first; on conflict the cherry-pick is left in progress for the conflict flow.
+    fn cherry_pick(&self, hash: &str) -> Result<()>;
     /// Save the current HEAD as the undo point before a history rewrite.
     fn backup_head(&self) -> Result<()>;
     /// Whether an undo point exists.
@@ -138,6 +147,13 @@ pub trait GitEngine {
     fn rebase_skip(&self) -> Result<()>;
     fn rebase_abort(&self) -> Result<()>;
     fn conflicts(&self) -> Result<Vec<String>>;
+    /// The sequencer operation currently stopped in the working tree, if any:
+    /// `"rebase"`, `"cherry-pick"`, or `"revert"`. Used to drive the LOG conflict flow.
+    fn op_in_progress(&self) -> Option<&'static str>;
+    /// Continue / skip / abort whichever sequencer op is in progress.
+    fn op_continue(&self) -> Result<()>;
+    fn op_skip(&self) -> Result<()>;
+    fn op_abort(&self) -> Result<()>;
     fn repo_root(&self) -> &Path;
 }
 
@@ -205,6 +221,8 @@ impl GixEngine {
     /// `GIT_SEQUENCE_EDITOR=cp <todo>` and (optionally) a commit message via
     /// `GIT_EDITOR=cp <msg>`. On failure the rebase is aborted so the tree is
     /// left clean.
+    /// `base` is the rebase base ref, or the literal `"--root"` to rewrite from the
+    /// root commit.
     fn run_rebase_todo(&self, base: &str, todo: &str, message: Option<&str>) -> Result<()> {
         let todo_path = self.write_temp("rebase-todo", todo)?;
         let mut cmd = std::process::Command::new("git");
@@ -239,6 +257,30 @@ impl GixEngine {
             );
         }
         Ok(())
+    }
+
+    /// Compute the interactive-rebase base and the ordered (oldest-first) commit
+    /// list for a rewrite that includes `target`. Returns base `"--root"` when
+    /// `target` has no parent (rewrite from the root commit).
+    fn rebase_span(&self, target: &str) -> Result<(String, Vec<String>)> {
+        let parent = format!("{target}^");
+        let has_parent = self
+            .git(&["rev-parse", "--verify", "--quiet", &parent])?
+            .status
+            .success();
+        let (base, range) = if has_parent {
+            (parent.clone(), format!("{parent}..HEAD"))
+        } else {
+            ("--root".to_string(), "HEAD".to_string())
+        };
+        let list = self.git_check(&["rev-list", "--reverse", &range])?;
+        let commits = list
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        Ok((base, commits))
     }
 
     fn detect_rebase(&self) -> Option<RebaseState> {
@@ -540,17 +582,10 @@ impl GitEngine for GixEngine {
     fn reword_commit(&self, hash: &str, message: &str) -> Result<()> {
         anyhow::ensure!(self.is_on_head(hash), "commit is not on the current branch");
         let target = self.git_check(&["rev-parse", hash])?.trim().to_string();
-        let base = format!("{target}^");
-        anyhow::ensure!(
-            self.git(&["rev-parse", "--verify", "--quiet", &base])?
-                .status
-                .success(),
-            "cannot reword the root commit here"
-        );
-        let list = self.git_check(&["rev-list", "--reverse", &format!("{base}..HEAD")])?;
+        let (base, commits) = self.rebase_span(&target)?;
         let mut todo = String::new();
-        for h in list.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            let action = if h == target { "reword" } else { "pick" };
+        for h in &commits {
+            let action = if *h == target { "reword" } else { "pick" };
             todo.push_str(&format!("{action} {h}\n"));
         }
         self.backup_head()?;
@@ -560,25 +595,112 @@ impl GitEngine for GixEngine {
     fn squash_into_parent(&self, hash: &str, message: &str) -> Result<()> {
         anyhow::ensure!(self.is_on_head(hash), "commit is not on the current branch");
         let target = self.git_check(&["rev-parse", hash])?.trim().to_string();
-        let parent = self
-            .git_check(&["rev-parse", &format!("{target}^")])?
-            .trim()
-            .to_string();
-        let base = format!("{parent}^");
+        // Squash the target into its parent: rewrite the parent's span, keeping the
+        // parent as the base `pick` and turning the target into a `squash`. The
+        // parent may itself be the root commit (base becomes `--root`).
+        let parent = self.git(&["rev-parse", "--verify", "--quiet", &format!("{target}^")])?;
         anyhow::ensure!(
-            self.git(&["rev-parse", "--verify", "--quiet", &base])?
-                .status
-                .success(),
-            "cannot squash into the root commit here"
+            parent.status.success(),
+            "the root commit has no parent to squash into"
         );
-        let list = self.git_check(&["rev-list", "--reverse", &format!("{base}..HEAD")])?;
+        let parent = String::from_utf8_lossy(&parent.stdout).trim().to_string();
+        let (base, commits) = self.rebase_span(&parent)?;
         let mut todo = String::new();
-        for h in list.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            let action = if h == target { "squash" } else { "pick" };
+        for h in &commits {
+            let action = if *h == target { "squash" } else { "pick" };
             todo.push_str(&format!("{action} {h}\n"));
         }
         self.backup_head()?;
         self.run_rebase_todo(&base, &todo, Some(message))
+    }
+
+    fn squash_commits(&self, hashes: &[String], message: &str) -> Result<()> {
+        anyhow::ensure!(hashes.len() >= 2, "select at least two commits to squash");
+        let mut set = std::collections::HashSet::new();
+        for h in hashes {
+            anyhow::ensure!(
+                self.is_on_head(h),
+                "a selected commit is not on the current branch"
+            );
+            set.insert(self.git_check(&["rev-parse", h])?.trim().to_string());
+        }
+        // The oldest selected commit anchors the rebase span; it stays a `pick`
+        // and the rest squash into it.
+        let all = self.git_check(&["rev-list", "--reverse", "HEAD"])?;
+        let oldest = all
+            .lines()
+            .map(str::trim)
+            .find(|h| set.contains(*h))
+            .context("selected commits are not on the current branch")?
+            .to_string();
+        let (base, commits) = self.rebase_span(&oldest)?;
+        // Contiguity: selected commits must occupy consecutive positions, else a
+        // `pick` would land between `squash`es and squash into the wrong base.
+        let positions: Vec<usize> = commits
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| set.contains(*h))
+            .map(|(i, _)| i)
+            .collect();
+        anyhow::ensure!(
+            positions.len() == set.len(),
+            "some selected commits are outside the squash range"
+        );
+        anyhow::ensure!(
+            positions.windows(2).all(|w| w[1] == w[0] + 1),
+            "select adjacent commits to squash"
+        );
+        let mut todo = String::new();
+        for h in &commits {
+            let action = if *h != oldest && set.contains(h) {
+                "squash"
+            } else {
+                "pick"
+            };
+            todo.push_str(&format!("{action} {h}\n"));
+        }
+        self.backup_head()?;
+        self.run_rebase_todo(&base, &todo, Some(message))
+    }
+
+    fn drop_commit(&self, hash: &str) -> Result<()> {
+        anyhow::ensure!(self.is_on_head(hash), "commit is not on the current branch");
+        let target = self.git_check(&["rev-parse", hash])?.trim().to_string();
+        let head = self.git_check(&["rev-parse", "HEAD"])?.trim().to_string();
+        // Dropping the tip is just moving HEAD back to its parent.
+        if target == head {
+            let parent = self.git(&["rev-parse", "--verify", "--quiet", &format!("{target}^")])?;
+            anyhow::ensure!(parent.status.success(), "cannot drop the only commit");
+            let parent = String::from_utf8_lossy(&parent.stdout).trim().to_string();
+            self.backup_head()?;
+            self.git_check(&["reset", "--hard", &parent])?;
+            return Ok(());
+        }
+        let (base, commits) = self.rebase_span(&target)?;
+        let mut todo = String::new();
+        for h in &commits {
+            let action = if *h == target { "drop" } else { "pick" };
+            todo.push_str(&format!("{action} {h}\n"));
+        }
+        self.backup_head()?;
+        self.run_rebase_todo(&base, &todo, None)
+    }
+
+    fn cherry_pick(&self, hash: &str) -> Result<()> {
+        self.backup_head()?;
+        let out = self.git(&["cherry-pick", hash])?;
+        if !out.status.success() {
+            // On conflict the cherry-pick stays in progress for the LOG conflict
+            // flow; a non-conflict failure leaves nothing to drive, so report it.
+            if self.op_in_progress().is_none() {
+                anyhow::bail!(
+                    "cherry-pick failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            anyhow::bail!("cherry-pick stopped on conflict — resolve, then continue");
+        }
+        Ok(())
     }
 
     fn rebase_onto(&self, target: &str) -> Result<()> {
@@ -608,6 +730,41 @@ impl GitEngine for GixEngine {
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect())
+    }
+
+    fn op_in_progress(&self) -> Option<&'static str> {
+        // A stopped interactive rebase also leaves CHERRY_PICK_HEAD behind, so
+        // detect rebase first — otherwise a rebase would be mis-driven with
+        // `git cherry-pick --continue`.
+        if self.detect_rebase().is_some() {
+            return Some("rebase");
+        }
+        let git = self.git_dir()?;
+        if git.join("CHERRY_PICK_HEAD").exists() {
+            return Some("cherry-pick");
+        }
+        if git.join("REVERT_HEAD").exists() {
+            return Some("revert");
+        }
+        None
+    }
+
+    fn op_continue(&self) -> Result<()> {
+        let op = self.op_in_progress().context("no operation in progress")?;
+        self.git_check(&[op, "--continue"])?;
+        Ok(())
+    }
+
+    fn op_skip(&self) -> Result<()> {
+        let op = self.op_in_progress().context("no operation in progress")?;
+        self.git_check(&[op, "--skip"])?;
+        Ok(())
+    }
+
+    fn op_abort(&self) -> Result<()> {
+        let op = self.op_in_progress().context("no operation in progress")?;
+        self.git_check(&[op, "--abort"])?;
+        Ok(())
     }
 
     fn repo_root(&self) -> &Path {
@@ -812,6 +969,123 @@ mod tests {
         assert_eq!(log.len(), 2, "3 commits -> 2 after squash");
         assert!(log.iter().any(|c| c.summary == "c2 + c3"));
         assert!(log.iter().any(|c| c.summary == "c1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reword_root_commit() {
+        let dir = init_repo();
+        let engine = GixEngine::discover(&dir).unwrap();
+        three_commits(&engine, &dir);
+        let c1 = engine.log(10).unwrap()[2].hash.clone(); // [c3, c2, c1]
+        engine.reword_commit(&c1, "root reworded").unwrap();
+        let log = engine.log(10).unwrap();
+        assert_eq!(log.len(), 3, "reword keeps the commit count");
+        assert!(log.iter().any(|c| c.summary == "root reworded"));
+        assert!(log.iter().any(|c| c.summary == "c2"));
+        assert!(log.iter().any(|c| c.summary == "c3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn squash_second_into_root() {
+        let dir = init_repo();
+        let engine = GixEngine::discover(&dir).unwrap();
+        three_commits(&engine, &dir);
+        let c2 = engine.log(10).unwrap()[1].hash.clone();
+        engine.squash_into_parent(&c2, "c1 + c2").unwrap();
+        let log = engine.log(10).unwrap();
+        assert_eq!(log.len(), 2, "3 commits -> 2 after squashing into root");
+        assert!(log.iter().any(|c| c.summary == "c1 + c2"));
+        assert!(log.iter().any(|c| c.summary == "c3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn squash_marked_range_and_reject_gaps() {
+        let dir = init_repo();
+        let engine = GixEngine::discover(&dir).unwrap();
+        three_commits(&engine, &dir);
+        let log = engine.log(10).unwrap(); // [c3, c2, c1]
+        let (c1, c2, c3) = (
+            log[2].hash.clone(),
+            log[1].hash.clone(),
+            log[0].hash.clone(),
+        );
+        // non-adjacent selection is rejected
+        assert!(engine
+            .squash_commits(&[c1.clone(), c3.clone()], "no")
+            .is_err());
+        // adjacent c2+c3 squash into one
+        engine.squash_commits(&[c2, c3], "c2 + c3 merged").unwrap();
+        let log = engine.log(10).unwrap();
+        assert_eq!(log.len(), 2);
+        assert!(log.iter().any(|c| c.summary == "c2 + c3 merged"));
+        assert!(log.iter().any(|c| c.summary == "c1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn drop_middle_and_tip_commit() {
+        let dir = init_repo();
+        let engine = GixEngine::discover(&dir).unwrap();
+        three_commits(&engine, &dir);
+        // drop the middle commit (independent files -> no conflict)
+        let c2 = engine.log(10).unwrap()[1].hash.clone();
+        engine.drop_commit(&c2).unwrap();
+        let log = engine.log(10).unwrap();
+        assert_eq!(log.len(), 2);
+        assert!(!log.iter().any(|c| c.summary == "c2"));
+        assert!(log.iter().any(|c| c.summary == "c1"));
+        assert!(log.iter().any(|c| c.summary == "c3"));
+        // drop the tip
+        let tip = engine.log(10).unwrap()[0].hash.clone();
+        engine.drop_commit(&tip).unwrap();
+        assert_eq!(engine.log(10).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cherry_pick_conflict_is_drivable() {
+        let dir = init_repo();
+        let engine = GixEngine::discover(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let o = Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        };
+        std::fs::write(dir.join("f.txt"), "base\n").unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "base", false)
+            .unwrap();
+        let main = engine.branch_state().unwrap().current_branch.unwrap();
+        // divergent branch changing the same line
+        git(&["checkout", "-q", "-b", "other"]);
+        std::fs::write(dir.join("f.txt"), "other\n").unwrap();
+        let other_c = engine
+            .commit(&["f.txt".to_string()], "on-other", false)
+            .unwrap();
+        git(&["checkout", "-q", &main]);
+        std::fs::write(dir.join("f.txt"), "main\n").unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "on-main", false)
+            .unwrap();
+        // cherry-pick the divergent commit -> conflict, left in progress
+        assert!(engine.cherry_pick(&other_c).is_err());
+        assert_eq!(engine.op_in_progress(), Some("cherry-pick"));
+        assert!(engine.conflicts().unwrap().iter().any(|f| f == "f.txt"));
+        // abort restores a clean tree at on-main
+        engine.op_abort().unwrap();
+        assert!(engine.op_in_progress().is_none());
+        assert!(engine.status().unwrap().is_empty());
+        assert_eq!(engine.log(10).unwrap()[0].summary, "on-main");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

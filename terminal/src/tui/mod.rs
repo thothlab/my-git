@@ -62,6 +62,8 @@ pub enum ConfirmPurpose {
     ResetHard(String),
     RollbackFile(String),
     ForcePush(String),
+    /// Drop the given commit from the current branch's history.
+    DropCommit(String),
 }
 
 /// Single-line text entry (new/rename changelist; commit message in a later wave).
@@ -88,6 +90,8 @@ pub enum InputPurpose {
     RewordCommit(String),
     /// Squash the given commit into its parent with this combined message.
     SquashCommit(String),
+    /// Squash the given marked commits (newest-first) with this combined message.
+    SquashMarked(Vec<String>),
     /// Stash the working tree under this name, then checkout the given branch.
     StashName(String),
     /// Commit all changes with this message, then checkout the given branch.
@@ -116,6 +120,8 @@ pub enum PickerPurpose {
     Checkout,
     RebaseOnto,
     RebaseControl,
+    /// Drive whichever sequencer op (rebase/cherry-pick) is in progress, from the log.
+    OpControl,
     /// Uncommitted changes exist — choose how to switch to the given branch.
     DirtyCheckout(String),
 }
@@ -728,8 +734,137 @@ impl<'e> App<'e> {
             LogAction::RebaseOnto(target) => self.log_rebase_onto(&target),
             LogAction::Reword(hash) => self.open_reword(hash),
             LogAction::Squash(hash) => self.open_squash(hash),
+            LogAction::SquashMarked(hashes) => self.open_squash_marked(hashes),
+            LogAction::Drop(hash) => self.confirm_drop(hash),
+            LogAction::CherryPick(hash) => self.do_cherry_pick(&hash),
+            LogAction::OpControl => self.open_op_control(),
             LogAction::Undo => self.do_undo(),
             LogAction::Stashes => self.open_stashes(),
+        }
+    }
+
+    /// Ask for the combined message, then squash the marked set into one commit.
+    fn open_squash_marked(&mut self, hashes: Vec<String>) {
+        if hashes.len() < 2 {
+            self.message = "mark at least two commits (space) to squash".into();
+            return;
+        }
+        // Seed with the messages of the marked commits (oldest first).
+        let value = hashes
+            .iter()
+            .rev()
+            .filter_map(|h| self.engine.commit_body(h).ok())
+            .filter_map(|b| b.lines().next().map(str::to_string))
+            .collect::<Vec<_>>()
+            .join("; ");
+        self.overlay = Overlay::Input(InputState {
+            title: format!("Squash {} commits — combined message", hashes.len()),
+            value,
+            purpose: InputPurpose::SquashMarked(hashes),
+        });
+    }
+
+    fn confirm_drop(&mut self, hash: String) {
+        if !self.engine.is_on_head(&hash) {
+            self.message = "checkout this branch to edit its history".into();
+            return;
+        }
+        let subject = self
+            .engine
+            .commit_body(&hash)
+            .ok()
+            .and_then(|b| b.lines().next().map(str::to_string))
+            .unwrap_or_default();
+        self.overlay = Overlay::Confirm(ConfirmState {
+            title: "Drop commit".into(),
+            body: format!(
+                "Drop {} \"{}\"? (u to undo afterwards)",
+                &hash[..hash.len().min(8)],
+                subject
+            ),
+            purpose: ConfirmPurpose::DropCommit(hash),
+        });
+    }
+
+    fn do_drop(&mut self, hash: &str) {
+        match self.engine.drop_commit(hash) {
+            Ok(()) => {
+                self.rebuild_log_view();
+                self.message = "commit dropped (u to undo)".into();
+            }
+            Err(e) => self.message = e.to_string(),
+        }
+    }
+
+    fn do_cherry_pick(&mut self, hash: &str) {
+        match self.engine.cherry_pick(hash) {
+            Ok(()) => {
+                self.rebuild_log_view();
+                self.message = "cherry-picked (u to undo)".into();
+            }
+            Err(e) => {
+                // On conflict the pick is left in progress — R drives it.
+                self.rebuild_log_view();
+                self.message = if self.engine.op_in_progress().is_some() {
+                    "cherry-pick stopped on conflict — press R to resolve".into()
+                } else {
+                    e.to_string()
+                };
+            }
+        }
+    }
+
+    /// Drive a stopped sequencer op (rebase/cherry-pick) from the log: list the
+    /// conflicted files and offer continue / skip / abort.
+    fn open_op_control(&mut self) {
+        let Some(op) = self.engine.op_in_progress() else {
+            self.message = "no operation in progress".into();
+            return;
+        };
+        let conflicts = self.engine.conflicts().unwrap_or_default();
+        let mut items: Vec<PickerItem> = conflicts
+            .iter()
+            .map(|p| PickerItem {
+                label: format!("⚠ {p}"),
+                id: "noop".into(),
+            })
+            .collect();
+        let first_control = items.len();
+        for (label, id) in [
+            ("Continue", "continue"),
+            ("Skip", "skip"),
+            ("Abort", "abort"),
+        ] {
+            items.push(PickerItem {
+                label: label.into(),
+                id: id.into(),
+            });
+        }
+        self.overlay = Overlay::Picker(PickerState {
+            title: format!("{op} in progress"),
+            items,
+            cursor: first_control,
+            purpose: PickerPurpose::OpControl,
+        });
+    }
+
+    fn after_op_step(&mut self, result: Result<()>, ok: &str) {
+        self.rebuild_log_view();
+        match result {
+            Ok(()) => {
+                self.message = if self.engine.op_in_progress().is_some() {
+                    "still in progress — resolve conflicts, then Continue".into()
+                } else {
+                    ok.to_string()
+                };
+            }
+            Err(_) => {
+                self.message = if self.engine.op_in_progress().is_some() {
+                    "step failed — unresolved conflicts remain".into()
+                } else {
+                    "step failed".into()
+                };
+            }
         }
     }
 
@@ -988,6 +1123,7 @@ impl<'e> App<'e> {
         self.overlay = Overlay::None;
         match purpose {
             ConfirmPurpose::ResetHard(hash) => self.do_reset(&hash, ResetMode::Hard),
+            ConfirmPurpose::DropCommit(hash) => self.do_drop(&hash),
             ConfirmPurpose::RollbackFile(path) => match self.engine.checkout_file(&path) {
                 Ok(()) => {
                     self.refresh();
@@ -1297,6 +1433,23 @@ impl<'e> App<'e> {
                     }
                 }
             }
+            InputPurpose::SquashMarked(hashes) => {
+                if value.is_empty() {
+                    self.message = "commit message required".into();
+                    return;
+                }
+                match self.engine.squash_commits(&hashes, &value) {
+                    Ok(()) => {
+                        self.overlay = Overlay::None;
+                        self.rebuild_log_view();
+                        self.message = format!("squashed {} commits (u to undo)", hashes.len());
+                    }
+                    Err(e) => {
+                        self.overlay = Overlay::None;
+                        self.message = e.to_string();
+                    }
+                }
+            }
             InputPurpose::StashName(target) => {
                 if value.is_empty() {
                     self.message = "stash name required".into();
@@ -1451,6 +1604,21 @@ impl<'e> App<'e> {
                 }
                 _ => self.message = "resolve conflicts in your editor, then Continue".into(),
             },
+            PickerPurpose::OpControl => match id.as_str() {
+                "continue" => {
+                    let r = self.engine.op_continue();
+                    self.after_op_step(r, "continued");
+                }
+                "skip" => {
+                    let r = self.engine.op_skip();
+                    self.after_op_step(r, "skipped");
+                }
+                "abort" => {
+                    let r = self.engine.op_abort();
+                    self.after_op_step(r, "aborted");
+                }
+                _ => self.message = "resolve conflicts in your editor, then Continue".into(),
+            },
             PickerPurpose::DirtyCheckout(target) => match id.as_str() {
                 "stash" => {
                     self.overlay = Overlay::Input(InputState {
@@ -1598,6 +1766,15 @@ mod tests {
         fn squash_into_parent(&self, _: &str, _: &str) -> Result<()> {
             Ok(())
         }
+        fn squash_commits(&self, _: &[String], _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn drop_commit(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn cherry_pick(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
         fn backup_head(&self) -> Result<()> {
             Ok(())
         }
@@ -1633,6 +1810,18 @@ mod tests {
         }
         fn conflicts(&self) -> Result<Vec<String>> {
             Ok(vec![])
+        }
+        fn op_in_progress(&self) -> Option<&'static str> {
+            None
+        }
+        fn op_continue(&self) -> Result<()> {
+            Ok(())
+        }
+        fn op_skip(&self) -> Result<()> {
+            Ok(())
+        }
+        fn op_abort(&self) -> Result<()> {
+            Ok(())
         }
         fn repo_root(&self) -> &Path {
             &self.root
@@ -1893,6 +2082,105 @@ mod tests {
         let log = engine.log(10).unwrap();
         assert!(log.iter().any(|c| c.summary == "c2"));
         assert!(!log.iter().any(|c| c.summary == "c2 new"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_multi_squash_marked() {
+        use crate::engine::GixEngine;
+        let dir = init_repo("logmsquash");
+        let engine = GixEngine::discover(&dir).unwrap();
+        for (f, m) in [("a.txt", "c1"), ("b.txt", "c2"), ("c.txt", "c3")] {
+            std::fs::write(dir.join(f), m).unwrap();
+            engine.commit(&[f.to_string()], m, false).unwrap();
+        }
+        let mut app = App::new(&engine);
+        app.on_action(Action::Log); // Commits focus, c3 (newest) selected
+        app.handle_key(key_char(' ')); // mark c3
+        app.handle_key(key(event::KeyCode::Down)); // -> c2
+        app.handle_key(key_char(' ')); // mark c2
+        app.handle_key(key_char('s')); // squash marked -> combined-message input
+        assert!(matches!(app.overlay, Overlay::Input(_)));
+        for _ in 0..40 {
+            app.handle_key(key(event::KeyCode::Backspace)); // clear prefill
+        }
+        for c in "c2c3".chars() {
+            app.handle_key(key_char(c));
+        }
+        app.handle_key(key(event::KeyCode::Enter));
+        let log = engine.log(10).unwrap();
+        assert_eq!(log.len(), 2, "c2 + c3 merged into one");
+        assert!(log.iter().any(|c| c.summary == "c2c3"));
+        assert!(log.iter().any(|c| c.summary == "c1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_drop_commit_confirmed() {
+        use crate::engine::GixEngine;
+        let dir = init_repo("logdrop");
+        let engine = GixEngine::discover(&dir).unwrap();
+        for (f, m) in [("a.txt", "c1"), ("b.txt", "c2"), ("c.txt", "c3")] {
+            std::fs::write(dir.join(f), m).unwrap();
+            engine.commit(&[f.to_string()], m, false).unwrap();
+        }
+        let mut app = App::new(&engine);
+        app.on_action(Action::Log);
+        app.handle_key(key(event::KeyCode::Down)); // -> c2
+        app.handle_key(key_char('d')); // drop -> confirm
+        assert!(matches!(app.overlay, Overlay::Confirm(_)));
+        app.handle_key(key_char('y')); // confirm
+        let log = engine.log(10).unwrap();
+        assert_eq!(log.len(), 2);
+        assert!(!log.iter().any(|c| c.summary == "c2"));
+        assert!(log.iter().any(|c| c.summary == "c1"));
+        assert!(log.iter().any(|c| c.summary == "c3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_cherry_pick_conflict_then_resolve() {
+        use crate::engine::GixEngine;
+        use std::process::Command;
+        let dir = init_repo("logpick");
+        let engine = GixEngine::discover(&dir).unwrap();
+        let git = |a: &[&str]| {
+            assert!(Command::new("git")
+                .current_dir(&dir)
+                .args(a)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        std::fs::write(dir.join("f.txt"), "base\n").unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "base", false)
+            .unwrap();
+        let main = engine.branch_state().unwrap().current_branch.unwrap();
+        git(&["checkout", "-q", "-b", "other"]);
+        std::fs::write(dir.join("f.txt"), "other\n").unwrap();
+        let other_c = engine
+            .commit(&["f.txt".to_string()], "on-other", false)
+            .unwrap();
+        git(&["checkout", "-q", &main]);
+        std::fs::write(dir.join("f.txt"), "main\n").unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "on-main", false)
+            .unwrap();
+
+        let mut app = App::new(&engine);
+        app.on_action(Action::Log);
+        app.do_cherry_pick(&other_c); // conflict -> left in progress
+        assert_eq!(engine.op_in_progress(), Some("cherry-pick"));
+        // R while a pick is stopped opens the op-control picker.
+        app.handle_key(key_char('R'));
+        assert!(matches!(app.overlay, Overlay::Picker(_)));
+        app.handle_key(key(event::KeyCode::Down)); // Continue -> Skip
+        app.handle_key(key(event::KeyCode::Down)); // Skip -> Abort
+        app.handle_key(key(event::KeyCode::Enter)); // abort
+        assert!(engine.op_in_progress().is_none());
+        assert_eq!(engine.log(10).unwrap()[0].summary, "on-main");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2383,6 +2671,15 @@ mod tests {
             fn squash_into_parent(&self, _: &str, _: &str) -> Result<()> {
                 Ok(())
             }
+            fn squash_commits(&self, _: &[String], _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn drop_commit(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn cherry_pick(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
             fn backup_head(&self) -> Result<()> {
                 Ok(())
             }
@@ -2418,6 +2715,18 @@ mod tests {
             }
             fn conflicts(&self) -> Result<Vec<String>> {
                 Ok(vec![])
+            }
+            fn op_in_progress(&self) -> Option<&'static str> {
+                None
+            }
+            fn op_continue(&self) -> Result<()> {
+                Ok(())
+            }
+            fn op_skip(&self) -> Result<()> {
+                Ok(())
+            }
+            fn op_abort(&self) -> Result<()> {
+                Ok(())
             }
             fn repo_root(&self) -> &std::path::Path {
                 &self.root

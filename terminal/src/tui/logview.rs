@@ -38,6 +38,14 @@ pub enum LogAction {
     Reword(String),
     /// Squash the given commit into its parent.
     Squash(String),
+    /// Squash the marked set of commits (given newest-first) into one.
+    SquashMarked(Vec<String>),
+    /// Drop the given commit from the current branch.
+    Drop(String),
+    /// Cherry-pick the given commit onto the current branch.
+    CherryPick(String),
+    /// A sequencer op (rebase/cherry-pick) is in progress — drive it (continue/skip/abort).
+    OpControl,
     /// Undo the last history rewrite (reword/squash).
     Undo,
     /// Open the stash manager.
@@ -92,6 +100,8 @@ pub struct LogView {
     selected_branch: Option<String>,
     commits: Vec<Commit>,
     c_cursor: usize,
+    /// Commits marked (by hash) for a multi-select squash.
+    marked: HashSet<String>,
 
     files: Vec<CommitFile>,
     f_cursor: usize,
@@ -121,6 +131,7 @@ impl LogView {
             selected_branch: None,
             commits: Vec::new(),
             c_cursor: 0,
+            marked: HashSet::new(),
             files: Vec::new(),
             f_cursor: 0,
             message: String::new(),
@@ -202,6 +213,7 @@ impl LogView {
             Some(RowKind::Branch { refname, .. }) => {
                 self.selected_branch = Some(refname.clone());
                 self.c_cursor = 0;
+                self.marked.clear();
                 self.focus = Pane::Commits;
                 self.reload_commits(engine);
             }
@@ -254,6 +266,15 @@ impl LogView {
         self.commits.get(self.c_cursor).map(|c| c.hash.clone())
     }
 
+    /// Marked commit hashes in commit-list (newest-first) order.
+    fn marked_hashes(&self) -> Vec<String> {
+        self.commits
+            .iter()
+            .filter(|c| self.marked.contains(&c.hash))
+            .map(|c| c.hash.clone())
+            .collect()
+    }
+
     // ----- input --------------------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyEvent, engine: &dyn GitEngine) -> LogAction {
@@ -294,9 +315,32 @@ impl LogView {
                     return LogAction::NewBranchFrom(h);
                 }
             }
+            KeyCode::Char(' ') => {
+                // Toggle a mark on the commit under the cursor (for multi-squash).
+                if self.focus == Pane::Commits {
+                    if let Some(h) = self.selected_commit_hash() {
+                        if !self.marked.remove(&h) {
+                            self.marked.insert(h);
+                        }
+                    }
+                }
+            }
             KeyCode::Char('s') => {
+                if !self.marked.is_empty() {
+                    return LogAction::SquashMarked(self.marked_hashes());
+                }
                 if let Some(h) = self.selected_commit_hash() {
                     return LogAction::Squash(h);
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some(h) = self.selected_commit_hash() {
+                    return LogAction::Drop(h);
+                }
+            }
+            KeyCode::Char('C') => {
+                if let Some(h) = self.selected_commit_hash() {
+                    return LogAction::CherryPick(h);
                 }
             }
             KeyCode::Char('u') => return LogAction::Undo,
@@ -307,6 +351,11 @@ impl LogView {
                 }
             }
             KeyCode::Char('R') => {
+                // While a sequencer op is stopped, R drives it; otherwise it starts
+                // a rebase onto the selected branch.
+                if engine.op_in_progress().is_some() {
+                    return LogAction::OpControl;
+                }
                 if let Some((refname, _)) = self.selected_branch_ref() {
                     return LogAction::RebaseOnto(refname);
                 }
@@ -353,6 +402,7 @@ impl LogView {
                     if self.selected_branch.as_deref() != Some(refname.as_str()) {
                         self.selected_branch = Some(refname.clone());
                         self.c_cursor = 0;
+                        self.marked.clear();
                         self.reload_commits(engine);
                     }
                 }
@@ -576,7 +626,12 @@ impl LogView {
         let mut lines = Vec::new();
         for (i, c) in self.commits.iter().enumerate().skip(start).take(h) {
             let short = &c.hash[..c.hash.len().min(8)];
+            let marked = self.marked.contains(&c.hash);
             let mut spans = vec![
+                Span::styled(
+                    if marked { "● " } else { "  " },
+                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(format!("{short} "), Style::default().fg(t.warn)),
                 Span::styled(c.summary.clone(), Style::default().fg(t.fg)),
             ];
