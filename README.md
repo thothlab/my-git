@@ -75,4 +75,4 @@ cargo build --release
 ## Документация
 
 PRD, living-спеки и отчёты хранятся в командном Obsidian vault в
-`Projects/my-git/terminal/` (см. `terminal/docs/README.md`).
+`Projects/my-git/terminal/`.

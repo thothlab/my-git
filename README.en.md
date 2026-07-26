@@ -70,4 +70,4 @@ its own. Move files between lists with `m`; commits are made per list.
 ## Docs
 
 PRD, living specs and reports live in the team Obsidian vault under
-`Projects/my-git/terminal/` (see `terminal/docs/README.md`).
+`Projects/my-git/terminal/`.
