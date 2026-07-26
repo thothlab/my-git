@@ -54,6 +54,12 @@ pub enum LogAction {
     ShowCommands,
 }
 
+/// What a right-click landed on in the log browser.
+pub enum LogHit {
+    Branch { target: String, refname: String },
+    Commit { hash: String },
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pane {
     Branches,
@@ -264,12 +270,63 @@ impl LogView {
         };
     }
 
-    fn selected_commit_hash(&self) -> Option<String> {
+    pub fn selected_commit_hash(&self) -> Option<String> {
         self.commits.get(self.c_cursor).map(|c| c.hash.clone())
     }
 
+    /// The selected branch as `(checkout target, full refname)`, if a branch row
+    /// is under the tree cursor.
+    pub fn selected_branch_pair(&self) -> Option<(String, String)> {
+        let (refname, _) = self.selected_branch_ref()?;
+        let target = self.checkout_target()?;
+        Some((target, refname))
+    }
+
+    pub fn marked_count(&self) -> usize {
+        self.marked.len()
+    }
+
+    pub fn toggle_mark_hash(&mut self, hash: &str) {
+        if !self.marked.remove(hash) {
+            self.marked.insert(hash.to_string());
+        }
+    }
+
+    /// Move the relevant cursor to the element under `(col, row)` and report what
+    /// it is, for building a right-click context menu.
+    pub fn context_at(
+        &mut self,
+        col: u16,
+        row: u16,
+        area: Rect,
+        engine: &dyn GitEngine,
+    ) -> Option<LogHit> {
+        let r = self.layout(area);
+        if r.branches.contains_pt(col, row) {
+            self.focus = Pane::Branches;
+            self.click_branch(r.branches, row, engine);
+            let (refname, _) = self.selected_branch_ref()?;
+            let target = self.checkout_target()?;
+            return Some(LogHit::Branch { target, refname });
+        }
+        if r.commits.contains_pt(col, row) {
+            self.focus = Pane::Commits;
+            self.click_commit(r.commits, row, engine);
+            return self
+                .selected_commit_hash()
+                .map(|hash| LogHit::Commit { hash });
+        }
+        // Clicking the details/diff panes acts on the already-selected commit.
+        if r.details.contains_pt(col, row) || r.diff.contains_pt(col, row) {
+            return self
+                .selected_commit_hash()
+                .map(|hash| LogHit::Commit { hash });
+        }
+        None
+    }
+
     /// Marked commit hashes in commit-list (newest-first) order.
-    fn marked_hashes(&self) -> Vec<String> {
+    pub fn marked_hashes(&self) -> Vec<String> {
         self.commits
             .iter()
             .filter(|c| self.marked.contains(&c.hash))

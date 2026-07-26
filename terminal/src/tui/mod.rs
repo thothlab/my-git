@@ -12,7 +12,7 @@ use crate::engine::{BranchState, FileStatus, GitEngine, PushOpts, ResetMode};
 use anyhow::Result;
 use crossterm::event::{self, Event};
 use keymap::{resolve, Action};
-use logview::{LogAction, LogView};
+use logview::{LogAction, LogHit, LogView};
 use ratatui::layout::Rect;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -29,8 +29,6 @@ pub enum Overlay {
     None,
     /// Interactive help / command palette; the `usize` is the selected row.
     Help(usize),
-    /// Static key reference for the Log browser (any key closes).
-    LogHelp,
     Input(InputState),
     Picker(PickerState),
     Confirm(ConfirmState),
@@ -38,6 +36,54 @@ pub enum Overlay {
     Stashes(StashState),
     /// Git command log: what git commands ran and their detailed errors.
     Commands(CommandsState),
+    /// A context menu / runnable command palette (right-click or `?` in the log).
+    Menu(MenuState),
+}
+
+/// A list of runnable actions — used both as a right-click context menu (anchored
+/// at the click) and as the log's `?` command palette (centred).
+pub struct MenuState {
+    pub title: String,
+    pub items: Vec<MenuItem>,
+    pub cursor: usize,
+    /// Top-left anchor for a context menu; `None` centres it (palette).
+    pub anchor: Option<(u16, u16)>,
+    /// A dim hint line under the list (e.g. navigation keys for the palette).
+    pub footer: Option<String>,
+}
+
+pub struct MenuItem {
+    pub label: String,
+    pub action: MenuAction,
+}
+
+/// A runnable action from a menu. Variants carry their target, captured when the
+/// menu opens (not re-read on Enter).
+#[derive(Clone)]
+pub enum MenuAction {
+    // log / history (target commit or branch)
+    Checkout(String),
+    RebaseOnto(String),
+    NewBranchFrom(String),
+    Reword(String),
+    SquashParent(String),
+    SquashMarked,
+    Drop(String),
+    CherryPick(String),
+    Revert(String),
+    Reset(String),
+    MarkToggle(String),
+    Undo,
+    Stashes,
+    Commands,
+    Push,
+    // changes mode
+    MoveFile,
+    Rollback,
+    CommitList,
+    NewList,
+    RenameList,
+    DeleteList,
 }
 
 pub struct CommandsState {
@@ -340,12 +386,12 @@ impl<'e> App<'e> {
         }
         match self.overlay {
             Overlay::Help(_) => self.handle_help_key(key),
-            Overlay::LogHelp => self.overlay = Overlay::None, // any key closes
             Overlay::Input(_) => self.handle_input_key(key),
             Overlay::Picker(_) => self.handle_picker_key(key),
             Overlay::Confirm(_) => self.handle_confirm_key(key),
             Overlay::Stashes(_) => self.handle_stashes_key(key),
             Overlay::Commands(_) => self.handle_commands_key(key),
+            Overlay::Menu(_) => self.handle_menu_key(key),
             Overlay::None => {
                 if self.log.is_some() {
                     self.handle_log_key_event(key);
@@ -360,8 +406,18 @@ impl<'e> App<'e> {
     /// divider resizes them, and the wheel scrolls the panel under the pointer.
     fn handle_mouse(&mut self, m: event::MouseEvent, area: Rect) {
         use event::{MouseButton, MouseEventKind};
+        // The context menu owns the mouse while it is open.
+        if let Overlay::Menu(_) = self.overlay {
+            self.handle_menu_mouse(m, area);
+            return;
+        }
         if !matches!(self.overlay, Overlay::None) {
-            return; // let overlays own the interaction
+            return; // let other overlays own the interaction
+        }
+        // Right-click anywhere opens a context menu for the element under it.
+        if let MouseEventKind::Down(MouseButton::Right) = m.kind {
+            self.open_context_menu(m.column, m.row, area);
+            return;
         }
         if let Some(l) = self.log.as_mut() {
             let body = Rect::new(
@@ -506,6 +562,250 @@ impl<'e> App<'e> {
             }
             _ => {}
         }
+    }
+
+    // ----- context menu / command palette -------------------------------------
+
+    /// Open a context menu for the element under a right-click.
+    fn open_context_menu(&mut self, col: u16, row: u16, area: Rect) {
+        if self.log.is_some() {
+            let body = Rect::new(
+                area.x,
+                area.y + 1,
+                area.width,
+                area.height.saturating_sub(2),
+            );
+            let engine = self.engine;
+            let hit = self
+                .log
+                .as_mut()
+                .and_then(|l| l.context_at(col, row, body, engine));
+            let (title, items) = match hit {
+                Some(LogHit::Branch { target, refname }) => (
+                    format!("Branch: {target}"),
+                    branch_menu_items(&target, &refname),
+                ),
+                Some(LogHit::Commit { hash }) => {
+                    let marked = self.log.as_ref().map(|l| l.marked_count()).unwrap_or(0);
+                    (
+                        format!("Commit {}", &hash[..hash.len().min(8)]),
+                        commit_menu_items(&hash, marked),
+                    )
+                }
+                None => return,
+            };
+            self.overlay = Overlay::Menu(MenuState {
+                title,
+                items,
+                cursor: 0,
+                anchor: Some((col, row)),
+                footer: None,
+            });
+        } else {
+            let [_, changes, _, _] = ui::regions(area, self.split_pct);
+            if col < changes.x || col >= changes.x + changes.width {
+                return;
+            }
+            self.focus = Focus::Changes;
+            self.select_row_at(row, changes);
+            let items = self.changes_menu_items();
+            if items.is_empty() {
+                return;
+            }
+            self.overlay = Overlay::Menu(MenuState {
+                title: "Actions".into(),
+                items,
+                cursor: 0,
+                anchor: Some((col, row)),
+                footer: None,
+            });
+        }
+    }
+
+    /// The log's `?` — a runnable command palette for the current selection.
+    fn open_log_palette(&mut self) {
+        let Some(l) = self.log.as_ref() else { return };
+        let mut items = Vec::new();
+        if let Some(hash) = l.selected_commit_hash() {
+            items.extend(commit_menu_items(&hash, l.marked_count()));
+        }
+        if let Some((target, refname)) = l.selected_branch_pair() {
+            items.extend(branch_menu_items(&target, &refname));
+        }
+        for (label, action) in [
+            ("u  undo last reword/squash/drop", MenuAction::Undo),
+            ("P  push current branch", MenuAction::Push),
+            ("S  stashes", MenuAction::Stashes),
+            ("g  git command log", MenuAction::Commands),
+        ] {
+            items.push(MenuItem {
+                label: label.into(),
+                action,
+            });
+        }
+        self.overlay = Overlay::Menu(MenuState {
+            title: "Log — run a command".into(),
+            items,
+            cursor: 0,
+            anchor: None,
+            footer: Some("↑↓ select · Enter run · Esc close   ·   Tab/drag/mouse: navigate".into()),
+        });
+    }
+
+    fn changes_menu_items(&self) -> Vec<MenuItem> {
+        match self.rows.get(self.cursor) {
+            Some(Row::File { .. }) => vec![
+                MenuItem {
+                    label: "Move to changelist…".into(),
+                    action: MenuAction::MoveFile,
+                },
+                MenuItem {
+                    label: "Rollback file to HEAD".into(),
+                    action: MenuAction::Rollback,
+                },
+                MenuItem {
+                    label: "Commit this list…".into(),
+                    action: MenuAction::CommitList,
+                },
+            ],
+            Some(Row::Header { .. }) => vec![
+                MenuItem {
+                    label: "Commit this list…".into(),
+                    action: MenuAction::CommitList,
+                },
+                MenuItem {
+                    label: "New changelist…".into(),
+                    action: MenuAction::NewList,
+                },
+                MenuItem {
+                    label: "Rename changelist…".into(),
+                    action: MenuAction::RenameList,
+                },
+                MenuItem {
+                    label: "Delete changelist".into(),
+                    action: MenuAction::DeleteList,
+                },
+            ],
+            None => Vec::new(),
+        }
+    }
+
+    fn handle_menu_key(&mut self, key: event::KeyEvent) {
+        use event::KeyCode;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.overlay = Overlay::None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Overlay::Menu(mn) = &mut self.overlay {
+                    mn.cursor = mn.cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Overlay::Menu(mn) = &mut self.overlay {
+                    if mn.cursor + 1 < mn.items.len() {
+                        mn.cursor += 1;
+                    }
+                }
+            }
+            KeyCode::Enter => self.run_menu_cursor(),
+            _ => {}
+        }
+    }
+
+    fn handle_menu_mouse(&mut self, m: event::MouseEvent, area: Rect) {
+        use event::{MouseButton, MouseEventKind};
+        let MouseEventKind::Down(button) = m.kind else {
+            return;
+        };
+        let rect = match &self.overlay {
+            Overlay::Menu(mn) => ui::menu_rect(area, mn),
+            _ => return,
+        };
+        let inside = m.column >= rect.x
+            && m.column < rect.x + rect.width
+            && m.row >= rect.y
+            && m.row < rect.y + rect.height;
+        if !inside || button == MouseButton::Right {
+            self.overlay = Overlay::None; // click outside closes
+            return;
+        }
+        // Map the click row to an item (list starts one row below the top border).
+        let idx = (m.row.saturating_sub(rect.y + 1)) as usize;
+        if let Overlay::Menu(mn) = &mut self.overlay {
+            if idx < mn.items.len() {
+                mn.cursor = idx;
+            } else {
+                return;
+            }
+        }
+        self.run_menu_cursor();
+    }
+
+    /// Run the selected menu item. Clears the overlay *before* dispatching so an
+    /// action that opens its own overlay (input/picker) isn't wiped.
+    fn run_menu_cursor(&mut self) {
+        let action = match &self.overlay {
+            Overlay::Menu(mn) => mn.items.get(mn.cursor).map(|i| i.action.clone()),
+            _ => None,
+        };
+        self.overlay = Overlay::None;
+        if let Some(a) = action {
+            self.dispatch_menu_action(a);
+        }
+    }
+
+    fn dispatch_menu_action(&mut self, action: MenuAction) {
+        use MenuAction::*;
+        self.message.clear();
+        match action {
+            Checkout(target) => self.log_checkout(target),
+            RebaseOnto(refname) => self.log_rebase_onto(&refname),
+            NewBranchFrom(hash) => self.open_new_branch_from(hash),
+            Reword(hash) => self.open_reword(hash),
+            SquashParent(hash) => self.open_squash(hash),
+            SquashMarked => {
+                if let Some(l) = self.log.as_ref() {
+                    let m = l.marked_hashes();
+                    self.open_squash_marked(m);
+                }
+            }
+            Drop(hash) => self.confirm_drop(hash),
+            CherryPick(hash) => self.do_cherry_pick(&hash),
+            Revert(hash) => self.do_revert(hash),
+            Reset(hash) => self.open_reset_picker(hash),
+            MarkToggle(hash) => {
+                if let Some(l) = self.log.as_mut() {
+                    l.toggle_mark_hash(&hash);
+                }
+            }
+            Undo => self.do_undo(),
+            Stashes => self.open_stashes(),
+            Commands => self.open_commands(),
+            Push => self.push_action(),
+            MoveFile => self.open_move_files(),
+            Rollback => self.open_rollback(),
+            CommitList => self.open_commit(false),
+            NewList => self.open_new_list(),
+            RenameList => self.open_rename_list(),
+            DeleteList => self.delete_current_list(),
+        }
+    }
+
+    fn do_revert(&mut self, hash: String) {
+        match self.engine.revert(&hash) {
+            Ok(()) => {
+                self.reload_log_and_state();
+                self.message = "reverted".into();
+            }
+            Err(e) => self.message = e.to_string(),
+        }
+    }
+
+    fn open_new_branch_from(&mut self, hash: String) {
+        self.overlay = Overlay::Input(InputState {
+            title: format!("New branch from {}", &hash[..hash.len().min(8)]),
+            value: String::new(),
+            purpose: InputPurpose::NewBranchFrom(hash),
+        });
     }
 
     // ----- stash manager ------------------------------------------------------
@@ -762,24 +1062,12 @@ impl<'e> App<'e> {
         match action {
             LogAction::None => {}
             LogAction::Exit => self.log = None,
-            LogAction::Help => self.overlay = Overlay::LogHelp,
-            LogAction::Revert(hash) => match engine.revert(&hash) {
-                Ok(()) => {
-                    self.reload_log_and_state();
-                    self.message = "reverted".into();
-                }
-                Err(e) => self.message = e.to_string(),
-            },
+            LogAction::Help => self.open_log_palette(),
+            LogAction::Revert(hash) => self.do_revert(hash),
             LogAction::Reset(hash) => self.open_reset_picker(hash),
             LogAction::Checkout(target) => self.log_checkout(target),
             LogAction::Push => self.push_action(),
-            LogAction::NewBranchFrom(hash) => {
-                self.overlay = Overlay::Input(InputState {
-                    title: format!("New branch from {}", &hash[..hash.len().min(8)]),
-                    value: String::new(),
-                    purpose: InputPurpose::NewBranchFrom(hash),
-                });
-            }
+            LogAction::NewBranchFrom(hash) => self.open_new_branch_from(hash),
             LogAction::RebaseOnto(target) => self.log_rebase_onto(&target),
             LogAction::Reword(hash) => self.open_reword(hash),
             LogAction::Squash(hash) => self.open_squash(hash),
@@ -1721,6 +2009,66 @@ impl<'e> App<'e> {
     }
 }
 
+/// Context-menu / palette items for a branch. `target` is the checkout name
+/// (remote-stripped); `refname` is the full ref used as a rebase base.
+fn branch_menu_items(target: &str, refname: &str) -> Vec<MenuItem> {
+    vec![
+        MenuItem {
+            label: format!("c  Checkout {target}"),
+            action: MenuAction::Checkout(target.to_string()),
+        },
+        MenuItem {
+            label: format!("R  Rebase current onto {refname}"),
+            action: MenuAction::RebaseOnto(refname.to_string()),
+        },
+    ]
+}
+
+/// Context-menu / palette items for a commit on the current branch.
+fn commit_menu_items(hash: &str, marked: usize) -> Vec<MenuItem> {
+    let h = hash.to_string();
+    let mut items = vec![MenuItem {
+        label: "r  Reword".into(),
+        action: MenuAction::Reword(h.clone()),
+    }];
+    if marked >= 2 {
+        items.push(MenuItem {
+            label: format!("s  Squash {marked} marked"),
+            action: MenuAction::SquashMarked,
+        });
+    } else {
+        items.push(MenuItem {
+            label: "s  Squash into parent".into(),
+            action: MenuAction::SquashParent(h.clone()),
+        });
+    }
+    items.push(MenuItem {
+        label: "space  Mark / unmark for squash".into(),
+        action: MenuAction::MarkToggle(h.clone()),
+    });
+    items.push(MenuItem {
+        label: "d  Drop".into(),
+        action: MenuAction::Drop(h.clone()),
+    });
+    items.push(MenuItem {
+        label: "C  Cherry-pick onto current".into(),
+        action: MenuAction::CherryPick(h.clone()),
+    });
+    items.push(MenuItem {
+        label: "v  Revert".into(),
+        action: MenuAction::Revert(h.clone()),
+    });
+    items.push(MenuItem {
+        label: "x  Reset to here".into(),
+        action: MenuAction::Reset(h.clone()),
+    });
+    items.push(MenuItem {
+        label: "b  New branch from here".into(),
+        action: MenuAction::NewBranchFrom(h),
+    });
+    items
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2035,17 +2383,24 @@ mod tests {
     }
 
     #[test]
-    fn log_help_opens_and_closes() {
+    fn log_palette_opens_navigates_and_closes() {
         let mock = Mock {
             root: std::env::temp_dir().join("mygit-app-test-loghelp"),
         };
         let mut app = App::new(&mock);
         app.on_action(Action::Log);
-        app.handle_key(key_char('?'));
-        assert!(matches!(app.overlay, Overlay::LogHelp));
-        app.handle_key(key_char('x')); // any key closes
+        app.handle_key(key_char('?')); // runnable command palette
+        match &app.overlay {
+            Overlay::Menu(mn) => assert!(!mn.items.is_empty(), "palette has commands"),
+            _ => panic!("expected the command palette"),
+        }
+        app.handle_key(key(event::KeyCode::Down)); // navigate
+        app.handle_key(key(event::KeyCode::Esc)); // close
         assert!(matches!(app.overlay, Overlay::None));
-        assert!(app.log.is_some(), "closing help stays in the log browser");
+        assert!(
+            app.log.is_some(),
+            "closing the palette stays in the log browser"
+        );
     }
 
     #[test]
@@ -2267,6 +2622,60 @@ mod tests {
         app.handle_key(key_char('f')); // toggle failures-only
         assert!(matches!(&app.overlay, Overlay::Commands(c) if c.failures_only));
         app.handle_key(key(event::KeyCode::Esc)); // close
+        assert!(matches!(app.overlay, Overlay::None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_palette_reword_opens_input() {
+        use crate::engine::GixEngine;
+        let dir = init_repo("logpal");
+        let engine = GixEngine::discover(&dir).unwrap();
+        for (f, m) in [("a.txt", "c1"), ("b.txt", "c2")] {
+            std::fs::write(dir.join(f), m).unwrap();
+            engine.commit(&[f.to_string()], m, false).unwrap();
+        }
+        let mut app = App::new(&engine);
+        app.on_action(Action::Log); // newest commit selected
+        app.handle_key(key_char('?')); // runnable palette
+        assert!(matches!(app.overlay, Overlay::Menu(_)));
+        // First item is "r Reword"; Enter runs it -> the Input overlay opens. This
+        // only survives if the menu is cleared BEFORE dispatch, not after.
+        app.handle_key(key(event::KeyCode::Enter));
+        assert!(matches!(app.overlay, Overlay::Input(_)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_right_click_opens_commit_menu() {
+        use crate::engine::GixEngine;
+        use event::{MouseButton, MouseEventKind};
+        let dir = init_repo("logctx");
+        let engine = GixEngine::discover(&dir).unwrap();
+        for (f, m) in [("a.txt", "c1"), ("b.txt", "c2")] {
+            std::fs::write(dir.join(f), m).unwrap();
+            engine.commit(&[f.to_string()], m, false).unwrap();
+        }
+        let mut app = App::new(&engine);
+        app.on_action(Action::Log);
+        let area = Rect::new(0, 0, 100, 30);
+        // Right-click inside the COMMITS pane (x in [~22,62), a commit row).
+        app.handle_mouse(mev(MouseEventKind::Down(MouseButton::Right), 40, 2), area);
+        match &app.overlay {
+            Overlay::Menu(mn) => {
+                assert!(mn.anchor.is_some(), "context menu anchors at the click");
+                assert!(mn.items.iter().any(|i| i.label.contains("Reword")));
+                assert!(mn.items.iter().any(|i| i.label.contains("Cherry-pick")));
+            }
+            _ => panic!("expected a context menu"),
+        }
+        // Render the anchored menu (near the edge exercises clamping).
+        {
+            use ratatui::{backend::TestBackend, Terminal};
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| super::ui::render(f, &app)).unwrap();
+        }
+        app.handle_key(key(event::KeyCode::Esc));
         assert!(matches!(app.overlay, Overlay::None));
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -5,7 +5,8 @@
 use super::keymap::BINDINGS;
 use super::theme::Theme;
 use super::{
-    App, CommandsState, ConfirmState, Focus, InputState, Overlay, PickerState, Row, StashState,
+    App, CommandsState, ConfirmState, Focus, InputState, MenuState, Overlay, PickerState, Row,
+    StashState,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -60,14 +61,72 @@ pub fn render(f: &mut Frame, app: &App<'_>) {
     }
     match &app.overlay {
         Overlay::Help(cursor) => render_help(f, app, area, *cursor),
-        Overlay::LogHelp => render_log_help(f, app, area),
         Overlay::Input(s) => render_input(f, app, area, s),
         Overlay::Picker(p) => render_picker(f, app, area, p),
         Overlay::Confirm(c) => render_confirm(f, app, area, c),
         Overlay::Stashes(s) => render_stashes(f, app, area, s),
         Overlay::Commands(c) => render_commands(f, app, area, c),
+        Overlay::Menu(mn) => render_menu(f, app, area, mn),
         Overlay::None => {}
     }
+}
+
+/// The rectangle a menu occupies — shared by the renderer and mouse hit-testing.
+/// Anchored menus (context menus) open at the click and are clamped on-screen;
+/// an anchorless menu (the palette) is centred.
+pub(super) fn menu_rect(area: Rect, mn: &MenuState) -> Rect {
+    let content_w = mn
+        .items
+        .iter()
+        .map(|i| i.label.chars().count())
+        .chain(std::iter::once(mn.title.chars().count()))
+        .chain(mn.footer.iter().map(|f| f.chars().count()))
+        .max()
+        .unwrap_or(10) as u16;
+    let w = (content_w + 4)
+        .clamp(16, area.width.saturating_sub(2))
+        .min(area.width);
+    let footer_h = if mn.footer.is_some() { 1 } else { 0 };
+    let h = (mn.items.len() as u16 + 2 + footer_h).min(area.height);
+    match mn.anchor {
+        Some((cx, cy)) => {
+            let x = cx.min(area.x + area.width.saturating_sub(w));
+            let y = cy.min(area.y + area.height.saturating_sub(h));
+            Rect::new(x, y, w, h)
+        }
+        None => centered(area, w, h),
+    }
+}
+
+fn render_menu(f: &mut Frame, app: &App<'_>, area: Rect, mn: &MenuState) {
+    let t = &app.theme;
+    let rect = menu_rect(area, mn);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(Line::from(format!(" {} ", mn.title)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.accent));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let mut lines: Vec<Line> = mn
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let mut line = Line::from(format!(" {}", item.label));
+            if i == mn.cursor {
+                line = line.style(Style::default().bg(t.sel_bg).fg(t.accent));
+            }
+            line
+        })
+        .collect();
+    if let Some(footer) = &mn.footer {
+        lines.push(Line::from(Span::styled(
+            format!(" {footer}"),
+            Style::default().fg(t.fg_muted),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Git command log: a large, scrollable console of recent `git` invocations
@@ -177,60 +236,6 @@ fn render_stashes(f: &mut Frame, app: &App<'_>, area: Rect, s: &StashState) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " Enter/p pop · a apply · d drop · Esc close",
-        Style::default().fg(t.fg_muted),
-    )));
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-fn render_log_help(f: &mut Frame, app: &App<'_>, area: Rect) {
-    let t = &app.theme;
-    let keys: &[(&str, &str)] = &[
-        ("Tab", "switch pane (Branches / Commits / Files)"),
-        ("j / k / ↑↓", "navigate the focused pane"),
-        ("Enter", "select branch · expand/collapse folder"),
-        ("c", "checkout selected branch (asks about local changes)"),
-        ("R", "rebase onto selected branch · resolve a stopped op"),
-        ("P", "push current branch (force-with-lease if diverged)"),
-        ("b", "new branch from the selected commit"),
-        ("r", "reword commit (amend HEAD / rebase older / root)"),
-        ("space", "mark commits for a multi-squash"),
-        ("s", "squash marked commits (or selected into its parent)"),
-        ("d", "drop the selected commit"),
-        ("C", "cherry-pick the selected commit onto this branch"),
-        ("u", "undo the last reword/squash/drop/cherry-pick"),
-        ("v", "revert the selected commit"),
-        ("x", "reset to the selected commit"),
-        ("S", "stashes (create / apply / pop / drop)"),
-        ("g", "git command log (what ran + detailed errors)"),
-        (
-            "mouse",
-            "click to select · click a folder to fold · wheel scrolls",
-        ),
-        ("drag", "drag the dividers to resize panels"),
-        ("L / Esc", "back to Changes"),
-    ];
-    let w = 62.min(area.width.saturating_sub(4));
-    let h = (keys.len() as u16 + 4).min(area.height.saturating_sub(2));
-    let rect = centered(area, w, h);
-    f.render_widget(Clear, rect);
-    let block = Block::default()
-        .title(Line::from(" Log browser — keys "))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.accent));
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-    let mut lines: Vec<Line> = keys
-        .iter()
-        .map(|(k, d)| {
-            Line::from(vec![
-                Span::styled(format!(" {k:<12}"), Style::default().fg(t.accent)),
-                Span::styled(*d, Style::default().fg(t.fg)),
-            ])
-        })
-        .collect();
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        " any key to close",
         Style::default().fg(t.fg_muted),
     )));
     f.render_widget(Paragraph::new(lines), inner);
