@@ -9,7 +9,24 @@
 //! (AC#7): the TUI process stays tiny.
 
 use anyhow::{Context, Result};
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+
+/// How many recent git invocations the command log keeps.
+const CMD_LOG_CAP: usize = 400;
+
+/// One recorded `git` invocation, for the command-log window. stdout is not
+/// stored (diffs/logs are large and irrelevant to diagnosing failures).
+#[derive(Debug, Clone)]
+pub struct CmdEntry {
+    /// The arguments, e.g. `rebase develop`.
+    pub command: String,
+    pub ok: bool,
+    pub code: Option<i32>,
+    /// Trimmed stderr (the detailed error on failure).
+    pub stderr: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileStatus {
@@ -147,6 +164,11 @@ pub trait GitEngine {
     fn rebase_skip(&self) -> Result<()>;
     fn rebase_abort(&self) -> Result<()>;
     fn conflicts(&self) -> Result<Vec<String>>;
+    /// A snapshot of recent `git` invocations (oldest first) for the command-log
+    /// window. Default returns nothing so lightweight engines need not track it.
+    fn command_log(&self) -> Vec<CmdEntry> {
+        Vec::new()
+    }
     /// The sequencer operation currently stopped in the working tree, if any:
     /// `"rebase"`, `"cherry-pick"`, or `"revert"`. Used to drive the LOG conflict flow.
     fn op_in_progress(&self) -> Option<&'static str>;
@@ -162,6 +184,8 @@ pub struct GixEngine {
     #[allow(dead_code)]
     repo: gix::Repository,
     root: PathBuf,
+    /// Ring buffer of recent git invocations for the command-log window.
+    cmdlog: RefCell<VecDeque<CmdEntry>>,
 }
 
 impl GixEngine {
@@ -173,21 +197,41 @@ impl GixEngine {
             .work_dir()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| repo.git_dir().to_path_buf());
-        Ok(Self { repo, root })
+        Ok(Self {
+            repo,
+            root,
+            cmdlog: RefCell::new(VecDeque::new()),
+        })
+    }
+
+    /// Record one git invocation in the ring buffer.
+    fn record(&self, command: String, out: &std::process::Output) {
+        let mut log = self.cmdlog.borrow_mut();
+        if log.len() >= CMD_LOG_CAP {
+            log.pop_front();
+        }
+        log.push_back(CmdEntry {
+            command,
+            ok: out.status.success(),
+            code: out.status.code(),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
     }
 
     /// Run `git` in the repo. `GIT_EDITOR`/`GIT_SEQUENCE_EDITOR` are neutralised
     /// (we supply messages ourselves) and terminal prompts are disabled so a
     /// missing credential fails fast instead of hanging the TUI.
     fn git(&self, args: &[&str]) -> Result<std::process::Output> {
-        std::process::Command::new("git")
+        let out = std::process::Command::new("git")
             .current_dir(&self.root)
             .env("GIT_EDITOR", "true")
             .env("GIT_SEQUENCE_EDITOR", "true")
             .env("GIT_TERMINAL_PROMPT", "0")
             .args(args)
             .output()
-            .with_context(|| format!("running `git {}`", args.join(" ")))
+            .with_context(|| format!("running `git {}`", args.join(" ")))?;
+        self.record(args.join(" "), &out);
+        Ok(out)
     }
 
     /// Run `git`, error on non-zero exit, return stdout as a `String`.
@@ -245,6 +289,10 @@ impl GixEngine {
             }
         };
         let out = cmd.output().context("running git rebase -i")?;
+        self.record(
+            format!("rebase -i --autostash {base} (scripted todo)"),
+            &out,
+        );
         let _ = std::fs::remove_file(&todo_path);
         if let Some(p) = &msg_path {
             let _ = std::fs::remove_file(p);
@@ -732,6 +780,10 @@ impl GitEngine for GixEngine {
             .collect())
     }
 
+    fn command_log(&self) -> Vec<CmdEntry> {
+        self.cmdlog.borrow().iter().cloned().collect()
+    }
+
     fn op_in_progress(&self) -> Option<&'static str> {
         // A stopped interactive rebase also leaves CHERRY_PICK_HEAD behind, so
         // detect rebase first — otherwise a rebase would be mis-driven with
@@ -969,6 +1021,23 @@ mod tests {
         assert_eq!(log.len(), 2, "3 commits -> 2 after squash");
         assert!(log.iter().any(|c| c.summary == "c2 + c3"));
         assert!(log.iter().any(|c| c.summary == "c1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn command_log_records_failures() {
+        let dir = init_repo();
+        let engine = GixEngine::discover(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        engine.commit(&["a.txt".to_string()], "c1", false).unwrap();
+        // A doomed rebase onto a nonexistent ref fails; the log captures stderr.
+        assert!(engine.rebase_onto("no-such-branch-xyz").is_err());
+        let log = engine.command_log();
+        let failed = log.iter().find(|e| !e.ok).expect("a failed entry recorded");
+        assert!(failed.command.contains("rebase"), "cmd: {}", failed.command);
+        assert!(!failed.stderr.is_empty(), "stderr captured");
+        // successful commands are recorded too (the commit above).
+        assert!(log.iter().any(|e| e.ok));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

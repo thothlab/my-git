@@ -33,6 +33,7 @@ pub enum Action {
     Log,
     Rebase,
     Stashes,
+    Commands,
     // overlay control
     Confirm,
     Cancel,
@@ -63,6 +64,7 @@ impl Action {
             Log => "log browser",
             Rebase => "rebase onto",
             Stashes => "stashes (create / apply / pop / drop)",
+            Commands => "git command log (errors / history)",
             Confirm => "confirm",
             Cancel => "cancel",
         }
@@ -88,6 +90,7 @@ pub const BINDINGS: &[(&str, Action)] = &[
     ("L", Action::Log),
     ("R", Action::Rebase),
     ("S", Action::Stashes),
+    ("g", Action::Commands),
     ("F5 / ^R", Action::Refresh),
     ("?", Action::Help),
     ("q", Action::Quit),
@@ -128,6 +131,7 @@ pub fn resolve(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('L') => Log,
         KeyCode::Char('R') => Rebase,
         KeyCode::Char('S') => Stashes,
+        KeyCode::Char('g') => Commands,
         KeyCode::Enter => Confirm,
         KeyCode::Esc => Cancel,
         _ => return None,

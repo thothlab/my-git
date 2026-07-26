@@ -4,7 +4,9 @@
 
 use super::keymap::BINDINGS;
 use super::theme::Theme;
-use super::{App, ConfirmState, Focus, InputState, Overlay, PickerState, Row, StashState};
+use super::{
+    App, CommandsState, ConfirmState, Focus, InputState, Overlay, PickerState, Row, StashState,
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -63,8 +65,89 @@ pub fn render(f: &mut Frame, app: &App<'_>) {
         Overlay::Picker(p) => render_picker(f, app, area, p),
         Overlay::Confirm(c) => render_confirm(f, app, area, c),
         Overlay::Stashes(s) => render_stashes(f, app, area, s),
+        Overlay::Commands(c) => render_commands(f, app, area, c),
         Overlay::None => {}
     }
+}
+
+/// Git command log: a large, scrollable console of recent `git` invocations
+/// (newest first) with failures highlighted and their stderr expanded.
+fn render_commands(f: &mut Frame, app: &App<'_>, area: Rect, c: &CommandsState) {
+    let t = &app.theme;
+    let w = area.width.saturating_sub(6).min(110);
+    let h = area.height.saturating_sub(4);
+    let rect = centered(area, w, h);
+    f.render_widget(Clear, rect);
+    let fail_count = c.entries.iter().filter(|e| !e.ok).count();
+    let title = if c.failures_only {
+        format!(" Git command log — failures only ({fail_count}) ")
+    } else {
+        format!(
+            " Git command log — {} commands, {fail_count} failed ",
+            c.entries.len()
+        )
+    };
+    let block = Block::default()
+        .title(Line::from(title))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.accent));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    // Reserve the last row for the hint bar.
+    let body_h = inner.height.saturating_sub(1);
+    let mut lines: Vec<Line> = Vec::new();
+    for e in c.entries.iter().filter(|e| !c.failures_only || !e.ok) {
+        let (glyph, cmd_style) = if e.ok {
+            ("✓", Style::default().fg(t.fg_muted))
+        } else {
+            (
+                "✗",
+                Style::default().fg(t.danger).add_modifier(Modifier::BOLD),
+            )
+        };
+        let code = match e.code {
+            Some(n) if !e.ok => format!("  [exit {n}]"),
+            _ => String::new(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{glyph} "), cmd_style),
+            Span::styled(format!("git {}", e.command), cmd_style),
+            Span::styled(code, Style::default().fg(t.danger)),
+        ]));
+        if !e.ok && !e.stderr.is_empty() {
+            for sl in e.stderr.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("    {sl}"),
+                    Style::default().fg(t.danger),
+                )));
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            if c.failures_only {
+                "  no failed commands"
+            } else {
+                "  no git commands recorded yet"
+            },
+            Style::default().fg(t.fg_muted),
+        )));
+    }
+    let max_scroll = (lines.len() as u16).saturating_sub(body_h);
+    let scroll = c.scroll.min(max_scroll);
+    let body = Rect::new(inner.x, inner.y, inner.width, body_h);
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), body);
+
+    let hint = " j/k scroll · f failures only · Esc/g close";
+    let hint_row = Rect::new(inner.x, inner.y + body_h, inner.width, 1);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(t.fg_muted),
+        ))),
+        hint_row,
+    );
 }
 
 fn render_stashes(f: &mut Frame, app: &App<'_>, area: Rect, s: &StashState) {
@@ -118,6 +201,7 @@ fn render_log_help(f: &mut Frame, app: &App<'_>, area: Rect) {
         ("v", "revert the selected commit"),
         ("x", "reset to the selected commit"),
         ("S", "stashes (create / apply / pop / drop)"),
+        ("g", "git command log (what ran + detailed errors)"),
         (
             "mouse",
             "click to select · click a folder to fold · wheel scrolls",
@@ -318,9 +402,9 @@ fn diff_line(l: &str, t: &Theme) -> Line<'static> {
 fn render_footer(f: &mut Frame, app: &App<'_>, area: Rect) {
     let t = &app.theme;
     let hints = if app.log.is_some() {
-        "[space]mark [s]squash [d]drop [C]pick [r]reword [c]checkout [P]push [R]rebase/resolve [b]branch [u]undo [v]revert [x]reset [?]help [L/Esc]back"
+        "[space]mark [s]squash [d]drop [C]pick [r]reword [c]checkout [P]push [R]rebase/resolve [b]branch [u]undo [g]git-log [?]help [L/Esc]back"
     } else {
-        "[n]new [m]move [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [S]stash [?]help [q]quit"
+        "[n]new [m]move [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [S]stash [g]git-log [?]help [q]quit"
     };
     let line = if app.message.is_empty() {
         Line::from(Span::styled(hints, Style::default().fg(t.fg_muted)))

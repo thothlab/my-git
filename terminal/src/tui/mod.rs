@@ -36,6 +36,16 @@ pub enum Overlay {
     Confirm(ConfirmState),
     /// Stash manager: list named stashes; create / apply / pop / drop.
     Stashes(StashState),
+    /// Git command log: what git commands ran and their detailed errors.
+    Commands(CommandsState),
+}
+
+pub struct CommandsState {
+    /// Snapshot of git invocations, newest first.
+    pub entries: Vec<crate::engine::CmdEntry>,
+    pub scroll: u16,
+    /// Show only failed commands.
+    pub failures_only: bool,
 }
 
 pub struct StashState {
@@ -335,6 +345,7 @@ impl<'e> App<'e> {
             Overlay::Picker(_) => self.handle_picker_key(key),
             Overlay::Confirm(_) => self.handle_confirm_key(key),
             Overlay::Stashes(_) => self.handle_stashes_key(key),
+            Overlay::Commands(_) => self.handle_commands_key(key),
             Overlay::None => {
                 if self.log.is_some() {
                     self.handle_log_key_event(key);
@@ -455,7 +466,45 @@ impl<'e> App<'e> {
             Branches => self.open_branches(),
             Rebase => self.open_rebase(),
             Stashes => self.open_stashes(),
+            Commands => self.open_commands(),
             Confirm | Cancel => {} // only meaningful inside overlays
+        }
+    }
+
+    // ----- git command log ----------------------------------------------------
+
+    /// Snapshot the engine's git-command log (newest first) into an overlay.
+    fn open_commands(&mut self) {
+        let mut entries = self.engine.command_log();
+        entries.reverse(); // newest first
+        self.overlay = Overlay::Commands(CommandsState {
+            entries,
+            scroll: 0,
+            failures_only: false,
+        });
+    }
+
+    fn handle_commands_key(&mut self, key: event::KeyEvent) {
+        use event::KeyCode;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('g') | KeyCode::Char('q') => self.overlay = Overlay::None,
+            KeyCode::Char('f') => {
+                if let Overlay::Commands(c) = &mut self.overlay {
+                    c.failures_only = !c.failures_only;
+                    c.scroll = 0;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Overlay::Commands(c) = &mut self.overlay {
+                    c.scroll = c.scroll.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Overlay::Commands(c) = &mut self.overlay {
+                    c.scroll = c.scroll.saturating_add(1);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -609,11 +658,11 @@ impl<'e> App<'e> {
                     format!("rebase {ok}")
                 };
             }
-            Err(_) => {
+            Err(e) => {
                 self.message = if self.branch.rebase.is_some() {
                     "rebase step failed — unresolved conflicts remain".into()
                 } else {
-                    "rebase step failed".into()
+                    format!("{e} (press g for the git log)")
                 };
             }
         }
@@ -740,6 +789,7 @@ impl<'e> App<'e> {
             LogAction::OpControl => self.open_op_control(),
             LogAction::Undo => self.do_undo(),
             LogAction::Stashes => self.open_stashes(),
+            LogAction::ShowCommands => self.open_commands(),
         }
     }
 
@@ -858,11 +908,11 @@ impl<'e> App<'e> {
                     ok.to_string()
                 };
             }
-            Err(_) => {
+            Err(e) => {
                 self.message = if self.engine.op_in_progress().is_some() {
                     "step failed — unresolved conflicts remain".into()
                 } else {
-                    "step failed".into()
+                    format!("{e} (press g for the git log)")
                 };
             }
         }
@@ -960,12 +1010,12 @@ impl<'e> App<'e> {
                 self.rebuild_log_view();
                 self.message = format!("rebased onto {target}");
             }
-            Err(_) => {
+            Err(e) => {
                 self.refresh();
                 self.message = if self.branch.rebase.is_some() {
                     "rebase stopped — resolve in Changes (R), then continue".into()
                 } else {
-                    "rebase failed".into()
+                    format!("{e} (press g for the git log)")
                 };
             }
         }
@@ -1578,14 +1628,14 @@ impl<'e> App<'e> {
                     self.refresh();
                     self.message = format!("rebased onto {id}");
                 }
-                Err(_) => {
+                Err(e) => {
                     // git rebase exits non-zero on conflict but leaves the rebase
                     // in progress; reflect that so the user can drive it with R.
                     self.refresh();
                     self.message = if self.branch.rebase.is_some() {
                         "rebase stopped — resolve conflicts, then press R".into()
                     } else {
-                        "rebase failed".into()
+                        format!("{e} (press g for the git log)")
                     };
                 }
             },
@@ -2181,6 +2231,43 @@ mod tests {
         app.handle_key(key(event::KeyCode::Enter)); // abort
         assert!(engine.op_in_progress().is_none());
         assert_eq!(engine.log(10).unwrap()[0].summary, "on-main");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn command_log_overlay_opens_and_filters() {
+        use crate::engine::GixEngine;
+        let dir = init_repo("cmdlog");
+        let engine = GixEngine::discover(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        engine.commit(&["a.txt".to_string()], "c1", false).unwrap();
+        let mut app = App::new(&engine); // status/branch_state calls get recorded
+        app.handle_key(key_char('g')); // open the git command log
+        match &app.overlay {
+            Overlay::Commands(c) => {
+                assert!(!c.entries.is_empty(), "some git commands recorded");
+                assert!(!c.failures_only);
+            }
+            _ => panic!("expected the commands overlay"),
+        }
+        // Render the overlay to catch layout panics before they reach users.
+        {
+            use ratatui::{backend::TestBackend, Terminal};
+            let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+            term.draw(|f| super::ui::render(f, &app)).unwrap();
+            let text: String = term
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(text.contains("Git command log"));
+        }
+        app.handle_key(key_char('f')); // toggle failures-only
+        assert!(matches!(&app.overlay, Overlay::Commands(c) if c.failures_only));
+        app.handle_key(key(event::KeyCode::Esc)); // close
+        assert!(matches!(app.overlay, Overlay::None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
