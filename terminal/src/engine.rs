@@ -159,6 +159,8 @@ pub trait GitEngine {
     fn stash_apply(&self, stash: &str) -> Result<()>;
     fn stash_pop(&self, stash: &str) -> Result<()>;
     fn stash_drop(&self, stash: &str) -> Result<()>;
+    /// Rebase the current branch onto `target`, auto-stashing any local (tracked)
+    /// changes first and restoring them after (so a dirty tree doesn't block it).
     fn rebase_onto(&self, target: &str) -> Result<()>;
     fn rebase_continue(&self) -> Result<()>;
     fn rebase_skip(&self) -> Result<()>;
@@ -752,7 +754,10 @@ impl GitEngine for GixEngine {
     }
 
     fn rebase_onto(&self, target: &str) -> Result<()> {
-        self.git_check(&["rebase", target])?;
+        // --autostash: stash local (tracked) changes before the rebase and pop
+        // them afterwards, so a dirty working tree doesn't block the rebase
+        // (matches the JetBrains "rebase with uncommitted changes" behaviour).
+        self.git_check(&["rebase", "--autostash", target])?;
         Ok(())
     }
 
@@ -1111,6 +1116,44 @@ mod tests {
         let tip = engine.log(10).unwrap()[0].hash.clone();
         engine.drop_commit(&tip).unwrap();
         assert_eq!(engine.log(10).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rebase_onto_autostashes_dirty_worktree() {
+        let dir = init_repo();
+        let engine = GixEngine::discover(&dir).unwrap();
+        let git = |a: &[&str]| {
+            assert!(Command::new("git")
+                .current_dir(&dir)
+                .args(a)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        std::fs::write(dir.join("a.txt"), "base\n").unwrap();
+        engine.commit(&["a.txt".to_string()], "base", false).unwrap();
+        let main = engine.branch_state().unwrap().current_branch.unwrap();
+        // develop gets its own commit
+        git(&["checkout", "-q", "-b", "develop"]);
+        std::fs::write(dir.join("d.txt"), "dev\n").unwrap();
+        engine.commit(&["d.txt".to_string()], "dev", false).unwrap();
+        // main gets a divergent commit
+        git(&["checkout", "-q", &main]);
+        std::fs::write(dir.join("m.txt"), "main\n").unwrap();
+        engine.commit(&["m.txt".to_string()], "main", false).unwrap();
+        // a tracked change we don't want to commit (dirty tree)
+        std::fs::write(dir.join("a.txt"), "base\nWIP\n").unwrap();
+        // rebase onto develop must succeed despite the dirty tree (autostash)
+        engine.rebase_onto("develop").unwrap();
+        let log = engine.log(10).unwrap();
+        assert!(log.iter().any(|c| c.summary == "dev"));
+        assert!(log.iter().any(|c| c.summary == "main"));
+        // and the WIP change is restored to the working tree afterwards
+        let content = std::fs::read_to_string(dir.join("a.txt")).unwrap();
+        assert!(content.contains("WIP"), "autostash restored the dirty change");
+        assert!(engine.status().unwrap().iter().any(|f| f.path == "a.txt"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
