@@ -226,22 +226,15 @@ pub struct App<'e> {
 
     /// A long-running git op queued to run after the next frame, so a busy
     /// indicator paints first (the event loop is otherwise blocked during it).
-    pending: Option<PendingOp>,
+    /// A closure so any call site can defer its own work; a phase may enqueue the
+    /// next phase (fetch → rebase) by calling `begin_busy` again.
+    pending: Option<PendingOp<'e>>,
     /// Label shown in the busy overlay while `pending` runs; `None` when idle.
     busy: Option<String>,
 }
 
-/// A git operation slow enough to warrant a "working…" frame before it blocks
-/// the event loop. Run by the event loop, not inline in the key handler.
-enum PendingOp {
-    /// Fetch the remote ref, then (as a second busy phase) rebase onto it.
-    FetchThenRebase(String),
-    /// Fast-forward the local target branch to its upstream, then rebase onto it.
-    UpdateThenRebase(String),
-    /// Rebase the current branch onto `target`; `prefix` prepends to the done
-    /// message (e.g. "fetched + ", "updated + ").
-    Rebase { target: String, prefix: String },
-}
+/// A deferred, blocking git op run by the event loop after the busy frame paints.
+type PendingOp<'e> = Box<dyn FnOnce(&mut App<'e>) + 'e>;
 
 /// Build the app (runs the startup pipeline) and drive it until the user quits.
 pub fn run(engine: &dyn GitEngine) -> Result<()> {
@@ -385,7 +378,7 @@ impl<'e> App<'e> {
             // so the user sees "working…" instead of a frozen screen. A phase may
             // queue the next phase (fetch → rebase), keeping `busy` set.
             if let Some(op) = self.pending.take() {
-                self.run_pending(op);
+                op(self);
                 if self.pending.is_none() {
                     self.busy = None;
                 }
@@ -549,7 +542,7 @@ impl<'e> App<'e> {
             Log => self.toggle_log_mode(),
             Rollback => self.open_rollback(),
             Push => self.push_action(),
-            Fetch => self.fetch_action(),
+            Fetch => self.begin_busy("Fetching…".into(), |app| app.fetch_action()),
             Branches => self.open_branches(),
             Rebase => self.open_rebase(),
             Stashes => self.open_stashes(),
@@ -805,8 +798,8 @@ impl<'e> App<'e> {
                 }
             }
             Drop(hash) => self.confirm_drop(hash),
-            CherryPick(hash) => self.do_cherry_pick(&hash),
-            Revert(hash) => self.do_revert(hash),
+            CherryPick(hash) => self.cherry_pick_busy(hash),
+            Revert(hash) => self.revert_busy(hash),
             Reset(hash) => self.open_reset_picker(hash),
             MarkToggle(hash) => {
                 if let Some(l) = self.log.as_mut() {
@@ -834,6 +827,23 @@ impl<'e> App<'e> {
             }
             Err(e) => self.message = e.to_string(),
         }
+    }
+
+    /// Revert / cherry-pick / drop, each behind a busy frame (they run git and may
+    /// replay commits — slow on a big repo).
+    fn revert_busy(&mut self, hash: String) {
+        let label = format!("Reverting {}…", short_hash(&hash));
+        self.begin_busy(label, move |app| app.do_revert(hash));
+    }
+
+    fn cherry_pick_busy(&mut self, hash: String) {
+        let label = format!("Cherry-picking {}…", short_hash(&hash));
+        self.begin_busy(label, move |app| app.do_cherry_pick(&hash));
+    }
+
+    fn drop_busy(&mut self, hash: String) {
+        let label = format!("Dropping {}…", short_hash(&hash));
+        self.begin_busy(label, move |app| app.do_drop(&hash));
     }
 
     fn open_new_branch_from(&mut self, hash: String) {
@@ -1016,8 +1026,8 @@ impl<'e> App<'e> {
             return;
         }
         if self.branch.upstream.is_none() {
-            self.do_push(
-                &branch,
+            self.push_busy(
+                branch,
                 PushOpts {
                     set_upstream: true,
                     ..Default::default()
@@ -1035,7 +1045,7 @@ impl<'e> App<'e> {
                 purpose: ConfirmPurpose::ForcePush(branch),
             });
         } else {
-            self.do_push(&branch, PushOpts::default(), "pushed");
+            self.push_busy(branch, PushOpts::default(), "pushed");
         }
     }
 
@@ -1047,6 +1057,13 @@ impl<'e> App<'e> {
             }
             Err(e) => self.message = e.to_string(),
         }
+    }
+
+    /// Push behind a busy frame (network round-trip).
+    fn push_busy(&mut self, branch: String, opts: PushOpts, ok: &'static str) {
+        self.begin_busy(format!("Pushing {branch}…"), move |app| {
+            app.do_push(&branch, opts, ok)
+        });
     }
 
     fn fetch_action(&mut self) {
@@ -1099,7 +1116,7 @@ impl<'e> App<'e> {
             LogAction::None => {}
             LogAction::Exit => self.log = None,
             LogAction::Help => self.open_log_palette(),
-            LogAction::Revert(hash) => self.do_revert(hash),
+            LogAction::Revert(hash) => self.revert_busy(hash),
             LogAction::Reset(hash) => self.open_reset_picker(hash),
             LogAction::Checkout(target) => self.log_checkout(target),
             LogAction::Push => self.push_action(),
@@ -1110,7 +1127,7 @@ impl<'e> App<'e> {
             LogAction::Squash(hash) => self.open_squash(hash),
             LogAction::SquashMarked(hashes) => self.open_squash_marked(hashes),
             LogAction::Drop(hash) => self.confirm_drop(hash),
-            LogAction::CherryPick(hash) => self.do_cherry_pick(&hash),
+            LogAction::CherryPick(hash) => self.cherry_pick_busy(hash),
             LogAction::OpControl => self.open_op_control(),
             LogAction::Undo => self.do_undo(),
             LogAction::Stashes => self.open_stashes(),
@@ -1290,7 +1307,7 @@ impl<'e> App<'e> {
             .map(|s| s.iter().any(|f| f.status != FileStatus::Untracked))
             .unwrap_or(false);
         if !dirty {
-            self.do_checkout(&target);
+            self.checkout_busy(target);
             return;
         }
         let items = vec![
@@ -1329,68 +1346,64 @@ impl<'e> App<'e> {
         }
     }
 
+    /// Checkout behind a busy frame (a big-repo checkout can take a while).
+    fn checkout_busy(&mut self, target: String) {
+        self.begin_busy(format!("Checking out {target}…"), move |app| {
+            app.do_checkout(&target)
+        });
+    }
+
     /// Queue a rebase onto a local branch. First the branch is fast-forwarded to
     /// its upstream (so we rebase onto an up-to-date target), then the rebase runs
     /// — each behind its own busy frame.
     fn log_rebase_onto(&mut self, target: &str) {
-        self.begin_busy(
-            PendingOp::UpdateThenRebase(target.to_string()),
-            format!("Updating {target}…"),
-        );
+        let target = target.to_string();
+        self.begin_busy(format!("Updating {target}…"), move |app| {
+            match app.engine.update_branch_from_upstream(&target) {
+                Ok(updated) => {
+                    let prefix = if updated { "updated + " } else { "" };
+                    app.begin_busy(format!("Rebasing onto {target}…"), move |app| {
+                        app.run_rebase(&target, prefix)
+                    });
+                }
+                Err(e) => app.after_failed_rebase(e),
+            }
+        });
     }
 
     /// Queue a fetch + rebase onto a remote branch (two busy phases).
     fn log_fetch_rebase_onto(&mut self, remote_ref: &str) {
-        self.begin_busy(
-            PendingOp::FetchThenRebase(remote_ref.to_string()),
-            format!("Fetching {remote_ref}…"),
-        );
+        let remote_ref = remote_ref.to_string();
+        self.begin_busy(format!("Fetching {remote_ref}…"), move |app| {
+            match app.engine.fetch_ref(&remote_ref) {
+                Ok(()) => {
+                    app.begin_busy(format!("Rebasing onto {remote_ref}…"), move |app| {
+                        app.run_rebase(&remote_ref, "fetched + ")
+                    });
+                }
+                Err(e) => app.after_failed_rebase(e),
+            }
+        });
+    }
+
+    /// The rebase step itself (behind a busy frame); `prefix` tunes the done message.
+    fn run_rebase(&mut self, target: &str, prefix: &str) {
+        match self.engine.rebase_onto(target) {
+            Ok(()) => {
+                self.rebuild_log_view();
+                self.message = format!("{prefix}rebased onto {target}");
+            }
+            Err(e) => self.after_failed_rebase(e),
+        }
     }
 
     /// Queue `op` to run after the next frame and show `label` in the busy overlay.
-    fn begin_busy(&mut self, op: PendingOp, label: String) {
+    /// Any open overlay is closed — the op is committed, the busy frame is the top layer.
+    fn begin_busy(&mut self, label: String, op: impl FnOnce(&mut App<'e>) + 'e) {
+        self.overlay = Overlay::None;
         self.message.clear();
         self.busy = Some(label);
-        self.pending = Some(op);
-    }
-
-    /// Execute a queued long op (called by the event loop, after the busy frame).
-    fn run_pending(&mut self, op: PendingOp) {
-        match op {
-            PendingOp::FetchThenRebase(remote_ref) => match self.engine.fetch_ref(&remote_ref) {
-                Ok(()) => self.begin_busy(
-                    PendingOp::Rebase {
-                        target: remote_ref.clone(),
-                        prefix: "fetched + ".into(),
-                    },
-                    format!("Rebasing onto {remote_ref}…"),
-                ),
-                Err(e) => self.after_failed_rebase(e),
-            },
-            PendingOp::UpdateThenRebase(target) => {
-                match self.engine.update_branch_from_upstream(&target) {
-                    Ok(updated) => self.begin_busy(
-                        PendingOp::Rebase {
-                            target: target.clone(),
-                            prefix: if updated {
-                                "updated + ".into()
-                            } else {
-                                String::new()
-                            },
-                        },
-                        format!("Rebasing onto {target}…"),
-                    ),
-                    Err(e) => self.after_failed_rebase(e),
-                }
-            }
-            PendingOp::Rebase { target, prefix } => match self.engine.rebase_onto(&target) {
-                Ok(()) => {
-                    self.rebuild_log_view();
-                    self.message = format!("{prefix}rebased onto {target}");
-                }
-                Err(e) => self.after_failed_rebase(e),
-            },
-        }
+        self.pending = Some(Box::new(op));
     }
 
     /// Shared message handling when a rebase-onto returns an error: a conflict
@@ -1556,7 +1569,7 @@ impl<'e> App<'e> {
         self.overlay = Overlay::None;
         match purpose {
             ConfirmPurpose::ResetHard(hash) => self.do_reset(&hash, ResetMode::Hard),
-            ConfirmPurpose::DropCommit(hash) => self.do_drop(&hash),
+            ConfirmPurpose::DropCommit(hash) => self.drop_busy(hash),
             ConfirmPurpose::RollbackFile(path) => match self.engine.checkout_file(&path) {
                 Ok(()) => {
                     self.refresh();
@@ -1564,8 +1577,8 @@ impl<'e> App<'e> {
                 }
                 Err(e) => self.message = e.to_string(),
             },
-            ConfirmPurpose::ForcePush(branch) => self.do_push(
-                &branch,
+            ConfirmPurpose::ForcePush(branch) => self.push_busy(
+                branch,
                 PushOpts {
                     force_with_lease: true,
                     ..Default::default()
@@ -1823,78 +1836,76 @@ impl<'e> App<'e> {
                     self.message = "commit message required".into();
                     return;
                 }
-                match self.engine.commit(&[], &value, true) {
-                    Ok(_) => {
-                        self.overlay = Overlay::None;
-                        self.reload_log_and_state();
-                        self.message = "reworded".into();
+                self.begin_busy("Rewording HEAD…".into(), move |app| {
+                    match app.engine.commit(&[], &value, true) {
+                        Ok(_) => {
+                            app.reload_log_and_state();
+                            app.message = "reworded".into();
+                        }
+                        Err(e) => app.message = e.to_string(),
                     }
-                    Err(e) => self.message = e.to_string(),
-                }
+                });
             }
             InputPurpose::RewordCommit(hash) => {
                 if value.is_empty() {
                     self.message = "commit message required".into();
                     return;
                 }
-                match self.engine.reword_commit(&hash, &value) {
-                    Ok(()) => {
-                        self.overlay = Overlay::None;
-                        self.rebuild_log_view();
-                        self.message = "reworded (u to undo)".into();
+                let label = format!("Rewording {}…", short_hash(&hash));
+                self.begin_busy(label, move |app| {
+                    match app.engine.reword_commit(&hash, &value) {
+                        Ok(()) => {
+                            app.rebuild_log_view();
+                            app.message = "reworded (u to undo)".into();
+                        }
+                        Err(e) => app.message = e.to_string(),
                     }
-                    Err(e) => {
-                        self.overlay = Overlay::None;
-                        self.message = e.to_string();
-                    }
-                }
+                });
             }
             InputPurpose::SquashCommit(hash) => {
                 if value.is_empty() {
                     self.message = "commit message required".into();
                     return;
                 }
-                match self.engine.squash_into_parent(&hash, &value) {
-                    Ok(()) => {
-                        self.overlay = Overlay::None;
-                        self.rebuild_log_view();
-                        self.message = "squashed (u to undo)".into();
+                let label = format!("Squashing {}…", short_hash(&hash));
+                self.begin_busy(label, move |app| {
+                    match app.engine.squash_into_parent(&hash, &value) {
+                        Ok(()) => {
+                            app.rebuild_log_view();
+                            app.message = "squashed (u to undo)".into();
+                        }
+                        Err(e) => app.message = e.to_string(),
                     }
-                    Err(e) => {
-                        self.overlay = Overlay::None;
-                        self.message = e.to_string();
-                    }
-                }
+                });
             }
             InputPurpose::SquashMarked(hashes) => {
                 if value.is_empty() {
                     self.message = "commit message required".into();
                     return;
                 }
-                match self.engine.squash_commits(&hashes, &value) {
-                    Ok(()) => {
-                        self.overlay = Overlay::None;
-                        self.rebuild_log_view();
-                        self.message = format!("squashed {} commits (u to undo)", hashes.len());
+                let n = hashes.len();
+                self.begin_busy(format!("Squashing {n} commits…"), move |app| {
+                    match app.engine.squash_commits(&hashes, &value) {
+                        Ok(()) => {
+                            app.rebuild_log_view();
+                            app.message = format!("squashed {n} commits (u to undo)");
+                        }
+                        Err(e) => app.message = e.to_string(),
                     }
-                    Err(e) => {
-                        self.overlay = Overlay::None;
-                        self.message = e.to_string();
-                    }
-                }
+                });
             }
             InputPurpose::StashName(target) => {
                 if value.is_empty() {
                     self.message = "stash name required".into();
                     return;
                 }
-                match self.engine.stash_push(&value) {
-                    Ok(()) => {
-                        self.overlay = Overlay::None;
-                        self.do_checkout(&target);
-                    }
-                    Err(e) => self.message = e.to_string(),
-                }
+                self.begin_busy(
+                    format!("Stashing + switching to {target}…"),
+                    move |app| match app.engine.stash_push(&value) {
+                        Ok(()) => app.do_checkout(&target),
+                        Err(e) => app.message = e.to_string(),
+                    },
+                );
             }
             InputPurpose::CommitAndSwitch(target) => {
                 if value.is_empty() {
@@ -1907,13 +1918,13 @@ impl<'e> App<'e> {
                     .filter(|(_, s)| **s != FileStatus::Untracked)
                     .map(|(p, _)| p.clone())
                     .collect();
-                match self.engine.commit(&files, &value, false) {
-                    Ok(_) => {
-                        self.overlay = Overlay::None;
-                        self.do_checkout(&target);
-                    }
-                    Err(e) => self.message = e.to_string(),
-                }
+                self.begin_busy(
+                    format!("Committing + switching to {target}…"),
+                    move |app| match app.engine.commit(&files, &value, false) {
+                        Ok(_) => app.do_checkout(&target),
+                        Err(e) => app.message = e.to_string(),
+                    },
+                );
             }
             InputPurpose::StashCreate => {
                 if value.is_empty() {
@@ -1997,13 +2008,7 @@ impl<'e> App<'e> {
                         purpose: InputPurpose::NewBranch,
                     });
                 } else {
-                    match self.engine.checkout_branch(&id) {
-                        Ok(()) => {
-                            self.refresh();
-                            self.message = format!("switched to {id}");
-                        }
-                        Err(e) => self.message = e.to_string(),
-                    }
+                    self.checkout_busy(id);
                 }
             }
             // Runs behind a busy frame like the log-mode rebase.
@@ -2053,7 +2058,7 @@ impl<'e> App<'e> {
                         purpose: InputPurpose::CommitAndSwitch(target),
                     });
                 }
-                "switch" => self.do_checkout(&target),
+                "switch" => self.checkout_busy(target),
                 _ => {} // cancel
             },
         }
@@ -2088,6 +2093,11 @@ impl<'e> App<'e> {
             }
         }
     }
+}
+
+/// The short (≤8 char) form of a commit hash, for labels.
+fn short_hash(hash: &str) -> &str {
+    &hash[..hash.len().min(8)]
 }
 
 /// Context-menu / palette items for a branch. `target` is the checkout name
@@ -2522,7 +2532,8 @@ mod tests {
         for c in "wip".chars() {
             app.handle_key(key_char(c));
         }
-        app.handle_key(key(event::KeyCode::Enter)); // stash + checkout
+        app.handle_key(key(event::KeyCode::Enter)); // stash + checkout (enqueued)
+        drain_pending(&mut app);
 
         assert_eq!(
             engine.branch_state().unwrap().current_branch.as_deref(),
@@ -2574,6 +2585,7 @@ mod tests {
             app.handle_key(key_char(c));
         }
         app.handle_key(key(event::KeyCode::Enter));
+        drain_pending(&mut app); // reword runs behind the busy frame
         assert!(engine
             .log(10)
             .unwrap()
@@ -2610,6 +2622,7 @@ mod tests {
             app.handle_key(key_char(c));
         }
         app.handle_key(key(event::KeyCode::Enter));
+        drain_pending(&mut app); // squash runs behind the busy frame
         let log = engine.log(10).unwrap();
         assert_eq!(log.len(), 2, "c2 + c3 merged into one");
         assert!(log.iter().any(|c| c.summary == "c2c3"));
@@ -2631,7 +2644,8 @@ mod tests {
         app.handle_key(key(event::KeyCode::Down)); // -> c2
         app.handle_key(key_char('d')); // drop -> confirm
         assert!(matches!(app.overlay, Overlay::Confirm(_)));
-        app.handle_key(key_char('y')); // confirm
+        app.handle_key(key_char('y')); // confirm (drop enqueued)
+        drain_pending(&mut app);
         let log = engine.log(10).unwrap();
         assert_eq!(log.len(), 2);
         assert!(!log.iter().any(|c| c.summary == "c2"));
@@ -2811,6 +2825,38 @@ mod tests {
     }
 
     #[test]
+    fn slow_ops_defer_behind_a_busy_frame() {
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-busy-ops"),
+        };
+        let mut app = App::new(&mock);
+        // fetch (F)
+        app.on_action(Action::Fetch);
+        assert!(app.busy.as_deref().unwrap().contains("Fetching"));
+        assert!(app.pending.is_some(), "fetch queued, not run inline");
+        drain_pending(&mut app);
+        assert!(app.busy.is_none());
+        // checkout, cherry-pick, revert, drop each queue with a label
+        app.checkout_busy("develop".into());
+        assert!(app
+            .busy
+            .as_deref()
+            .unwrap()
+            .contains("Checking out develop"));
+        drain_pending(&mut app);
+        app.cherry_pick_busy("abcdef123456".into());
+        assert!(app
+            .busy
+            .as_deref()
+            .unwrap()
+            .contains("Cherry-picking abcdef12"));
+        drain_pending(&mut app);
+        app.revert_busy("abcdef123456".into());
+        assert!(app.busy.as_deref().unwrap().contains("Reverting abcdef12"));
+        drain_pending(&mut app);
+    }
+
+    #[test]
     fn fetch_rebase_runs_in_two_busy_phases() {
         let mock = Mock {
             root: std::env::temp_dir().join("mygit-busy-fetch"),
@@ -2821,12 +2867,12 @@ mod tests {
         assert!(app.busy.as_deref().unwrap().contains("Fetching"));
         // phase 1: fetch -> queues the rebase phase, busy switches label
         let op = app.pending.take().unwrap();
-        app.run_pending(op);
+        op(&mut app);
         assert!(app.pending.is_some(), "rebase phase queued after the fetch");
         assert!(app.busy.as_deref().unwrap().contains("Rebasing"));
         // phase 2: rebase -> done
         let op2 = app.pending.take().unwrap();
-        app.run_pending(op2);
+        op2(&mut app);
         if app.pending.is_none() {
             app.busy = None;
         }
@@ -2928,6 +2974,7 @@ mod tests {
         // Revert the newest commit (log defaults to the current branch, newest
         // first) -> inverse commit added, history preserved.
         app.handle_key(key_char('v'));
+        drain_pending(&mut app); // revert runs behind the busy frame
         assert_eq!(engine.log(10).unwrap().len(), 3);
 
         // Move down to the oldest commit (c1) and hard-reset to it.
@@ -3014,7 +3061,8 @@ mod tests {
             app.branch.upstream.is_none(),
             "no upstream before first push"
         );
-        app.on_action(Action::Push); // no upstream -> push -u
+        app.on_action(Action::Push); // no upstream -> push -u (enqueued)
+        drain_pending(&mut app);
         assert!(
             engine.branch_state().unwrap().upstream.is_some(),
             "upstream set after push -u"
@@ -3061,7 +3109,7 @@ mod tests {
     /// Run any queued long op(s) to completion, as the event loop would.
     fn drain_pending(app: &mut App) {
         while let Some(op) = app.pending.take() {
-            app.run_pending(op);
+            op(app);
         }
         app.busy = None;
     }
