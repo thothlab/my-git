@@ -223,6 +223,21 @@ pub struct App<'e> {
 
     message: String,
     quit: bool,
+
+    /// A long-running git op queued to run after the next frame, so a busy
+    /// indicator paints first (the event loop is otherwise blocked during it).
+    pending: Option<PendingOp>,
+    /// Label shown in the busy overlay while `pending` runs; `None` when idle.
+    busy: Option<String>,
+}
+
+/// A git operation slow enough to warrant a "working…" frame before it blocks
+/// the event loop. Run by the event loop, not inline in the key handler.
+enum PendingOp {
+    /// Fetch the remote ref, then (as a second busy phase) rebase onto it.
+    FetchThenRebase(String),
+    /// Rebase the current branch onto `target`; `fetched` tunes the done message.
+    Rebase { target: String, fetched: bool },
 }
 
 /// Build the app (runs the startup pipeline) and drive it until the user quits.
@@ -261,6 +276,8 @@ impl<'e> App<'e> {
             dragging: false,
             message: String::new(),
             quit: false,
+            pending: None,
+            busy: None,
         };
         app.refresh();
         app
@@ -361,6 +378,16 @@ impl<'e> App<'e> {
         let mut last_auto = Instant::now();
         while !self.quit {
             term.draw(|f| ui::render(f, self))?;
+            // A queued long op runs here — AFTER the busy frame was painted above,
+            // so the user sees "working…" instead of a frozen screen. A phase may
+            // queue the next phase (fetch → rebase), keeping `busy` set.
+            if let Some(op) = self.pending.take() {
+                self.run_pending(op);
+                if self.pending.is_none() {
+                    self.busy = None;
+                }
+                continue;
+            }
             // Poll with a timeout so the panel can auto-refresh while idle
             // (F5 is unreliable on macOS; this keeps the view live regardless).
             if event::poll(Duration::from_millis(250))? {
@@ -1299,24 +1326,56 @@ impl<'e> App<'e> {
         }
     }
 
+    /// Queue a rebase onto a local branch (runs behind a busy frame).
     fn log_rebase_onto(&mut self, target: &str) {
-        match self.engine.rebase_onto(target) {
-            Ok(()) => {
-                self.rebuild_log_view();
-                self.message = format!("rebased onto {target}");
-            }
-            Err(e) => self.after_failed_rebase(e),
-        }
+        self.begin_busy(
+            PendingOp::Rebase {
+                target: target.to_string(),
+                fetched: false,
+            },
+            format!("Rebasing onto {target}…"),
+        );
     }
 
-    /// Fetch a remote branch, then rebase the current branch onto the fresh ref.
+    /// Queue a fetch + rebase onto a remote branch (two busy phases).
     fn log_fetch_rebase_onto(&mut self, remote_ref: &str) {
-        match self.engine.fetch_and_rebase_onto(remote_ref) {
-            Ok(()) => {
-                self.rebuild_log_view();
-                self.message = format!("fetched + rebased onto {remote_ref}");
-            }
-            Err(e) => self.after_failed_rebase(e),
+        self.begin_busy(
+            PendingOp::FetchThenRebase(remote_ref.to_string()),
+            format!("Fetching {remote_ref}…"),
+        );
+    }
+
+    /// Queue `op` to run after the next frame and show `label` in the busy overlay.
+    fn begin_busy(&mut self, op: PendingOp, label: String) {
+        self.message.clear();
+        self.busy = Some(label);
+        self.pending = Some(op);
+    }
+
+    /// Execute a queued long op (called by the event loop, after the busy frame).
+    fn run_pending(&mut self, op: PendingOp) {
+        match op {
+            PendingOp::FetchThenRebase(remote_ref) => match self.engine.fetch_ref(&remote_ref) {
+                Ok(()) => self.begin_busy(
+                    PendingOp::Rebase {
+                        target: remote_ref.clone(),
+                        fetched: true,
+                    },
+                    format!("Rebasing onto {remote_ref}…"),
+                ),
+                Err(e) => self.after_failed_rebase(e),
+            },
+            PendingOp::Rebase { target, fetched } => match self.engine.rebase_onto(&target) {
+                Ok(()) => {
+                    self.rebuild_log_view();
+                    self.message = if fetched {
+                        format!("fetched + rebased onto {target}")
+                    } else {
+                        format!("rebased onto {target}")
+                    };
+                }
+                Err(e) => self.after_failed_rebase(e),
+            },
         }
     }
 
@@ -1933,22 +1992,8 @@ impl<'e> App<'e> {
                     }
                 }
             }
-            PickerPurpose::RebaseOnto => match self.engine.rebase_onto(&id) {
-                Ok(()) => {
-                    self.refresh();
-                    self.message = format!("rebased onto {id}");
-                }
-                Err(e) => {
-                    // git rebase exits non-zero on conflict but leaves the rebase
-                    // in progress; reflect that so the user can drive it with R.
-                    self.refresh();
-                    self.message = if self.branch.rebase.is_some() {
-                        "rebase stopped — resolve conflicts, then press R".into()
-                    } else {
-                        format!("{e} (press g for the git log)")
-                    };
-                }
-            },
+            // Runs behind a busy frame like the log-mode rebase.
+            PickerPurpose::RebaseOnto => self.log_rebase_onto(&id),
             PickerPurpose::RebaseControl => match id.as_str() {
                 "continue" => {
                     let r = self.engine.rebase_continue();
@@ -2224,6 +2269,9 @@ mod tests {
             Ok(())
         }
         fn rebase_onto(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn fetch_ref(&self, _: &str) -> Result<()> {
             Ok(())
         }
         fn fetch_and_rebase_onto(&self, _: &str) -> Result<()> {
@@ -2712,6 +2760,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn rebase_onto_defers_behind_a_busy_frame() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-busy-rebase"),
+        };
+        let mut app = App::new(&mock);
+        app.log_rebase_onto("develop");
+        // Queued, NOT run synchronously — the loop runs it after painting busy.
+        assert!(app.busy.is_some(), "busy label set");
+        assert!(app.pending.is_some(), "op queued");
+        assert!(app.message.is_empty(), "op did not run synchronously");
+        // The busy overlay paints.
+        let mut term = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        term.draw(|f| super::ui::render(f, &app)).unwrap();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("Working"), "busy overlay painted");
+        // Now the loop's step runs it and clears busy.
+        let op = app.pending.take().unwrap();
+        app.run_pending(op);
+        if app.pending.is_none() {
+            app.busy = None;
+        }
+        assert!(app.busy.is_none());
+        assert!(
+            app.message.contains("rebased onto develop"),
+            "msg: {}",
+            app.message
+        );
+    }
+
+    #[test]
+    fn fetch_rebase_runs_in_two_busy_phases() {
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-busy-fetch"),
+        };
+        let mut app = App::new(&mock);
+        app.log_fetch_rebase_onto("origin/develop");
+        assert!(app.message.is_empty(), "nothing ran yet");
+        assert!(app.busy.as_deref().unwrap().contains("Fetching"));
+        // phase 1: fetch -> queues the rebase phase, busy switches label
+        let op = app.pending.take().unwrap();
+        app.run_pending(op);
+        assert!(app.pending.is_some(), "rebase phase queued after the fetch");
+        assert!(app.busy.as_deref().unwrap().contains("Rebasing"));
+        // phase 2: rebase -> done
+        let op2 = app.pending.take().unwrap();
+        app.run_pending(op2);
+        if app.pending.is_none() {
+            app.busy = None;
+        }
+        assert!(app.busy.is_none());
+        assert!(
+            app.message
+                .contains("fetched + rebased onto origin/develop"),
+            "msg: {}",
+            app.message
+        );
+    }
+
     fn init_repo(tag: &str) -> std::path::PathBuf {
         use std::process::Command;
         let dir = std::env::temp_dir().join(format!("mygit-tui-{}-{tag}", std::process::id()));
@@ -2931,6 +3045,14 @@ mod tests {
         app.handle_key(key(event::KeyCode::Enter));
     }
 
+    /// Run any queued long op(s) to completion, as the event loop would.
+    fn drain_pending(app: &mut App) {
+        while let Some(op) = app.pending.take() {
+            app.run_pending(op);
+        }
+        app.busy = None;
+    }
+
     #[test]
     fn rebase_onto_completes_cleanly() {
         use crate::engine::GixEngine;
@@ -2967,6 +3089,7 @@ mod tests {
         let mut app = App::new(&engine);
         app.on_action(Action::Rebase);
         select_picker(&mut app, &base);
+        drain_pending(&mut app); // the rebase runs behind the busy frame
         assert!(app.branch.rebase.is_none(), "clean rebase should complete");
         assert!(
             dir.join("other.txt").exists(),
@@ -3011,6 +3134,7 @@ mod tests {
         let mut app = App::new(&engine);
         app.on_action(Action::Rebase);
         select_picker(&mut app, &base); // conflicts -> rebase stops
+        drain_pending(&mut app); // the rebase runs behind the busy frame
         assert!(
             app.branch.rebase.is_some(),
             "conflicting rebase stops in progress"
@@ -3230,6 +3354,9 @@ mod tests {
                 Ok(())
             }
             fn rebase_onto(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn fetch_ref(&self, _: &str) -> Result<()> {
                 Ok(())
             }
             fn fetch_and_rebase_onto(&self, _: &str) -> Result<()> {

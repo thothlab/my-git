@@ -69,6 +69,37 @@ pub fn render(f: &mut Frame, app: &App<'_>) {
         Overlay::Menu(mn) => render_menu(f, app, area, mn),
         Overlay::None => {}
     }
+    // A busy op paints over everything so a long git call doesn't look frozen.
+    if let Some(label) = &app.busy {
+        render_busy(f, app, area, label);
+    }
+}
+
+fn render_busy(f: &mut Frame, app: &App<'_>, area: Rect, label: &str) {
+    let t = &app.theme;
+    let text = format!("⏳ {label}");
+    let w = (text.chars().count() as u16 + 4)
+        .max(30)
+        .min(area.width.saturating_sub(2));
+    let rect = centered(area, w, 4);
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(Line::from(" Working "))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.accent));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" {text}"),
+            Style::default().fg(t.fg).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            " large repos take a moment…",
+            Style::default().fg(t.fg_muted),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// The rectangle a menu occupies — shared by the renderer and mouse hit-testing.

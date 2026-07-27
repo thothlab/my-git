@@ -162,8 +162,15 @@ pub trait GitEngine {
     /// Rebase the current branch onto `target`, auto-stashing any local (tracked)
     /// changes first and restoring them after (so a dirty tree doesn't block it).
     fn rebase_onto(&self, target: &str) -> Result<()>;
+    /// Fetch the remote branch behind a remote-tracking ref (e.g. `origin/develop`
+    /// → `git fetch origin develop`), updating the tracking ref. Split out so the
+    /// UI can show a "fetching" frame before the "rebasing" one.
+    fn fetch_ref(&self, remote_ref: &str) -> Result<()>;
     /// Fetch a remote-tracking branch (e.g. `origin/develop`) and rebase the
     /// current branch onto the freshly-updated ref (auto-stash, like `rebase_onto`).
+    /// The UI drives the two steps separately (for a busy frame between them); this
+    /// convenience wrapper is kept for the engine test and callers that don't.
+    #[allow(dead_code)]
     fn fetch_and_rebase_onto(&self, remote_ref: &str) -> Result<()>;
     fn rebase_continue(&self) -> Result<()>;
     fn rebase_skip(&self) -> Result<()>;
@@ -764,16 +771,21 @@ impl GitEngine for GixEngine {
         Ok(())
     }
 
-    fn fetch_and_rebase_onto(&self, remote_ref: &str) -> Result<()> {
-        // Update the remote-tracking ref first so we rebase onto the latest state,
-        // not a stale local copy. `origin/develop` → `git fetch origin develop`;
-        // the branch part keeps any embedded slashes (e.g. `origin/feature/x`).
+    fn fetch_ref(&self, remote_ref: &str) -> Result<()> {
+        // `origin/develop` → `git fetch origin develop`; the branch part keeps any
+        // embedded slashes (e.g. `origin/feature/x`).
         match remote_ref.split_once('/') {
             Some((remote, branch)) => self.git_check(&["fetch", remote, branch])?,
             None => self.git_check(&["fetch"])?,
         };
-        self.git_check(&["rebase", "--autostash", remote_ref])?;
         Ok(())
+    }
+
+    fn fetch_and_rebase_onto(&self, remote_ref: &str) -> Result<()> {
+        // Update the remote-tracking ref first so we rebase onto the latest state,
+        // not a stale local copy.
+        self.fetch_ref(remote_ref)?;
+        self.rebase_onto(remote_ref)
     }
 
     fn rebase_continue(&self) -> Result<()> {
