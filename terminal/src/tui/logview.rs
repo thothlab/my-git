@@ -34,6 +34,8 @@ pub enum LogAction {
     NewBranchFrom(String),
     /// Rebase the current branch onto the given branch ref.
     RebaseOnto(String),
+    /// Fetch the given remote-tracking ref, then rebase the current branch onto it.
+    FetchRebaseOnto(String),
     /// Reword (amend the message of) the given commit.
     Reword(String),
     /// Squash the given commit into its parent.
@@ -56,8 +58,14 @@ pub enum LogAction {
 
 /// What a right-click landed on in the log browser.
 pub enum LogHit {
-    Branch { target: String, refname: String },
-    Commit { hash: String },
+    Branch {
+        target: String,
+        refname: String,
+        remote: bool,
+    },
+    Commit {
+        hash: String,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -274,12 +282,12 @@ impl LogView {
         self.commits.get(self.c_cursor).map(|c| c.hash.clone())
     }
 
-    /// The selected branch as `(checkout target, full refname)`, if a branch row
-    /// is under the tree cursor.
-    pub fn selected_branch_pair(&self) -> Option<(String, String)> {
-        let (refname, _) = self.selected_branch_ref()?;
+    /// The selected branch as `(checkout target, full refname, is_remote)`, if a
+    /// branch row is under the tree cursor.
+    pub fn selected_branch_pair(&self) -> Option<(String, String, bool)> {
+        let (refname, remote) = self.selected_branch_ref()?;
         let target = self.checkout_target()?;
-        Some((target, refname))
+        Some((target, refname, remote))
     }
 
     pub fn marked_count(&self) -> usize {
@@ -305,9 +313,13 @@ impl LogView {
         if r.branches.contains_pt(col, row) {
             self.focus = Pane::Branches;
             self.click_branch(r.branches, row, engine);
-            let (refname, _) = self.selected_branch_ref()?;
+            let (refname, remote) = self.selected_branch_ref()?;
             let target = self.checkout_target()?;
-            return Some(LogHit::Branch { target, refname });
+            return Some(LogHit::Branch {
+                target,
+                refname,
+                remote,
+            });
         }
         if r.commits.contains_pt(col, row) {
             self.focus = Pane::Commits;
@@ -416,8 +428,14 @@ impl LogView {
                 if engine.op_in_progress().is_some() {
                     return LogAction::OpControl;
                 }
-                if let Some((refname, _)) = self.selected_branch_ref() {
-                    return LogAction::RebaseOnto(refname);
+                if let Some((refname, remote)) = self.selected_branch_ref() {
+                    // Onto a remote branch: fetch it first so we rebase onto the
+                    // latest. Onto a local branch: rebase onto it as-is.
+                    return if remote {
+                        LogAction::FetchRebaseOnto(refname)
+                    } else {
+                        LogAction::RebaseOnto(refname)
+                    };
                 }
             }
             KeyCode::Char('P') => return LogAction::Push,

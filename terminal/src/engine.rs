@@ -162,6 +162,9 @@ pub trait GitEngine {
     /// Rebase the current branch onto `target`, auto-stashing any local (tracked)
     /// changes first and restoring them after (so a dirty tree doesn't block it).
     fn rebase_onto(&self, target: &str) -> Result<()>;
+    /// Fetch a remote-tracking branch (e.g. `origin/develop`) and rebase the
+    /// current branch onto the freshly-updated ref (auto-stash, like `rebase_onto`).
+    fn fetch_and_rebase_onto(&self, remote_ref: &str) -> Result<()>;
     fn rebase_continue(&self) -> Result<()>;
     fn rebase_skip(&self) -> Result<()>;
     fn rebase_abort(&self) -> Result<()>;
@@ -761,6 +764,18 @@ impl GitEngine for GixEngine {
         Ok(())
     }
 
+    fn fetch_and_rebase_onto(&self, remote_ref: &str) -> Result<()> {
+        // Update the remote-tracking ref first so we rebase onto the latest state,
+        // not a stale local copy. `origin/develop` → `git fetch origin develop`;
+        // the branch part keeps any embedded slashes (e.g. `origin/feature/x`).
+        match remote_ref.split_once('/') {
+            Some((remote, branch)) => self.git_check(&["fetch", remote, branch])?,
+            None => self.git_check(&["fetch"])?,
+        };
+        self.git_check(&["rebase", "--autostash", remote_ref])?;
+        Ok(())
+    }
+
     fn rebase_continue(&self) -> Result<()> {
         self.git_check(&["rebase", "--continue"])?;
         Ok(())
@@ -1120,6 +1135,83 @@ mod tests {
     }
 
     #[test]
+    fn fetch_then_rebase_onto_remote() {
+        let run = |dir: &Path, a: &[&str]| {
+            let o = Command::new("git")
+                .current_dir(dir)
+                .args(a)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "git {a:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        };
+        // upstream repo: a default branch + a develop branch with one commit
+        let up = init_repo();
+        std::fs::write(up.join("base.txt"), "base\n").unwrap();
+        run(&up, &["add", "-A"]);
+        run(&up, &["commit", "-q", "-m", "base"]);
+        let def = String::from_utf8(
+            Command::new("git")
+                .current_dir(&up)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        run(&up, &["checkout", "-q", "-b", "develop"]);
+        std::fs::write(up.join("dev1.txt"), "d1\n").unwrap();
+        run(&up, &["add", "-A"]);
+        run(&up, &["commit", "-q", "-m", "dev1"]);
+        run(&up, &["checkout", "-q", &def]);
+
+        // clone it (origin/develop is captured at clone time = base + dev1)
+        let work =
+            std::env::temp_dir().join(format!("mygit-clone-{}-{}", std::process::id(), next_id()));
+        let _ = std::fs::remove_dir_all(&work);
+        let o = Command::new("git")
+            .args(["clone", "-q", up.to_str().unwrap(), work.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "clone: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        run(&work, &["config", "user.email", "t@t"]);
+        run(&work, &["config", "user.name", "t"]);
+
+        // work: a feature commit on the default branch
+        std::fs::write(work.join("feat.txt"), "f\n").unwrap();
+        run(&work, &["add", "-A"]);
+        run(&work, &["commit", "-q", "-m", "feat"]);
+
+        // upstream develop advances -> the clone's origin/develop is now stale
+        run(&up, &["checkout", "-q", "develop"]);
+        std::fs::write(up.join("dev2.txt"), "d2\n").unwrap();
+        run(&up, &["add", "-A"]);
+        run(&up, &["commit", "-q", "-m", "dev2"]);
+
+        // fetch + rebase must pull dev2 and replay feat on top of it
+        let engine = GixEngine::discover(&work).unwrap();
+        engine.fetch_and_rebase_onto("origin/develop").unwrap();
+        let log = engine.log(20).unwrap();
+        assert!(log.iter().any(|c| c.summary == "feat"));
+        assert!(log.iter().any(|c| c.summary == "dev1"));
+        assert!(
+            log.iter().any(|c| c.summary == "dev2"),
+            "fetch pulled the newest develop commit before rebasing"
+        );
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&up);
+    }
+
+    #[test]
     fn rebase_onto_autostashes_dirty_worktree() {
         let dir = init_repo();
         let engine = GixEngine::discover(&dir).unwrap();
@@ -1133,7 +1225,9 @@ mod tests {
                 .success());
         };
         std::fs::write(dir.join("a.txt"), "base\n").unwrap();
-        engine.commit(&["a.txt".to_string()], "base", false).unwrap();
+        engine
+            .commit(&["a.txt".to_string()], "base", false)
+            .unwrap();
         let main = engine.branch_state().unwrap().current_branch.unwrap();
         // develop gets its own commit
         git(&["checkout", "-q", "-b", "develop"]);
@@ -1142,7 +1236,9 @@ mod tests {
         // main gets a divergent commit
         git(&["checkout", "-q", &main]);
         std::fs::write(dir.join("m.txt"), "main\n").unwrap();
-        engine.commit(&["m.txt".to_string()], "main", false).unwrap();
+        engine
+            .commit(&["m.txt".to_string()], "main", false)
+            .unwrap();
         // a tracked change we don't want to commit (dirty tree)
         std::fs::write(dir.join("a.txt"), "base\nWIP\n").unwrap();
         // rebase onto develop must succeed despite the dirty tree (autostash)
@@ -1152,7 +1248,10 @@ mod tests {
         assert!(log.iter().any(|c| c.summary == "main"));
         // and the WIP change is restored to the working tree afterwards
         let content = std::fs::read_to_string(dir.join("a.txt")).unwrap();
-        assert!(content.contains("WIP"), "autostash restored the dirty change");
+        assert!(
+            content.contains("WIP"),
+            "autostash restored the dirty change"
+        );
         assert!(engine.status().unwrap().iter().any(|f| f.path == "a.txt"));
         let _ = std::fs::remove_dir_all(&dir);
     }

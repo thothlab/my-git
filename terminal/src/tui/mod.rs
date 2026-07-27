@@ -64,6 +64,7 @@ pub enum MenuAction {
     // log / history (target commit or branch)
     Checkout(String),
     RebaseOnto(String),
+    FetchRebaseOnto(String),
     NewBranchFrom(String),
     Reword(String),
     SquashParent(String),
@@ -581,9 +582,13 @@ impl<'e> App<'e> {
                 .as_mut()
                 .and_then(|l| l.context_at(col, row, body, engine));
             let (title, items) = match hit {
-                Some(LogHit::Branch { target, refname }) => (
+                Some(LogHit::Branch {
+                    target,
+                    refname,
+                    remote,
+                }) => (
                     format!("Branch: {target}"),
-                    branch_menu_items(&target, &refname),
+                    branch_menu_items(&target, &refname, remote),
                 ),
                 Some(LogHit::Commit { hash }) => {
                     let marked = self.log.as_ref().map(|l| l.marked_count()).unwrap_or(0);
@@ -629,8 +634,8 @@ impl<'e> App<'e> {
         if let Some(hash) = l.selected_commit_hash() {
             items.extend(commit_menu_items(&hash, l.marked_count()));
         }
-        if let Some((target, refname)) = l.selected_branch_pair() {
-            items.extend(branch_menu_items(&target, &refname));
+        if let Some((target, refname, remote)) = l.selected_branch_pair() {
+            items.extend(branch_menu_items(&target, &refname, remote));
         }
         for (label, action) in [
             ("u  undo last reword/squash/drop", MenuAction::Undo),
@@ -759,6 +764,7 @@ impl<'e> App<'e> {
         match action {
             Checkout(target) => self.log_checkout(target),
             RebaseOnto(refname) => self.log_rebase_onto(&refname),
+            FetchRebaseOnto(refname) => self.log_fetch_rebase_onto(&refname),
             NewBranchFrom(hash) => self.open_new_branch_from(hash),
             Reword(hash) => self.open_reword(hash),
             SquashParent(hash) => self.open_squash(hash),
@@ -1069,6 +1075,7 @@ impl<'e> App<'e> {
             LogAction::Push => self.push_action(),
             LogAction::NewBranchFrom(hash) => self.open_new_branch_from(hash),
             LogAction::RebaseOnto(target) => self.log_rebase_onto(&target),
+            LogAction::FetchRebaseOnto(refname) => self.log_fetch_rebase_onto(&refname),
             LogAction::Reword(hash) => self.open_reword(hash),
             LogAction::Squash(hash) => self.open_squash(hash),
             LogAction::SquashMarked(hashes) => self.open_squash_marked(hashes),
@@ -1298,15 +1305,30 @@ impl<'e> App<'e> {
                 self.rebuild_log_view();
                 self.message = format!("rebased onto {target}");
             }
-            Err(e) => {
-                self.refresh();
-                self.message = if self.branch.rebase.is_some() {
-                    "rebase stopped — resolve in Changes (R), then continue".into()
-                } else {
-                    format!("{e} (press g for the git log)")
-                };
-            }
+            Err(e) => self.after_failed_rebase(e),
         }
+    }
+
+    /// Fetch a remote branch, then rebase the current branch onto the fresh ref.
+    fn log_fetch_rebase_onto(&mut self, remote_ref: &str) {
+        match self.engine.fetch_and_rebase_onto(remote_ref) {
+            Ok(()) => {
+                self.rebuild_log_view();
+                self.message = format!("fetched + rebased onto {remote_ref}");
+            }
+            Err(e) => self.after_failed_rebase(e),
+        }
+    }
+
+    /// Shared message handling when a rebase-onto returns an error: a conflict
+    /// leaves the rebase in progress (drive it with R), else surface the reason.
+    fn after_failed_rebase(&mut self, e: anyhow::Error) {
+        self.refresh();
+        self.message = if self.branch.rebase.is_some() {
+            "rebase stopped — resolve, then press R".into()
+        } else {
+            format!("{e} (press g for the git log)")
+        };
     }
 
     /// Reword only the HEAD commit in this phase (amend); older commits need an
@@ -2010,18 +2032,25 @@ impl<'e> App<'e> {
 }
 
 /// Context-menu / palette items for a branch. `target` is the checkout name
-/// (remote-stripped); `refname` is the full ref used as a rebase base.
-fn branch_menu_items(target: &str, refname: &str) -> Vec<MenuItem> {
-    vec![
-        MenuItem {
-            label: format!("c  Checkout {target}"),
-            action: MenuAction::Checkout(target.to_string()),
-        },
-        MenuItem {
+/// (remote-stripped); `refname` is the full ref used as a rebase base. A remote
+/// branch fetches before rebasing so it lands on the latest state.
+fn branch_menu_items(target: &str, refname: &str, remote: bool) -> Vec<MenuItem> {
+    let mut items = vec![MenuItem {
+        label: format!("c  Checkout {target}"),
+        action: MenuAction::Checkout(target.to_string()),
+    }];
+    if remote {
+        items.push(MenuItem {
+            label: format!("R  Fetch & rebase current onto {refname}"),
+            action: MenuAction::FetchRebaseOnto(refname.to_string()),
+        });
+    } else {
+        items.push(MenuItem {
             label: format!("R  Rebase current onto {refname}"),
             action: MenuAction::RebaseOnto(refname.to_string()),
-        },
-    ]
+        });
+    }
+    items
 }
 
 /// Context-menu / palette items for a commit on the current branch.
@@ -2195,6 +2224,9 @@ mod tests {
             Ok(())
         }
         fn rebase_onto(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn fetch_and_rebase_onto(&self, _: &str) -> Result<()> {
             Ok(())
         }
         fn rebase_continue(&self) -> Result<()> {
@@ -3198,6 +3230,9 @@ mod tests {
                 Ok(())
             }
             fn rebase_onto(&self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn fetch_and_rebase_onto(&self, _: &str) -> Result<()> {
                 Ok(())
             }
             fn rebase_continue(&self) -> Result<()> {
