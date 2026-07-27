@@ -166,6 +166,12 @@ pub trait GitEngine {
     /// → `git fetch origin develop`), updating the tracking ref. Split out so the
     /// UI can show a "fetching" frame before the "rebasing" one.
     fn fetch_ref(&self, remote_ref: &str) -> Result<()>;
+    /// Fast-forward a local branch to its configured upstream (e.g. `develop` →
+    /// `origin/develop`) WITHOUT checking it out — so a subsequent rebase lands on
+    /// the up-to-date target. Returns `Ok(false)` when there's nothing to do (no
+    /// upstream, or it is the current branch); errors if the branch has diverged
+    /// from its upstream and can't fast-forward.
+    fn update_branch_from_upstream(&self, local_branch: &str) -> Result<bool>;
     /// Fetch a remote-tracking branch (e.g. `origin/develop`) and rebase the
     /// current branch onto the freshly-updated ref (auto-stash, like `rebase_onto`).
     /// The UI drives the two steps separately (for a busy frame between them); this
@@ -788,6 +794,47 @@ impl GitEngine for GixEngine {
         self.rebase_onto(remote_ref)
     }
 
+    fn update_branch_from_upstream(&self, local_branch: &str) -> Result<bool> {
+        // Can't fetch into the checked-out branch, and rebasing onto the current
+        // branch is a no-op anyway.
+        if self
+            .branch_state()
+            .ok()
+            .and_then(|b| b.current_branch)
+            .as_deref()
+            == Some(local_branch)
+        {
+            return Ok(false);
+        }
+        // Resolve the branch's upstream, e.g. `develop` -> `origin/develop`.
+        let up = self.git(&[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            &format!("{local_branch}@{{upstream}}"),
+        ])?;
+        if !up.status.success() {
+            return Ok(false); // no upstream configured — nothing to update
+        }
+        let up = String::from_utf8_lossy(&up.stdout).trim().to_string();
+        let Some((remote, remote_branch)) = up.split_once('/') else {
+            return Ok(false);
+        };
+        // Fast-forward the local branch ref to its upstream (FF-only, so a diverged
+        // branch fails cleanly rather than losing local commits).
+        let out = self.git(&["fetch", remote, &format!("{remote_branch}:{local_branch}")])?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            if err.contains("non-fast-forward") || err.contains("[rejected]") {
+                anyhow::bail!(
+                    "{local_branch} has diverged from {up} and can't be fast-forwarded — update it manually first"
+                );
+            }
+            anyhow::bail!("could not update {local_branch}: {}", err.trim());
+        }
+        Ok(true)
+    }
+
     fn rebase_continue(&self) -> Result<()> {
         self.git_check(&["rebase", "--continue"])?;
         Ok(())
@@ -1219,6 +1266,83 @@ mod tests {
             log.iter().any(|c| c.summary == "dev2"),
             "fetch pulled the newest develop commit before rebasing"
         );
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&up);
+    }
+
+    #[test]
+    fn update_local_branch_fast_forwards_from_upstream() {
+        let run = |dir: &Path, a: &[&str]| {
+            let o = Command::new("git")
+                .current_dir(dir)
+                .args(a)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "git {a:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+        };
+        // upstream repo: default branch + develop with one commit
+        let up = init_repo();
+        std::fs::write(up.join("base.txt"), "base\n").unwrap();
+        run(&up, &["add", "-A"]);
+        run(&up, &["commit", "-q", "-m", "base"]);
+        let def = String::from_utf8(
+            Command::new("git")
+                .current_dir(&up)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        run(&up, &["checkout", "-q", "-b", "develop"]);
+        std::fs::write(up.join("dev1.txt"), "d1\n").unwrap();
+        run(&up, &["add", "-A"]);
+        run(&up, &["commit", "-q", "-m", "dev1"]);
+        run(&up, &["checkout", "-q", &def]);
+
+        // clone, create a local `develop` tracking origin/develop, then move off it
+        let work =
+            std::env::temp_dir().join(format!("mygit-clone-{}-{}", std::process::id(), next_id()));
+        let _ = std::fs::remove_dir_all(&work);
+        let o = Command::new("git")
+            .args(["clone", "-q", up.to_str().unwrap(), work.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "clone: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        run(&work, &["config", "user.email", "t@t"]);
+        run(&work, &["config", "user.name", "t"]);
+        run(&work, &["checkout", "-q", "develop"]); // local develop @ base+dev1
+        run(&work, &["checkout", "-q", "-b", "feature"]); // now on feature
+
+        // upstream develop advances
+        run(&up, &["checkout", "-q", "develop"]);
+        std::fs::write(up.join("dev2.txt"), "d2\n").unwrap();
+        run(&up, &["add", "-A"]);
+        run(&up, &["commit", "-q", "-m", "dev2"]);
+
+        let engine = GixEngine::discover(&work).unwrap();
+        // fast-forward local develop to origin/develop while on feature
+        assert!(
+            engine.update_branch_from_upstream("develop").unwrap(),
+            "develop has an upstream and fast-forwards"
+        );
+        let dev_log = engine.log_for("develop", 20).unwrap();
+        assert!(
+            dev_log.iter().any(|c| c.summary == "dev2"),
+            "local develop advanced to origin's latest"
+        );
+        // updating the current branch is a no-op
+        assert!(!engine.update_branch_from_upstream("feature").unwrap());
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::remove_dir_all(&up);
     }

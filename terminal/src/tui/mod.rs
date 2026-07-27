@@ -236,8 +236,11 @@ pub struct App<'e> {
 enum PendingOp {
     /// Fetch the remote ref, then (as a second busy phase) rebase onto it.
     FetchThenRebase(String),
-    /// Rebase the current branch onto `target`; `fetched` tunes the done message.
-    Rebase { target: String, fetched: bool },
+    /// Fast-forward the local target branch to its upstream, then rebase onto it.
+    UpdateThenRebase(String),
+    /// Rebase the current branch onto `target`; `prefix` prepends to the done
+    /// message (e.g. "fetched + ", "updated + ").
+    Rebase { target: String, prefix: String },
 }
 
 /// Build the app (runs the startup pipeline) and drive it until the user quits.
@@ -1326,14 +1329,13 @@ impl<'e> App<'e> {
         }
     }
 
-    /// Queue a rebase onto a local branch (runs behind a busy frame).
+    /// Queue a rebase onto a local branch. First the branch is fast-forwarded to
+    /// its upstream (so we rebase onto an up-to-date target), then the rebase runs
+    /// — each behind its own busy frame.
     fn log_rebase_onto(&mut self, target: &str) {
         self.begin_busy(
-            PendingOp::Rebase {
-                target: target.to_string(),
-                fetched: false,
-            },
-            format!("Rebasing onto {target}…"),
+            PendingOp::UpdateThenRebase(target.to_string()),
+            format!("Updating {target}…"),
         );
     }
 
@@ -1359,20 +1361,32 @@ impl<'e> App<'e> {
                 Ok(()) => self.begin_busy(
                     PendingOp::Rebase {
                         target: remote_ref.clone(),
-                        fetched: true,
+                        prefix: "fetched + ".into(),
                     },
                     format!("Rebasing onto {remote_ref}…"),
                 ),
                 Err(e) => self.after_failed_rebase(e),
             },
-            PendingOp::Rebase { target, fetched } => match self.engine.rebase_onto(&target) {
+            PendingOp::UpdateThenRebase(target) => {
+                match self.engine.update_branch_from_upstream(&target) {
+                    Ok(updated) => self.begin_busy(
+                        PendingOp::Rebase {
+                            target: target.clone(),
+                            prefix: if updated {
+                                "updated + ".into()
+                            } else {
+                                String::new()
+                            },
+                        },
+                        format!("Rebasing onto {target}…"),
+                    ),
+                    Err(e) => self.after_failed_rebase(e),
+                }
+            }
+            PendingOp::Rebase { target, prefix } => match self.engine.rebase_onto(&target) {
                 Ok(()) => {
                     self.rebuild_log_view();
-                    self.message = if fetched {
-                        format!("fetched + rebased onto {target}")
-                    } else {
-                        format!("rebased onto {target}")
-                    };
+                    self.message = format!("{prefix}rebased onto {target}");
                 }
                 Err(e) => self.after_failed_rebase(e),
             },
@@ -2277,6 +2291,9 @@ mod tests {
         fn fetch_and_rebase_onto(&self, _: &str) -> Result<()> {
             Ok(())
         }
+        fn update_branch_from_upstream(&self, _: &str) -> Result<bool> {
+            Ok(false)
+        }
         fn rebase_continue(&self) -> Result<()> {
             Ok(())
         }
@@ -2783,12 +2800,8 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(text.contains("Working"), "busy overlay painted");
-        // Now the loop's step runs it and clears busy.
-        let op = app.pending.take().unwrap();
-        app.run_pending(op);
-        if app.pending.is_none() {
-            app.busy = None;
-        }
+        // Runs to completion (update-target then rebase) and clears busy.
+        drain_pending(&mut app);
         assert!(app.busy.is_none());
         assert!(
             app.message.contains("rebased onto develop"),
@@ -3361,6 +3374,9 @@ mod tests {
             }
             fn fetch_and_rebase_onto(&self, _: &str) -> Result<()> {
                 Ok(())
+            }
+            fn update_branch_from_upstream(&self, _: &str) -> Result<bool> {
+                Ok(false)
             }
             fn rebase_continue(&self) -> Result<()> {
                 Ok(())
