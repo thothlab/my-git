@@ -123,6 +123,29 @@ pub enum ConfirmPurpose {
     DropCommit(String),
 }
 
+/// Push options + success message for a force-push. `hard` -> plain `--force`
+/// (unconditional overwrite); otherwise `--force-with-lease` (refuse if the
+/// remote advanced beyond what we last saw).
+fn force_push_opts(hard: bool) -> (PushOpts, &'static str) {
+    if hard {
+        (
+            PushOpts {
+                force: true,
+                ..Default::default()
+            },
+            "force-pushed",
+        )
+    } else {
+        (
+            PushOpts {
+                force_with_lease: true,
+                ..Default::default()
+            },
+            "force-pushed (with lease)",
+        )
+    }
+}
+
 /// Single-line text entry (new/rename changelist; commit message in a later wave).
 pub struct InputState {
     pub title: String,
@@ -1035,11 +1058,11 @@ impl<'e> App<'e> {
                 "pushed (upstream set)",
             );
         } else if self.branch.behind > 0 {
-            // Diverged: offer --force-with-lease behind an explicit confirm.
+            // Diverged: offer a choice of force mode behind an explicit confirm.
             self.overlay = Overlay::Confirm(ConfirmState {
                 title: "Diverged from upstream".into(),
                 body: format!(
-                    "Local/remote diverged (↑{} ↓{}). Push with --force-with-lease?",
+                    "Local/remote diverged (↑{} ↓{}). How to push?",
                     self.branch.ahead, self.branch.behind
                 ),
                 purpose: ConfirmPurpose::ForcePush(branch),
@@ -1553,12 +1576,33 @@ impl<'e> App<'e> {
     }
 
     fn handle_confirm_key(&mut self, key: event::KeyEvent) {
+        // Force-push is a two-way choice: [l] with-lease (safe) vs [f] plain
+        // force. Anything else cancels (default-cancel, per the gwm-cli lesson).
+        if let Overlay::Confirm(c) = &self.overlay {
+            if let ConfirmPurpose::ForcePush(branch) = &c.purpose {
+                let branch = branch.clone();
+                self.overlay = Overlay::None;
+                match key.code {
+                    event::KeyCode::Char('l') => self.force_push(branch, false),
+                    event::KeyCode::Char('f') => self.force_push(branch, true),
+                    _ => {}
+                }
+                return;
+            }
+        }
         // Default-cancel: only 'y' proceeds.
         if key.code == event::KeyCode::Char('y') {
             self.execute_confirm();
         } else {
             self.overlay = Overlay::None;
         }
+    }
+
+    /// Force-push `branch`. `hard` picks plain `--force` (overwrite unconditionally);
+    /// otherwise `--force-with-lease` (refuse if the remote moved unseen).
+    fn force_push(&mut self, branch: String, hard: bool) {
+        let (opts, ok) = force_push_opts(hard);
+        self.push_busy(branch, opts, ok);
     }
 
     fn execute_confirm(&mut self) {
@@ -1577,14 +1621,9 @@ impl<'e> App<'e> {
                 }
                 Err(e) => self.message = e.to_string(),
             },
-            ConfirmPurpose::ForcePush(branch) => self.push_busy(
-                branch,
-                PushOpts {
-                    force_with_lease: true,
-                    ..Default::default()
-                },
-                "force-pushed (with lease)",
-            ),
+            // Force-push is normally dispatched from handle_confirm_key (l/f);
+            // this fallback defaults to the safe mode.
+            ConfirmPurpose::ForcePush(branch) => self.force_push(branch, false),
         }
     }
 
@@ -3093,6 +3132,50 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    #[test]
+    fn force_push_opts_map_lease_vs_force() {
+        // [l] -> --force-with-lease (safe); [f] -> plain --force.
+        let (lease, lease_msg) = force_push_opts(false);
+        assert!(lease.force_with_lease && !lease.force);
+        assert_eq!(lease_msg, "force-pushed (with lease)");
+
+        let (hard, hard_msg) = force_push_opts(true);
+        assert!(hard.force && !hard.force_with_lease);
+        assert_eq!(hard_msg, "force-pushed");
+    }
+
+    #[test]
+    fn diverged_confirm_dispatches_force_then_cancels() {
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-force-dispatch"),
+        };
+        let mut app = App::new(&mock);
+        let confirm = || ConfirmState {
+            title: "Diverged from upstream".into(),
+            body: "x".into(),
+            purpose: ConfirmPurpose::ForcePush("feature".into()),
+        };
+
+        // [f] proceeds: overlay closes and a push is enqueued behind a busy frame.
+        app.overlay = Overlay::Confirm(confirm());
+        app.handle_key(key_char('f'));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.pending.is_some(), "[f] enqueues a push");
+        drain_pending(&mut app);
+
+        // [l] proceeds too.
+        app.overlay = Overlay::Confirm(confirm());
+        app.handle_key(key_char('l'));
+        assert!(app.pending.is_some(), "[l] enqueues a push");
+        drain_pending(&mut app);
+
+        // Any other key cancels without enqueuing anything.
+        app.overlay = Overlay::Confirm(confirm());
+        app.handle_key(key_char('x'));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.pending.is_none(), "other keys cancel, no push");
     }
 
     fn select_picker(app: &mut App, label: &str) {

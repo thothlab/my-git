@@ -5,8 +5,8 @@
 use super::keymap::BINDINGS;
 use super::theme::Theme;
 use super::{
-    App, CommandsState, ConfirmState, Focus, InputState, MenuState, Overlay, PickerState, Row,
-    StashState,
+    App, CommandsState, ConfirmPurpose, ConfirmState, Focus, InputState, MenuState, Overlay,
+    PickerState, Row, StashState,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -405,6 +405,10 @@ fn render_confirm(f: &mut Frame, app: &App<'_>, area: Rect, c: &ConfirmState) {
         .border_style(Style::default().fg(t.danger));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
+    let hint = match c.purpose {
+        ConfirmPurpose::ForcePush(_) => "  [l] with-lease (safe)   [f] force   [Esc] cancel",
+        _ => "  [y] confirm    [n / Esc] cancel (default)",
+    };
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
@@ -412,10 +416,7 @@ fn render_confirm(f: &mut Frame, app: &App<'_>, area: Rect, c: &ConfirmState) {
             Style::default().fg(t.fg),
         )),
         Line::from(""),
-        Line::from(Span::styled(
-            "  [y] confirm    [n / Esc] cancel (default)",
-            Style::default().fg(t.fg_muted),
-        )),
+        Line::from(Span::styled(hint, Style::default().fg(t.fg_muted))),
     ];
     f.render_widget(Paragraph::new(lines), inner);
 }
