@@ -118,7 +118,6 @@ pub struct ConfirmState {
 pub enum ConfirmPurpose {
     ResetHard(String),
     RollbackFile(String),
-    ForcePush(String),
     /// Drop the given commit from the current branch's history.
     DropCommit(String),
 }
@@ -204,6 +203,13 @@ pub enum PickerPurpose {
     OpControl,
     /// Uncommitted changes exist — choose how to switch to the given branch.
     DirtyCheckout(String),
+    /// Local/remote diverged — choose the force-push mode for `branch`.
+    /// `ahead`/`behind` are carried so the picker can show the divergence.
+    ForcePush {
+        branch: String,
+        ahead: usize,
+        behind: usize,
+    },
 }
 
 /// A rendered row in the Changes panel: a changelist header or a file under it.
@@ -1058,14 +1064,25 @@ impl<'e> App<'e> {
                 "pushed (upstream set)",
             );
         } else if self.branch.behind > 0 {
-            // Diverged: offer a choice of force mode behind an explicit confirm.
-            self.overlay = Overlay::Confirm(ConfirmState {
+            // Diverged: offer a choice of force mode, selectable with ↑/↓.
+            self.overlay = Overlay::Picker(PickerState {
                 title: "Diverged from upstream".into(),
-                body: format!(
-                    "Local/remote diverged (↑{} ↓{}). How to push?",
-                    self.branch.ahead, self.branch.behind
-                ),
-                purpose: ConfirmPurpose::ForcePush(branch),
+                items: vec![
+                    PickerItem {
+                        label: "--force-with-lease  (safe)".into(),
+                        id: "lease".into(),
+                    },
+                    PickerItem {
+                        label: "--force  (overwrite)".into(),
+                        id: "force".into(),
+                    },
+                ],
+                cursor: 0,
+                purpose: PickerPurpose::ForcePush {
+                    branch,
+                    ahead: self.branch.ahead,
+                    behind: self.branch.behind,
+                },
             });
         } else {
             self.push_busy(branch, PushOpts::default(), "pushed");
@@ -1576,20 +1593,6 @@ impl<'e> App<'e> {
     }
 
     fn handle_confirm_key(&mut self, key: event::KeyEvent) {
-        // Force-push is a two-way choice: [l] with-lease (safe) vs [f] plain
-        // force. Anything else cancels (default-cancel, per the gwm-cli lesson).
-        if let Overlay::Confirm(c) = &self.overlay {
-            if let ConfirmPurpose::ForcePush(branch) = &c.purpose {
-                let branch = branch.clone();
-                self.overlay = Overlay::None;
-                match key.code {
-                    event::KeyCode::Char('l') => self.force_push(branch, false),
-                    event::KeyCode::Char('f') => self.force_push(branch, true),
-                    _ => {}
-                }
-                return;
-            }
-        }
         // Default-cancel: only 'y' proceeds.
         if key.code == event::KeyCode::Char('y') {
             self.execute_confirm();
@@ -1621,9 +1624,6 @@ impl<'e> App<'e> {
                 }
                 Err(e) => self.message = e.to_string(),
             },
-            // Force-push is normally dispatched from handle_confirm_key (l/f);
-            // this fallback defaults to the safe mode.
-            ConfirmPurpose::ForcePush(branch) => self.force_push(branch, false),
         }
     }
 
@@ -2100,6 +2100,7 @@ impl<'e> App<'e> {
                 "switch" => self.checkout_busy(target),
                 _ => {} // cancel
             },
+            PickerPurpose::ForcePush { branch, .. } => self.force_push(branch, id == "force"),
         }
     }
 
@@ -3147,35 +3148,55 @@ mod tests {
     }
 
     #[test]
-    fn diverged_confirm_dispatches_force_then_cancels() {
+    fn diverged_force_picker_selects_with_arrows_then_cancels() {
         let mock = Mock {
-            root: std::env::temp_dir().join("mygit-force-dispatch"),
+            root: std::env::temp_dir().join("mygit-force-picker"),
         };
         let mut app = App::new(&mock);
-        let confirm = || ConfirmState {
+        let picker = || PickerState {
             title: "Diverged from upstream".into(),
-            body: "x".into(),
-            purpose: ConfirmPurpose::ForcePush("feature".into()),
+            items: vec![
+                PickerItem {
+                    label: "--force-with-lease  (safe)".into(),
+                    id: "lease".into(),
+                },
+                PickerItem {
+                    label: "--force  (overwrite)".into(),
+                    id: "force".into(),
+                },
+            ],
+            cursor: 0,
+            purpose: PickerPurpose::ForcePush {
+                branch: "feature".into(),
+                ahead: 7,
+                behind: 1,
+            },
         };
 
-        // [f] proceeds: overlay closes and a push is enqueued behind a busy frame.
-        app.overlay = Overlay::Confirm(confirm());
-        app.handle_key(key_char('f'));
+        // Default cursor on the safe (lease) option; Enter enqueues a push.
+        app.overlay = Overlay::Picker(picker());
+        app.handle_key(key(event::KeyCode::Enter));
         assert!(matches!(app.overlay, Overlay::None));
-        assert!(app.pending.is_some(), "[f] enqueues a push");
+        assert!(app.pending.is_some(), "Enter on lease enqueues a push");
         drain_pending(&mut app);
 
-        // [l] proceeds too.
-        app.overlay = Overlay::Confirm(confirm());
-        app.handle_key(key_char('l'));
-        assert!(app.pending.is_some(), "[l] enqueues a push");
+        // ↓ moves to --force, Enter enqueues too.
+        app.overlay = Overlay::Picker(picker());
+        app.handle_key(key(event::KeyCode::Down));
+        if let Overlay::Picker(p) = &app.overlay {
+            assert_eq!(p.cursor, 1, "↓ selects the force option");
+        } else {
+            panic!("picker closed unexpectedly");
+        }
+        app.handle_key(key(event::KeyCode::Enter));
+        assert!(app.pending.is_some(), "Enter on force enqueues a push");
         drain_pending(&mut app);
 
-        // Any other key cancels without enqueuing anything.
-        app.overlay = Overlay::Confirm(confirm());
-        app.handle_key(key_char('x'));
+        // Esc cancels without enqueuing anything.
+        app.overlay = Overlay::Picker(picker());
+        app.handle_key(key(event::KeyCode::Esc));
         assert!(matches!(app.overlay, Overlay::None));
-        assert!(app.pending.is_none(), "other keys cancel, no push");
+        assert!(app.pending.is_none(), "Esc cancels, no push");
     }
 
     fn select_picker(app: &mut App, label: &str) {

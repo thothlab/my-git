@@ -5,7 +5,7 @@
 use super::keymap::BINDINGS;
 use super::theme::Theme;
 use super::{
-    App, CommandsState, ConfirmPurpose, ConfirmState, Focus, InputState, MenuState, Overlay,
+    App, CommandsState, ConfirmState, Focus, InputState, MenuState, Overlay, PickerPurpose,
     PickerState, Row, StashState,
 };
 use ratatui::{
@@ -414,10 +414,6 @@ fn render_confirm(f: &mut Frame, app: &App<'_>, area: Rect, c: &ConfirmState) {
         .border_style(Style::default().fg(t.danger));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
-    let hint = match c.purpose {
-        ConfirmPurpose::ForcePush(_) => "  [l] with-lease (safe)   [f] force   [Esc] cancel",
-        _ => "  [y] confirm    [n / Esc] cancel (default)",
-    };
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
@@ -425,7 +421,10 @@ fn render_confirm(f: &mut Frame, app: &App<'_>, area: Rect, c: &ConfirmState) {
             Style::default().fg(t.fg),
         )),
         Line::from(""),
-        Line::from(Span::styled(hint, Style::default().fg(t.fg_muted))),
+        Line::from(Span::styled(
+            "  [y] confirm    [n / Esc] cancel (default)",
+            Style::default().fg(t.fg_muted),
+        )),
     ];
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -524,28 +523,46 @@ fn render_input(f: &mut Frame, app: &App<'_>, area: Rect, s: &InputState) {
 
 fn render_picker(f: &mut Frame, app: &App<'_>, area: Rect, p: &PickerState) {
     let t = &app.theme;
-    let w = 46.min(area.width.saturating_sub(4));
-    let h = (p.items.len() as u16 + 4).min(area.height.saturating_sub(2));
+    // A force-push picker is destructive: red border + a divergence subtitle,
+    // like the confirm dialog it replaced.
+    let subtitle = match &p.purpose {
+        PickerPurpose::ForcePush { ahead, behind, .. } => Some(format!(
+            "Local/remote diverged (↑{ahead} ↓{behind}). How to push?"
+        )),
+        _ => None,
+    };
+    let border = if subtitle.is_some() {
+        t.danger
+    } else {
+        t.accent
+    };
+    let w = 56.min(area.width.saturating_sub(4));
+    // items + top pad + blank + footer, plus 2 lines when a subtitle is shown.
+    let extra = if subtitle.is_some() { 2 } else { 0 };
+    let h = (p.items.len() as u16 + 4 + extra).min(area.height.saturating_sub(2));
     let rect = centered(area, w, h);
     f.render_widget(Clear, rect);
     let block = Block::default()
         .title(Line::from(format!(" {} ", p.title)))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.accent));
+        .border_style(Style::default().fg(border));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
-    let mut lines: Vec<Line> = p
-        .items
-        .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let mut line = Line::from(format!("  {}", item.label));
-            if i == p.cursor {
-                line = line.style(Style::default().bg(t.sel_bg).fg(t.accent));
-            }
-            line
-        })
-        .collect();
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(sub) = &subtitle {
+        lines.push(Line::from(Span::styled(
+            format!("  {sub}"),
+            Style::default().fg(t.fg),
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.extend(p.items.iter().enumerate().map(|(i, item)| {
+        let mut line = Line::from(format!("  {}", item.label));
+        if i == p.cursor {
+            line = line.style(Style::default().bg(t.sel_bg).fg(t.accent));
+        }
+        line
+    }));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " ↑↓ select   Enter: confirm   Esc: cancel",
