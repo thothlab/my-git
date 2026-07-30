@@ -3383,6 +3383,12 @@ mod tests {
         ] {
             assert!(text.contains(needle), "rendered frame missing {needle:?}");
         }
+        // Build version is shown so users can tell which binary is running.
+        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        assert!(
+            text.contains(&version),
+            "status bar missing build version {version:?}"
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ use super::{
     PickerState, Row, StashState,
 };
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -302,6 +302,15 @@ fn render_status_bar(f: &mut Frame, app: &App<'_>, area: Rect) {
     ));
     spans.push(Span::styled("[? help]", Style::default().fg(t.fg_muted)));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+    // Build version, right-aligned, so it's clear which binary is running.
+    let version = Span::styled(
+        format!("mygit v{} ", env!("CARGO_PKG_VERSION")),
+        Style::default().fg(t.fg_muted),
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(version)).alignment(Alignment::Right),
+        area,
+    );
 }
 
 fn render_changes(f: &mut Frame, app: &App<'_>, area: Rect) {
