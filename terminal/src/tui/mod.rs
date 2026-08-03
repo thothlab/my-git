@@ -185,6 +185,35 @@ pub struct PickerState {
     pub items: Vec<PickerItem>,
     pub cursor: usize,
     pub purpose: PickerPurpose,
+    /// When `Some`, letters typed edit this filter and the list narrows to
+    /// matching items (used for long branch lists). `None` keeps the list
+    /// fixed and preserves vim `j`/`k` navigation for short pickers.
+    pub filter: Option<String>,
+}
+
+impl PickerState {
+    /// Item indices matching the current filter, in list order. With no filter
+    /// (`None`) or an empty filter, every item is visible. The filter is split
+    /// on whitespace into words and an item must match *all* of them
+    /// (case-insensitive substring), so `6594 fund` finds `PIP-6594_fund_...`.
+    pub fn visible(&self) -> Vec<usize> {
+        let words: Vec<String> = match &self.filter {
+            Some(f) => f.split_whitespace().map(str::to_lowercase).collect(),
+            None => Vec::new(),
+        };
+        if words.is_empty() {
+            return (0..self.items.len()).collect();
+        }
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| {
+                let hay = it.label.to_lowercase();
+                words.iter().all(|w| hay.contains(w.as_str()))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
 }
 
 pub struct PickerItem {
@@ -996,6 +1025,7 @@ impl<'e> App<'e> {
                 items,
                 cursor: first_control,
                 purpose: PickerPurpose::RebaseControl,
+                filter: None,
             });
         } else {
             let cur = self.branch.current_branch.clone().unwrap_or_default();
@@ -1019,6 +1049,7 @@ impl<'e> App<'e> {
                 items,
                 cursor: 0,
                 purpose: PickerPurpose::RebaseOnto,
+                filter: Some(String::new()),
             });
         }
     }
@@ -1083,6 +1114,7 @@ impl<'e> App<'e> {
                     ahead: self.branch.ahead,
                     behind: self.branch.behind,
                 },
+                filter: None,
             });
         } else {
             self.push_busy(branch, PushOpts::default(), "pushed");
@@ -1132,6 +1164,7 @@ impl<'e> App<'e> {
             items,
             cursor: 0,
             purpose: PickerPurpose::Checkout,
+            filter: Some(String::new()),
         });
     }
 
@@ -1277,6 +1310,7 @@ impl<'e> App<'e> {
             items,
             cursor: first_control,
             purpose: PickerPurpose::OpControl,
+            filter: None,
         });
     }
 
@@ -1373,6 +1407,7 @@ impl<'e> App<'e> {
             items,
             cursor: 0,
             purpose: PickerPurpose::DirtyCheckout(target),
+            filter: None,
         });
     }
 
@@ -1530,6 +1565,7 @@ impl<'e> App<'e> {
             items,
             cursor: 0,
             purpose: PickerPurpose::ResetMode(hash),
+            filter: None,
         });
     }
 
@@ -1739,6 +1775,7 @@ impl<'e> App<'e> {
             items,
             cursor: 0,
             purpose: PickerPurpose::MoveFiles(files),
+            filter: None,
         });
     }
 
@@ -1987,21 +2024,58 @@ impl<'e> App<'e> {
 
     fn handle_picker_key(&mut self, key: event::KeyEvent) {
         use event::KeyCode;
+        // Filterable pickers (long branch lists) let letters type into a filter
+        // box, so vim `j`/`k` no longer navigate there - the arrows do. Short
+        // fixed pickers keep `j`/`k`.
+        let filterable = matches!(&self.overlay, Overlay::Picker(p) if p.filter.is_some());
         match key.code {
             KeyCode::Esc => self.overlay = Overlay::None,
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Enter => self.submit_picker(),
+            KeyCode::Up => {
                 if let Overlay::Picker(p) = &mut self.overlay {
                     p.cursor = p.cursor.saturating_sub(1);
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 if let Overlay::Picker(p) = &mut self.overlay {
-                    if p.cursor + 1 < p.items.len() {
+                    if p.cursor + 1 < p.visible().len() {
                         p.cursor += 1;
                     }
                 }
             }
-            KeyCode::Enter => self.submit_picker(),
+            KeyCode::Char('k') if !filterable => {
+                if let Overlay::Picker(p) = &mut self.overlay {
+                    p.cursor = p.cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Char('j') if !filterable => {
+                if let Overlay::Picker(p) = &mut self.overlay {
+                    if p.cursor + 1 < p.visible().len() {
+                        p.cursor += 1;
+                    }
+                }
+            }
+            KeyCode::Backspace if filterable => {
+                if let Overlay::Picker(p) = &mut self.overlay {
+                    if let Some(f) = p.filter.as_mut() {
+                        f.pop();
+                    }
+                    // Keep the cursor on a real row after the list re-widens.
+                    let n = p.visible().len();
+                    if n > 0 && p.cursor >= n {
+                        p.cursor = n - 1;
+                    }
+                }
+            }
+            KeyCode::Char(c) if filterable => {
+                if let Overlay::Picker(p) = &mut self.overlay {
+                    if let Some(f) = p.filter.as_mut() {
+                        f.push(c);
+                    }
+                    // A new keystroke narrows the list - jump to the top match.
+                    p.cursor = 0;
+                }
+            }
             _ => {}
         }
     }
@@ -2010,7 +2084,13 @@ impl<'e> App<'e> {
         let Overlay::Picker(p) = &self.overlay else {
             return;
         };
-        let Some(item) = p.items.get(p.cursor) else {
+        // The cursor indexes the filtered (visible) rows, not the full list.
+        let Some(item) = p.visible().get(p.cursor).and_then(|&i| p.items.get(i)) else {
+            // No match under the cursor (e.g. a filter that hides everything):
+            // keep the picker open so a stray Enter doesn't dump the user out.
+            if p.filter.as_deref().is_some_and(|f| !f.is_empty()) {
+                return;
+            }
             self.overlay = Overlay::None;
             return;
         };
@@ -3077,6 +3157,193 @@ mod tests {
     }
 
     #[test]
+    fn picker_visible_matches_all_filter_words() {
+        let mk = |filter: &str| PickerState {
+            title: "Branches".into(),
+            items: vec![
+                PickerItem {
+                    label: "＋ new branch…".into(),
+                    id: "__new__".into(),
+                },
+                PickerItem {
+                    label: "p2p/bugfix/PIP-6594_fund_tbp_keys".into(),
+                    id: "a".into(),
+                },
+                PickerItem {
+                    label: "p2p/bugfix/PIP-6595_fund_list_twitching".into(),
+                    id: "b".into(),
+                },
+                PickerItem {
+                    label: "release/3.50.0".into(),
+                    id: "c".into(),
+                },
+            ],
+            cursor: 0,
+            purpose: PickerPurpose::Checkout,
+            filter: Some(filter.into()),
+        };
+        // Empty filter shows every row.
+        assert_eq!(mk("").visible().len(), 4);
+        // Substring match is case-insensitive and pins the exact branch.
+        let p = mk("6595");
+        assert_eq!(p.visible(), vec![2]);
+        // Multiple words must all match, in any order (the "по словам" case).
+        assert_eq!(mk("6594 fund").visible(), vec![1]);
+        assert_eq!(mk("FUND 6594").visible(), vec![1]);
+        // A shared token keeps several rows.
+        assert_eq!(mk("fund").visible().len(), 2);
+        // A word that matches nothing empties the list.
+        assert!(mk("6594 zzz").visible().is_empty());
+    }
+
+    #[test]
+    fn branch_picker_types_to_filter_then_backspaces() {
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-branch-filter"),
+        };
+        let mut app = App::new(&mock);
+        app.overlay = Overlay::Picker(PickerState {
+            title: "Branches".into(),
+            items: vec![
+                PickerItem {
+                    label: "＋ new branch…".into(),
+                    id: "__new__".into(),
+                },
+                PickerItem {
+                    label: "develop".into(),
+                    id: "develop".into(),
+                },
+                PickerItem {
+                    label: "p2p/bugfix/PIP-6594_fund".into(),
+                    id: "x".into(),
+                },
+                PickerItem {
+                    label: "p2p/bugfix/PIP-6934_tbp_otp".into(),
+                    id: "y".into(),
+                },
+            ],
+            cursor: 0,
+            purpose: PickerPurpose::Checkout,
+            filter: Some(String::new()),
+        });
+        // Row under the cursor, resolved through the filtered (visible) list.
+        let cur_id = |app: &App| {
+            let Overlay::Picker(p) = &app.overlay else {
+                return None;
+            };
+            p.visible().get(p.cursor).map(|&i| p.items[i].id.clone())
+        };
+        let vis_len = |app: &App| match &app.overlay {
+            Overlay::Picker(p) => p.visible().len(),
+            _ => 0,
+        };
+
+        // Letters type into the filter - they are NOT vim navigation here.
+        for c in "6594".chars() {
+            app.handle_key(key_char(c));
+        }
+        assert_eq!(vis_len(&app), 1, "filter narrows to the one match");
+        assert_eq!(cur_id(&app).as_deref(), Some("x"), "cursor lands on it");
+
+        // Backspacing widens the list again and keeps the cursor valid.
+        for _ in 0..4 {
+            app.handle_key(key(event::KeyCode::Backspace));
+        }
+        assert_eq!(vis_len(&app), 4, "cleared filter shows every branch");
+        assert!(cur_id(&app).is_some(), "cursor still on a real row");
+    }
+
+    #[test]
+    fn branch_picker_renders_filter_line_and_narrows() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-branch-render"),
+        };
+        let mut app = App::new(&mock);
+        app.overlay = Overlay::Picker(PickerState {
+            title: "Branches — checkout / create".into(),
+            items: vec![
+                PickerItem {
+                    label: "＋ new branch…".into(),
+                    id: "__new__".into(),
+                },
+                PickerItem {
+                    label: "develop".into(),
+                    id: "develop".into(),
+                },
+                PickerItem {
+                    label: "p2p/bugfix/PIP-6594_fund".into(),
+                    id: "x".into(),
+                },
+                PickerItem {
+                    label: "p2p/bugfix/PIP-6934_tbp_otp".into(),
+                    id: "y".into(),
+                },
+            ],
+            cursor: 0,
+            purpose: PickerPurpose::Checkout,
+            filter: Some(String::new()),
+        });
+        for c in "6594".chars() {
+            app.handle_key(key_char(c));
+        }
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| super::ui::render(f, &app)).unwrap();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("filter:"), "search line is visible");
+        assert!(text.contains("6594"), "typed text is echoed");
+        assert!(text.contains("1/4"), "live match count shown");
+        assert!(text.contains("PIP-6594_fund"), "the one match is listed");
+        assert!(
+            !text.contains("PIP-6934"),
+            "filtered-out branches are hidden"
+        );
+        // The footer hint must fit the box - its last token proves it isn't clipped.
+        assert!(text.contains("cancel"), "footer hint renders without clipping");
+    }
+
+    #[test]
+    fn fixed_picker_keeps_vim_navigation() {
+        // Short, non-filterable pickers must still move with j/k.
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-fixed-picker"),
+        };
+        let mut app = App::new(&mock);
+        app.overlay = Overlay::Picker(PickerState {
+            title: "Reset".into(),
+            items: vec![
+                PickerItem {
+                    label: "mixed".into(),
+                    id: "mixed".into(),
+                },
+                PickerItem {
+                    label: "soft".into(),
+                    id: "soft".into(),
+                },
+                PickerItem {
+                    label: "hard".into(),
+                    id: "hard".into(),
+                },
+            ],
+            cursor: 0,
+            purpose: PickerPurpose::ResetMode("deadbeef".into()),
+            filter: None,
+        });
+        app.handle_key(key_char('j'));
+        app.handle_key(key_char('j'));
+        let Overlay::Picker(p) = &app.overlay else {
+            panic!("picker gone");
+        };
+        assert_eq!(p.cursor, 2, "j moves the cursor on a fixed picker");
+    }
+
+    #[test]
     fn push_new_branch_sets_upstream_and_create_checkout() {
         use crate::engine::GixEngine;
         use std::process::Command;
@@ -3171,6 +3438,7 @@ mod tests {
                 ahead: 7,
                 behind: 1,
             },
+            filter: None,
         };
 
         // Default cursor on the safe (lease) option; Enter enqueues a push.

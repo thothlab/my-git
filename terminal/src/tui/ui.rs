@@ -536,10 +536,20 @@ fn render_picker(f: &mut Frame, app: &App<'_>, area: Rect, p: &PickerState) {
     } else {
         t.accent
     };
+    // Rows that survive the current filter (all rows when the picker isn't
+    // filterable); the cursor indexes into this, not the full item list.
+    let vis = p.visible();
+
+    // Line budget above and below the scrolling list.
+    let sub_lines = if subtitle.is_some() { 2 } else { 0 };
+    let filter_lines = if p.filter.is_some() { 1 } else { 0 };
+    let head_lines = sub_lines + filter_lines;
+    let foot_lines = 2; // blank + hint
+    // At least one list row so an empty filter still shows the "(no matches)" note.
+    let want_rows = vis.len().max(1) as u16;
+
     let w = 56.min(area.width.saturating_sub(4));
-    // items + top pad + blank + footer, plus 2 lines when a subtitle is shown.
-    let extra = if subtitle.is_some() { 2 } else { 0 };
-    let h = (p.items.len() as u16 + 4 + extra).min(area.height.saturating_sub(2));
+    let h = (want_rows + head_lines + foot_lines + 2).min(area.height.saturating_sub(2));
     let rect = centered(area, w, h);
     f.render_widget(Clear, rect);
     let block = Block::default()
@@ -548,6 +558,7 @@ fn render_picker(f: &mut Frame, app: &App<'_>, area: Rect, p: &PickerState) {
         .border_style(Style::default().fg(border));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
+
     let mut lines: Vec<Line> = Vec::new();
     if let Some(sub) = &subtitle {
         lines.push(Line::from(Span::styled(
@@ -556,16 +567,60 @@ fn render_picker(f: &mut Frame, app: &App<'_>, area: Rect, p: &PickerState) {
         )));
         lines.push(Line::from(""));
     }
-    lines.extend(p.items.iter().enumerate().map(|(i, item)| {
-        let mut line = Line::from(format!("  {}", item.label));
-        if i == p.cursor {
-            line = line.style(Style::default().bg(t.sel_bg).fg(t.accent));
+    if let Some(filter) = &p.filter {
+        // A discoverable search line: what's typed, plus a live match count.
+        let (body, body_style) = if filter.is_empty() {
+            (
+                "type to filter".to_string(),
+                Style::default().fg(t.fg_muted),
+            )
+        } else {
+            (filter.clone(), Style::default().fg(t.fg))
+        };
+        let marker = "  filter: ";
+        let count = format!("{}/{} ", vis.len(), p.items.len());
+        let used = marker.chars().count() + body.chars().count() + count.chars().count();
+        let pad = (inner.width as usize).saturating_sub(used).max(1);
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(t.fg_muted)),
+            Span::styled(body, body_style),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(count, Style::default().fg(t.fg_muted)),
+        ]));
+    }
+
+    // Rows available for the list after the header/footer take their share.
+    let list_rows = (inner.height as usize)
+        .saturating_sub(head_lines as usize + foot_lines as usize)
+        .max(1);
+    if vis.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no matches)",
+            Style::default().fg(t.fg_muted),
+        )));
+    } else {
+        // Window the list so the cursor stays on screen even for long lists.
+        let start = p.cursor.saturating_sub(list_rows.saturating_sub(1));
+        let end = (start + list_rows).min(vis.len());
+        for (row, &item_idx) in vis[start..end].iter().enumerate() {
+            let item = &p.items[item_idx];
+            let mut line = Line::from(format!("  {}", item.label));
+            if start + row == p.cursor {
+                line = line.style(Style::default().bg(t.sel_bg).fg(t.accent));
+            }
+            lines.push(line);
         }
-        line
-    }));
+    }
+
     lines.push(Line::from(""));
+    // The filterable hint must fit the 54-col inner width or it clips.
+    let hint = if p.filter.is_some() {
+        " type to filter · ↑↓ move · Enter select · Esc cancel"
+    } else {
+        " ↑↓ select   Enter: confirm   Esc: cancel"
+    };
     lines.push(Line::from(Span::styled(
-        " ↑↓ select   Enter: confirm   Esc: cancel",
+        hint,
         Style::default().fg(t.fg_muted),
     )));
     f.render_widget(Paragraph::new(lines), inner);
