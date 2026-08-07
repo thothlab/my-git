@@ -68,6 +68,13 @@ its own. Move files between lists with `m`; commits are made per list.
 `P` push · `F` fetch · `B` branches · `L` log (→ `v` revert / `x` reset) · `R` rebase ·
 `U` rebase + push a branch · `Ctrl-R` refresh · `?` help · `q` quit.
 
+**Rebase (`R`) with a conflict preflight and Abort.** Before rebasing, mygit
+previews it (commit by commit, in-memory `git merge-tree`) and, if conflicts are
+predicted, warns and asks for confirmation — without it the rebase won't start. If
+the rebase does stop on a conflict, the **Continue / Skip / Abort** picker opens
+right away (`Abort` cancels the rebase and restores the branch). The same picker is
+available via `R` while a rebase is in progress.
+
 ### `U` — rebase a branch onto a base and force-push (like `rebase_and_push.sh`)
 
 Pick the branch and the base (`origin/...`) and the push mode (`--force-with-lease`

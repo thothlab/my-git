@@ -127,6 +127,12 @@ pub enum ConfirmPurpose {
         base: String,
         hard: bool,
     },
+    /// Preflight predicted conflicts (or couldn't check) for a plain rebase of the
+    /// current branch onto `base` — rebase anyway. `prefix` tunes the done message.
+    RebaseOnto {
+        base: String,
+        prefix: String,
+    },
 }
 
 /// Push options + success message for a force-push. `hard` -> plain `--force`
@@ -1788,10 +1794,8 @@ impl<'e> App<'e> {
         self.begin_busy(format!("Updating {target}…"), move |app| {
             match app.engine.update_branch_from_upstream(&target) {
                 Ok(updated) => {
-                    let prefix = if updated { "updated + " } else { "" };
-                    app.begin_busy(format!("Rebasing onto {target}…"), move |app| {
-                        app.run_rebase(&target, prefix)
-                    });
+                    let prefix = if updated { "updated + " } else { "" }.to_string();
+                    app.rebase_onto_preflight(target, prefix);
                 }
                 Err(e) => app.after_failed_rebase(e),
             }
@@ -1803,13 +1807,58 @@ impl<'e> App<'e> {
         let remote_ref = remote_ref.to_string();
         self.begin_busy(format!("Fetching {remote_ref}…"), move |app| {
             match app.engine.fetch_ref(&remote_ref) {
-                Ok(()) => {
-                    app.begin_busy(format!("Rebasing onto {remote_ref}…"), move |app| {
-                        app.run_rebase(&remote_ref, "fetched + ")
-                    });
-                }
+                Ok(()) => app.rebase_onto_preflight(remote_ref, "fetched + ".to_string()),
                 Err(e) => app.after_failed_rebase(e),
             }
+        });
+    }
+
+    /// Preflight a plain rebase of the current branch onto `base` (behind a busy
+    /// frame): run it if conflicts aren't expected, else warn and ask the user to
+    /// confirm before proceeding (GitLab-style — no silent conflicted rebase).
+    fn rebase_onto_preflight(&mut self, base: String, prefix: String) {
+        self.begin_busy("Проверка возможности ребейза…".into(), move |app| {
+            // Read the branch fresh — the user may have just switched in the log.
+            let st = app.engine.branch_state().unwrap_or_default();
+            // A detached HEAD has no branch name to preflight; just rebase.
+            let current = match (st.detached, st.current_branch) {
+                (false, Some(b)) => b,
+                _ => {
+                    app.rebase_onto_run(base, prefix);
+                    return;
+                }
+            };
+            match app.engine.rebase_preflight(&base, &current) {
+                Ok(Preflight::Clean) => app.rebase_onto_run(base, prefix),
+                Ok(Preflight::Conflicts(files)) => {
+                    let n = files.len();
+                    app.overlay = Overlay::Confirm(ConfirmState {
+                        title: "Ребейз с конфликтами".into(),
+                        body: format!(
+                            "Ожидается {n} конфликтующих файл(ов) при ребейзе на {base}. \
+                             Без ручного разрешения ребейз не пройдёт. Продолжить? (y - да)"
+                        ),
+                        purpose: ConfirmPurpose::RebaseOnto { base, prefix },
+                    });
+                }
+                Ok(Preflight::Unknown(err)) => {
+                    app.overlay = Overlay::Confirm(ConfirmState {
+                        title: "Не удалось проверить ребейз".into(),
+                        body: format!(
+                            "Проверка конфликтов не удалась: {err}. Продолжить всё равно? (y - да)"
+                        ),
+                        purpose: ConfirmPurpose::RebaseOnto { base, prefix },
+                    });
+                }
+                Err(e) => app.message = format!("проверка ребейза не удалась: {e}"),
+            }
+        });
+    }
+
+    /// Run the plain rebase behind a busy frame.
+    fn rebase_onto_run(&mut self, base: String, prefix: String) {
+        self.begin_busy(format!("Rebasing onto {base}…"), move |app| {
+            app.run_rebase(&base, &prefix)
         });
     }
 
@@ -1833,15 +1882,19 @@ impl<'e> App<'e> {
         self.pending = Some(Box::new(op));
     }
 
-    /// Shared message handling when a rebase-onto returns an error: a conflict
-    /// leaves the rebase in progress (drive it with R), else surface the reason.
+    /// Shared message handling when a rebase-onto returns an error. A conflict
+    /// leaves the rebase in progress — open the control picker straight away so
+    /// Continue / Skip / **Abort** are one keystroke, not a "press R" the user has
+    /// to already know. Otherwise surface the reason.
     fn after_failed_rebase(&mut self, e: anyhow::Error) {
         self.refresh();
-        self.message = if self.branch.rebase.is_some() {
-            "rebase stopped — resolve, then press R".into()
+        if self.branch.rebase.is_some() {
+            self.open_rebase(); // conflicts + Continue / Skip / Abort
+            self.message =
+                "конфликт при ребейзе - Continue после правок, Skip, или Abort для отмены".into();
         } else {
-            format!("{e} (press g for the git log)")
-        };
+            self.message = format!("{e} (press g for the git log)");
+        }
     }
 
     /// Reword only the HEAD commit in this phase (amend); older commits need an
@@ -2015,6 +2068,7 @@ impl<'e> App<'e> {
             ConfirmPurpose::RebasePush { branch, base, hard } => {
                 self.rebase_push_run(branch, base, hard)
             }
+            ConfirmPurpose::RebaseOnto { base, prefix } => self.rebase_onto_run(base, prefix),
         }
     }
 
@@ -3318,7 +3372,15 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(text.contains("Working"), "busy overlay painted");
-        // Runs to completion (update-target then rebase) and clears busy.
+        // Update + preflight run behind the busy frame; Mock predicts a conflict, so
+        // a Confirm appears before any rebase happens (GitLab-style warning).
+        drain_pending(&mut app);
+        assert!(
+            matches!(app.overlay, Overlay::Confirm(_)),
+            "preflight warns before rebasing"
+        );
+        // Confirm -> the rebase runs to completion and clears busy.
+        app.handle_key(key_char('y'));
         drain_pending(&mut app);
         assert!(app.busy.is_none());
         assert!(
@@ -3418,17 +3480,25 @@ mod tests {
         app.log_fetch_rebase_onto("origin/develop");
         assert!(app.message.is_empty(), "nothing ran yet");
         assert!(app.busy.as_deref().unwrap().contains("Fetching"));
-        // phase 1: fetch -> queues the rebase phase, busy switches label
+        // phase 1: fetch -> queues the preflight phase, busy switches label
         let op = app.pending.take().unwrap();
         op(&mut app);
-        assert!(app.pending.is_some(), "rebase phase queued after the fetch");
-        assert!(app.busy.as_deref().unwrap().contains("Rebasing"));
-        // phase 2: rebase -> done
+        assert!(app.pending.is_some(), "preflight phase queued after the fetch");
+        assert!(app.busy.as_deref().unwrap().contains("Проверка"));
+        // phase 2: preflight (Mock predicts a conflict) -> Confirm, nothing queued
         let op2 = app.pending.take().unwrap();
         op2(&mut app);
         if app.pending.is_none() {
             app.busy = None;
         }
+        assert!(
+            matches!(app.overlay, Overlay::Confirm(_)),
+            "preflight warns before rebasing"
+        );
+        // Confirm -> the rebase phase runs to completion.
+        app.handle_key(key_char('y'));
+        assert!(app.busy.as_deref().unwrap().contains("Rebasing"));
+        drain_pending(&mut app);
         assert!(app.busy.is_none());
         assert!(
             app.message
@@ -3999,21 +4069,81 @@ mod tests {
 
         let mut app = App::new(&engine);
         app.on_action(Action::Rebase);
-        select_picker(&mut app, &base); // conflicts -> rebase stops
-        drain_pending(&mut app); // the rebase runs behind the busy frame
+        select_picker(&mut app, &base);
+        drain_pending(&mut app); // update + preflight -> predicts the conflict up front
+        assert!(
+            matches!(app.overlay, Overlay::Confirm(_)),
+            "preflight warns before a conflicting rebase"
+        );
+        app.handle_key(key_char('y')); // proceed despite the warning
+        drain_pending(&mut app); // rebase runs, conflicts, auto-opens the control picker
         assert!(
             app.branch.rebase.is_some(),
             "conflicting rebase stops in progress"
         );
+        assert!(
+            matches!(app.overlay, Overlay::Picker(_)),
+            "the control picker auto-opens on conflict (Abort is right there)"
+        );
 
-        // Abort via the in-progress control picker.
-        app.on_action(Action::Rebase);
+        // Abort directly from the auto-opened picker.
         select_picker(&mut app, "Abort");
         assert!(app.branch.rebase.is_none(), "abort ends the rebase");
         assert_eq!(
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
             "feature version\n",
             "abort restores the pre-rebase feature state"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rebase_onto_conflict_cancel_does_not_rebase() {
+        // GitLab-style: a predicted-conflict rebase must not run without an explicit
+        // confirmation. Cancelling the warning leaves the tree untouched.
+        use crate::engine::GixEngine;
+        use std::process::Command;
+        let dir = init_repo("rebase-cancel");
+        let run = |a: &[&str]| {
+            assert!(Command::new("git")
+                .current_dir(&dir)
+                .args(a)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        let engine = GixEngine::discover(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), "base\n").unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "base", false)
+            .unwrap();
+        let base = engine.branch_state().unwrap().current_branch.unwrap();
+        run(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.join("f.txt"), "feature\n").unwrap();
+        engine.commit(&["f.txt".to_string()], "feat", false).unwrap();
+        run(&["checkout", "-q", &base]);
+        std::fs::write(dir.join("f.txt"), "base2\n").unwrap();
+        engine.commit(&["f.txt".to_string()], "base2", false).unwrap();
+        run(&["checkout", "-q", "feature"]);
+
+        let mut app = App::new(&engine);
+        app.on_action(Action::Rebase);
+        select_picker(&mut app, &base);
+        drain_pending(&mut app);
+        assert!(
+            matches!(app.overlay, Overlay::Confirm(_)),
+            "conflict predicted -> confirm before rebasing"
+        );
+        // Cancel (any non-'y' key): no rebase starts, tree stays as it was.
+        app.handle_key(key(event::KeyCode::Esc));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.branch.rebase.is_none(), "cancel must not start a rebase");
+        assert!(app.pending.is_none() && app.busy.is_none());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "feature\n",
+            "working tree untouched after cancel"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

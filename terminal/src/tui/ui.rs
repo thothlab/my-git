@@ -446,7 +446,9 @@ fn diff_line(l: &str, t: &Theme) -> Line<'static> {
 
 fn render_footer(f: &mut Frame, app: &App<'_>, area: Rect) {
     let t = &app.theme;
-    let hints = if app.log.is_some() {
+    let hints = if app.branch.rebase.is_some() {
+        "РЕБЕЙЗ В ПРОЦЕССЕ - [R] разрешить: Continue / Skip / Abort  ·  [g]git-log"
+    } else if app.log.is_some() {
         "[space]mark [s]squash [d]drop [C]pick [r]reword [c]checkout [P]push [R]rebase/resolve [b]branch [u]undo [g]git-log [?]help [L/Esc]back"
     } else {
         "[n]new [m]move [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [U]reb+push [S]stash [g]git-log [?]help [q]quit"
