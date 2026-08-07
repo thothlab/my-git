@@ -8,7 +8,7 @@ mod theme;
 mod ui;
 
 use crate::changelists::{store_path, ChangelistStore, UNVERSIONED_ID};
-use crate::engine::{BranchState, FileStatus, GitEngine, PushOpts, ResetMode};
+use crate::engine::{BranchState, FileStatus, GitEngine, Preflight, PushOpts, ResetMode};
 use anyhow::Result;
 use crossterm::event::{self, Event};
 use keymap::{resolve, Action};
@@ -120,6 +120,13 @@ pub enum ConfirmPurpose {
     RollbackFile(String),
     /// Drop the given commit from the current branch's history.
     DropCommit(String),
+    /// Preflight predicted conflicts (or couldn't check) — rebase `branch` onto
+    /// `base` and force-push it anyway (`hard` -> plain `--force`).
+    RebasePush {
+        branch: String,
+        base: String,
+        hard: bool,
+    },
 }
 
 /// Push options + success message for a force-push. `hard` -> plain `--force`
@@ -239,6 +246,13 @@ pub enum PickerPurpose {
         ahead: usize,
         behind: usize,
     },
+    /// Rebase & force-push another branch (the script's `<ветка> <база>` flow):
+    /// step 1, pick the branch to update.
+    RapBranch,
+    /// Step 2: branch chosen (name carried) — pick the base ref to rebase onto.
+    RapBase(String),
+    /// Step 3: branch + base chosen — pick the force-push mode, then preflight.
+    RapForce { branch: String, base: String },
 }
 
 /// A rendered row in the Changes panel: a changelist header or a file under it.
@@ -251,6 +265,17 @@ pub enum Row {
         path: String,
         status: FileStatus,
     },
+}
+
+/// What an in-flight rebase-&-push (key `U`) needs to roll back cleanly if its
+/// rebase stops on conflicts: the branch we came from and the stash we made. Held
+/// only while such a rebase is paused; a bounded undo target, not a resume plan —
+/// Continue/Skip hand off to the user, only Abort consumes this.
+#[derive(Clone)]
+struct RapContext {
+    original: String,
+    branch: String,
+    stash: Option<String>,
 }
 
 pub struct App<'e> {
@@ -289,6 +314,10 @@ pub struct App<'e> {
     pending: Option<PendingOp<'e>>,
     /// Label shown in the busy overlay while `pending` runs; `None` when idle.
     busy: Option<String>,
+
+    /// Set while a rebase-&-push (`U`) rebase is paused on conflicts, so Abort can
+    /// roll the whole operation back (see [`RapContext`]).
+    rap: Option<RapContext>,
 }
 
 /// A deferred, blocking git op run by the event loop after the busy frame paints.
@@ -332,6 +361,7 @@ impl<'e> App<'e> {
             quit: false,
             pending: None,
             busy: None,
+            rap: None,
         };
         app.refresh();
         app
@@ -603,6 +633,7 @@ impl<'e> App<'e> {
             Fetch => self.begin_busy("Fetching…".into(), |app| app.fetch_action()),
             Branches => self.open_branches(),
             Rebase => self.open_rebase(),
+            RebasePush => self.open_rebase_push(),
             Stashes => self.open_stashes(),
             Commands => self.open_commands(),
             Confirm | Cancel => {} // only meaningful inside overlays
@@ -1028,6 +1059,9 @@ impl<'e> App<'e> {
                 filter: None,
             });
         } else {
+            // No rebase in progress -> any rebase-&-push rollback target is stale
+            // (e.g. the user resolved/aborted outside mygit). Drop it.
+            self.rap = None;
             let cur = self.branch.current_branch.clone().unwrap_or_default();
             let items: Vec<PickerItem> = self
                 .engine
@@ -1056,22 +1090,340 @@ impl<'e> App<'e> {
 
     fn after_rebase_step(&mut self, result: Result<()>, ok: &str) {
         self.refresh();
+        let in_progress = self.branch.rebase.is_some();
+        // A finished rebase invalidates any rebase-&-push rollback target (Abort has
+        // nothing left to undo). Take it so a stale ctx can't offer a broken rollback.
+        let rap = if in_progress { None } else { self.rap.take() };
         match result {
             Ok(()) => {
-                self.message = if self.branch.rebase.is_some() {
+                self.message = if in_progress {
                     "still in progress — resolve conflicts, then Continue".into()
+                } else if let Some(ctx) = rap {
+                    // A U-flow rebase the user finished by hand: it still owes the
+                    // push + return the flow would have done. Name them (we don't
+                    // auto-resume across a manual conflict resolution).
+                    format!(
+                        "ребейз {b} завершён — сделай push {b} и вернись на {o} сам{note}",
+                        b = ctx.branch,
+                        o = ctx.original,
+                        note = stash_note(&ctx.stash)
+                    )
                 } else {
                     format!("rebase {ok}")
                 };
             }
             Err(e) => {
-                self.message = if self.branch.rebase.is_some() {
+                self.message = if in_progress {
                     "rebase step failed — unresolved conflicts remain".into()
                 } else {
                     format!("{e} (press g for the git log)")
                 };
             }
         }
+    }
+
+    // ----- rebase & force-push a branch (the rebase_and_push.sh flow) ----------
+
+    /// Entry point (key `U`): rebase a chosen branch onto a chosen base and
+    /// force-push it, returning to the current branch afterwards — a preflight
+    /// merge-tree check first predicts conflicts. Step 1 picks the branch.
+    fn open_rebase_push(&mut self) {
+        if self.branch.detached || self.branch.current_branch.is_none() {
+            self.message = "detached HEAD — нельзя ребейзить и пушить ветку".into();
+            return;
+        }
+        // A half-finished rebase/cherry-pick/revert plus a fresh multi-phase op is
+        // the worst failure mode here; refuse until the sequencer is clear.
+        if self.engine.op_in_progress().is_some() {
+            self.message = "сначала заверши текущую операцию (R), потом U".into();
+            return;
+        }
+        let locals = self.engine.branches().unwrap_or_default();
+        let remotes = self.engine.remote_branches().unwrap_or_default();
+        let mut items: Vec<PickerItem> = locals
+            .iter()
+            .map(|b| PickerItem {
+                label: b.clone(),
+                id: b.clone(),
+            })
+            .collect();
+        // Remote-only branches on `origin`: offer them (checkout_or_track will
+        // create a local tracking branch). Only origin — checkout_or_track and the
+        // force-push both hardcode origin, so a non-origin remote can't be handled.
+        for r in &remotes {
+            if let Some(name) = r.strip_prefix("origin/") {
+                if !locals.iter().any(|l| l == name) {
+                    items.push(PickerItem {
+                        label: format!("{r}  (создать локально)"),
+                        id: name.to_string(),
+                    });
+                }
+            }
+        }
+        if items.is_empty() {
+            self.message = "нет веток для ребейза".into();
+            return;
+        }
+        self.overlay = Overlay::Picker(PickerState {
+            title: "Rebase & push — ветку".into(),
+            items,
+            cursor: 0,
+            purpose: PickerPurpose::RapBranch,
+            filter: Some(String::new()),
+        });
+    }
+
+    /// Step 2: the branch is chosen; pick the base (a remote ref like
+    /// `origin/develop`) to rebase onto.
+    fn open_rebase_push_base(&mut self, branch: String) {
+        let items: Vec<PickerItem> = self
+            .engine
+            .remote_branches()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| PickerItem {
+                label: r.clone(),
+                id: r,
+            })
+            .collect();
+        if items.is_empty() {
+            self.message = "нет удалённых веток для базы (нужен origin)".into();
+            return;
+        }
+        self.overlay = Overlay::Picker(PickerState {
+            title: format!("Rebase & push {branch} — на базу…"),
+            items,
+            cursor: 0,
+            purpose: PickerPurpose::RapBase(branch),
+            filter: Some(String::new()),
+        });
+    }
+
+    /// Step 3: branch + base chosen; pick the force-push mode (default `lease`).
+    fn open_rebase_push_force(&mut self, branch: String, base: String) {
+        self.overlay = Overlay::Picker(PickerState {
+            title: format!("{branch} → {base} — режим push"),
+            items: vec![
+                PickerItem {
+                    label: "--force-with-lease  (safe)".into(),
+                    id: "lease".into(),
+                },
+                PickerItem {
+                    label: "--force  (overwrite)".into(),
+                    id: "force".into(),
+                },
+            ],
+            cursor: 0,
+            purpose: PickerPurpose::RapForce { branch, base },
+            filter: None,
+        });
+    }
+
+    /// Fetch, then preflight the rebase (all behind one busy frame). A clean
+    /// prediction runs straight through; a conflict/unknown prediction asks the
+    /// user whether to proceed anyway (the script never asked — this is the point
+    /// of the feature).
+    fn rebase_push_preflight(&mut self, branch: String, base: String, hard: bool) {
+        self.begin_busy("Проверка возможности ребейза…".into(), move |app| {
+            if let Err(e) = app.engine.fetch() {
+                app.message = format!("fetch не удался: {e}");
+                return;
+            }
+            match app.engine.rebase_preflight(&base, &branch) {
+                Ok(Preflight::Clean) => app.rebase_push_run(branch, base, hard),
+                Ok(Preflight::Conflicts(files)) => {
+                    let n = files.len();
+                    app.overlay = Overlay::Confirm(ConfirmState {
+                        title: "Ребейз с конфликтами".into(),
+                        body: format!(
+                            "Ожидается {n} конфликтующих файл(ов) при ребейзе {branch} на {base}. \
+                             Без ручного разрешения ребейз не пройдёт. Продолжить? (y — да)"
+                        ),
+                        purpose: ConfirmPurpose::RebasePush { branch, base, hard },
+                    });
+                }
+                Ok(Preflight::Unknown(err)) => {
+                    app.overlay = Overlay::Confirm(ConfirmState {
+                        title: "Не удалось проверить ребейз".into(),
+                        body: format!(
+                            "Проверка конфликтов не удалась: {err}. Продолжить всё равно? (y — да)"
+                        ),
+                        purpose: ConfirmPurpose::RebasePush { branch, base, hard },
+                    });
+                }
+                Err(e) => app.message = format!("проверка ребейза не удалась: {e}"),
+            }
+        });
+    }
+
+    /// Run the whole rebase-and-push sequence behind a busy frame.
+    fn rebase_push_run(&mut self, branch: String, base: String, hard: bool) {
+        self.begin_busy(format!("Ребейз {branch} на {base} и push…"), move |app| {
+            app.do_rebase_and_push(&branch, &base, hard)
+        });
+    }
+
+    /// The sequence itself (script `rebase_and_push.sh`): [stash] -> checkout
+    /// `branch` -> rebase onto `base` -> force-push -> checkout back -> [stash pop].
+    /// On any failure it STOPS and leaves a message stating exactly where the repo
+    /// now is and what the user must finish by hand — matching the script's
+    /// `on_error` posture (we do not auto-resume across a conflict).
+    fn do_rebase_and_push(&mut self, branch: &str, base: &str, hard: bool) {
+        let st = self.engine.branch_state().unwrap_or_default();
+        let Some(original) = st.current_branch.clone().filter(|_| !st.detached) else {
+            self.message = "detached HEAD — прервано".into();
+            return;
+        };
+        let (opts, push_ok) = force_push_opts(hard);
+
+        // Rebasing the branch we're already on: no checkout/stash/return dance —
+        // rebase_onto auto-stashes, then force-push. (Avoids stash+checkout-to-self.)
+        if original == branch {
+            match self.engine.rebase_onto(base) {
+                Ok(()) => match self.engine.push(branch, &opts) {
+                    Ok(()) => {
+                        self.refresh();
+                        self.message = format!("{branch}: ребейз на {base} + {push_ok}");
+                    }
+                    Err(e) => {
+                        self.refresh();
+                        self.message = format!("{branch} поребейзена, но push не удался: {e}");
+                    }
+                },
+                Err(e) => self.after_failed_rebase(e),
+            }
+            return;
+        }
+
+        // Different branch: stash any dirt (incl. untracked), then switch to it.
+        let dirty = self.engine.status().map(|s| !s.is_empty()).unwrap_or(false);
+        let mut stash: Option<String> = None;
+        if dirty {
+            let msg = format!("mygit rebase-push: autostash before rebasing {branch} onto {base}");
+            if let Err(e) = self.engine.stash_push(&msg) {
+                self.refresh();
+                self.message = format!("не удалось застешить изменения: {e} — прервано на {original}");
+                return;
+            }
+            // Capture the created stash selector so we pop exactly this one later.
+            stash = self
+                .engine
+                .stash_list()
+                .ok()
+                .and_then(|l| l.first().map(|(s, _)| s.clone()));
+        }
+
+        // checkout the target branch (creating a tracking branch if remote-only).
+        if let Err(e) = self.engine.checkout_or_track(branch) {
+            // We didn't move — still on `original`. Restore the stash we made.
+            if let Some(sel) = &stash {
+                let _ = self.engine.stash_pop(sel);
+            }
+            self.refresh();
+            self.message = format!("не удалось переключиться на {branch}: {e} — остались на {original}");
+            return;
+        }
+
+        // rebase onto the (freshly fetched) base ref.
+        if let Err(e) = self.engine.rebase_onto(base) {
+            self.refresh();
+            if self.engine.op_in_progress().is_some() {
+                // Conflict: the rebase is paused on `branch`. Remember where we came
+                // from so Abort can roll the whole U operation back (return to the
+                // original branch + restore the stash), and open the control picker
+                // right away so Continue / Skip / Abort are one keystroke away.
+                self.rap = Some(RapContext {
+                    original: original.clone(),
+                    branch: branch.to_string(),
+                    stash: stash.clone(),
+                });
+                self.open_rebase();
+                self.message = format!(
+                    "конфликт при ребейзе {branch} — Continue после правок, или Abort для отката на {original}{}",
+                    stash_note(&stash)
+                );
+            } else {
+                self.message = format!("ребейз не удался: {e} — ты на {branch}{}", stash_note(&stash));
+            }
+            return;
+        }
+
+        // force-push the rebased branch (NOT the current one).
+        if let Err(e) = self.engine.push(branch, &opts) {
+            // Rebase landed but push failed — go back and restore, then report.
+            let back = self.engine.checkout_branch(&original);
+            if back.is_ok() {
+                if let Some(sel) = &stash {
+                    let _ = self.engine.stash_pop(sel);
+                }
+            }
+            self.refresh();
+            self.message = match back {
+                Ok(()) => format!("{branch} поребейзена, но push не удался: {e} — вернулись на {original}"),
+                Err(_) => format!("{branch} поребейзена, push не удался: {e} — ты на {branch}{}", stash_note(&stash)),
+            };
+            return;
+        }
+
+        // return to the original branch.
+        if let Err(e) = self.engine.checkout_branch(&original) {
+            self.refresh();
+            self.message = format!(
+                "{branch} поребейзена и {push_ok}, но возврат на {original} не удался: {e}{}",
+                stash_note(&stash)
+            );
+            return;
+        }
+
+        // restore the stash we made (exactly the one we captured).
+        let mut done = format!("готово: {branch} → {base}, {push_ok}, вернулись на {original}");
+        if let Some(sel) = &stash {
+            if let Err(e) = self.engine.stash_pop(sel) {
+                done = format!(
+                    "{branch} поребейзена и {push_ok}, вернулись на {original}, но stash pop не удался: {e} (stash {sel})"
+                );
+            }
+        }
+        self.refresh();
+        self.message = done;
+    }
+
+    /// Roll back a rebase-&-push whose rebase stopped on conflicts: abort the
+    /// rebase (restoring `branch` to its pre-rebase tip), return to the branch we
+    /// came from, and restore the stash we made — undoing the whole `U` operation.
+    fn do_rap_abort(&mut self, ctx: RapContext) {
+        if let Err(e) = self.engine.rebase_abort() {
+            self.refresh();
+            self.message = format!(
+                "не удалось отменить ребейз: {e} — ты на {}{}",
+                ctx.branch,
+                stash_note(&ctx.stash)
+            );
+            return;
+        }
+        // Abort restored `branch`; now switch back to where we started.
+        if let Err(e) = self.engine.checkout_branch(&ctx.original) {
+            self.refresh();
+            self.message = format!(
+                "ребейз отменён, но возврат на {} не удался: {e} — ты на {}{}",
+                ctx.original,
+                ctx.branch,
+                stash_note(&ctx.stash)
+            );
+            return;
+        }
+        // Back on the original branch — restore the exact stash we made, if any.
+        let mut done = format!("ребейз отменён, вернулись на {}", ctx.original);
+        if let Some(sel) = &ctx.stash {
+            if let Err(e) = self.engine.stash_pop(sel) {
+                done = format!(
+                    "ребейз отменён, вернулись на {}, но stash pop не удался: {e} ({sel})",
+                    ctx.original
+                );
+            }
+        }
+        self.refresh();
+        self.message = done;
     }
 
     // ----- branches (Task 08) --------------------------------------------------
@@ -1660,6 +2012,9 @@ impl<'e> App<'e> {
                 }
                 Err(e) => self.message = e.to_string(),
             },
+            ConfirmPurpose::RebasePush { branch, base, hard } => {
+                self.rebase_push_run(branch, base, hard)
+            }
         }
     }
 
@@ -2142,8 +2497,18 @@ impl<'e> App<'e> {
                     self.after_rebase_step(r, "skipped");
                 }
                 "abort" => {
-                    let r = self.engine.rebase_abort();
-                    self.after_rebase_step(r, "aborted");
+                    // Inside a rebase-&-push? A plain `rebase --abort` would strand
+                    // the user on the target branch with the stash still held —
+                    // roll the whole U operation back instead.
+                    if let Some(ctx) = self.rap.take() {
+                        self.begin_busy(
+                            format!("Отмена ребейза, возврат на {}…", ctx.original),
+                            move |app| app.do_rap_abort(ctx),
+                        );
+                    } else {
+                        let r = self.engine.rebase_abort();
+                        self.after_rebase_step(r, "aborted");
+                    }
                 }
                 _ => self.message = "resolve conflicts in your editor, then Continue".into(),
             },
@@ -2181,6 +2546,11 @@ impl<'e> App<'e> {
                 _ => {} // cancel
             },
             PickerPurpose::ForcePush { branch, .. } => self.force_push(branch, id == "force"),
+            PickerPurpose::RapBranch => self.open_rebase_push_base(id),
+            PickerPurpose::RapBase(branch) => self.open_rebase_push_force(branch, id),
+            PickerPurpose::RapForce { branch, base } => {
+                self.rebase_push_preflight(branch, base, id == "force")
+            }
         }
     }
 
@@ -2218,6 +2588,15 @@ impl<'e> App<'e> {
 /// The short (≤8 char) form of a commit hash, for labels.
 fn short_hash(hash: &str) -> &str {
     &hash[..hash.len().min(8)]
+}
+
+/// A parenthetical " (изменения в stash …)" note, or empty when nothing was
+/// stashed. Used by the rebase-&-push messages so a held stash is never silent.
+fn stash_note(stash: &Option<String>) -> String {
+    match stash {
+        Some(sel) => format!(" (изменения в stash {sel})"),
+        None => String::new(),
+    }
 }
 
 /// Context-menu / palette items for a branch. `target` is the checkout name
@@ -2414,6 +2793,11 @@ mod tests {
         }
         fn rebase_onto(&self, _: &str) -> Result<()> {
             Ok(())
+        }
+        // Predict a conflict so the rebase-&-push flow exercises its warn/confirm
+        // branch (the point of the feature). Only the rebase-push tests call this.
+        fn rebase_preflight(&self, _: &str, _: &str) -> Result<Preflight> {
+            Ok(Preflight::Conflicts(vec!["f.txt".into()]))
         }
         fn fetch_ref(&self, _: &str) -> Result<()> {
             Ok(())
@@ -2942,6 +3326,55 @@ mod tests {
             "msg: {}",
             app.message
         );
+    }
+
+    #[test]
+    fn rebase_push_conflict_predicted_opens_confirm_then_runs() {
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-rap-confirm"),
+        };
+        let mut app = App::new(&mock);
+        // Fetch + preflight run behind a busy frame; the preflight predicts a
+        // conflict, so the flow must ASK before touching anything.
+        app.rebase_push_preflight("feature".into(), "origin/develop".into(), false);
+        assert!(app.pending.is_some(), "preflight queued behind a busy frame");
+        drain_pending(&mut app);
+        // A conflict prediction opens a Confirm — it does NOT auto-run the rebase.
+        match &app.overlay {
+            Overlay::Confirm(c) => {
+                assert!(matches!(c.purpose, ConfirmPurpose::RebasePush { .. }));
+                assert!(c.title.contains("конфликт"), "title: {}", c.title);
+            }
+            _ => panic!("expected a Confirm after a predicted conflict"),
+        }
+        assert!(app.pending.is_none(), "nothing queued while awaiting confirm");
+        assert!(app.busy.is_none());
+        // 'y' proceeds: the full rebase+push sequence queues, then runs to done.
+        app.handle_key(key_char('y'));
+        assert!(app.pending.is_some(), "confirm queues the run");
+        assert!(app.busy.as_deref().unwrap().contains("Ребейз"));
+        drain_pending(&mut app);
+        assert!(
+            app.message.contains("готово") && app.message.contains("feature"),
+            "msg: {}",
+            app.message
+        );
+    }
+
+    #[test]
+    fn rebase_push_conflict_cancel_is_inert() {
+        let mock = Mock {
+            root: std::env::temp_dir().join("mygit-rap-cancel"),
+        };
+        let mut app = App::new(&mock);
+        app.rebase_push_preflight("feature".into(), "origin/develop".into(), false);
+        drain_pending(&mut app);
+        assert!(matches!(app.overlay, Overlay::Confirm(_)));
+        // Default-cancel: any non-'y' key closes the confirm and queues NOTHING.
+        app.handle_key(key(event::KeyCode::Esc));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.pending.is_none(), "cancel must not queue an op");
+        assert!(app.busy.is_none());
     }
 
     #[test]
@@ -3582,6 +4015,78 @@ mod tests {
             "feature version\n",
             "abort restores the pre-rebase feature state"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rebase_push_conflict_then_abort_rolls_back() {
+        // A rebase-&-push whose rebase conflicts must be fully undoable: Abort
+        // restores the target branch, returns to the original branch, and pops the
+        // stash it made — not a bare `rebase --abort` that strands the user.
+        use crate::engine::GixEngine;
+        use std::process::Command;
+        let dir = init_repo("rap-abort");
+        let run = |a: &[&str]| {
+            assert!(Command::new("git")
+                .current_dir(&dir)
+                .args(a)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        let engine = GixEngine::discover(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), "base\n").unwrap();
+        std::fs::write(dir.join("y.txt"), "y0\n").unwrap();
+        engine
+            .commit(
+                &["f.txt".to_string(), "y.txt".to_string()],
+                "base",
+                false,
+            )
+            .unwrap();
+        let main = engine.branch_state().unwrap().current_branch.unwrap();
+        // develop and feature change f.txt divergently -> the rebase conflicts.
+        run(&["checkout", "-q", "-b", "develop"]);
+        std::fs::write(dir.join("f.txt"), "develop version\n").unwrap();
+        engine.commit(&["f.txt".to_string()], "dev", false).unwrap();
+        run(&["checkout", "-q", &main]);
+        run(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.join("f.txt"), "feature version\n").unwrap();
+        engine.commit(&["f.txt".to_string()], "feat", false).unwrap();
+        // Back on the original branch with a dirty tracked file, so the flow stashes.
+        run(&["checkout", "-q", &main]);
+        std::fs::write(dir.join("y.txt"), "y-DIRTY\n").unwrap();
+
+        let mut app = App::new(&engine);
+        // Execute the rebase-&-push step directly (a local base ref — the conflict
+        // stops before push, so no remote is needed). Stash -> checkout feature ->
+        // rebase onto develop -> CONFLICT -> paused with a rollback target.
+        app.do_rebase_and_push("feature", "develop", false);
+        assert!(app.branch.rebase.is_some(), "conflict pauses the rebase");
+        assert!(app.rap.is_some(), "rollback context captured");
+        assert!(
+            matches!(app.overlay, Overlay::Picker(_)),
+            "control picker opened"
+        );
+        // (HEAD is detached mid-rebase — the branch identity lives in RapContext.)
+
+        // Abort via the control picker -> full rollback (behind a busy frame).
+        select_picker(&mut app, "Abort");
+        drain_pending(&mut app);
+        assert!(app.branch.rebase.is_none(), "abort ends the rebase");
+        assert!(app.rap.is_none(), "rollback context cleared");
+        assert_eq!(
+            app.branch.current_branch.as_deref(),
+            Some(main.as_str()),
+            "rolled back to the original branch"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("y.txt")).unwrap(),
+            "y-DIRTY\n",
+            "the stash made for the switch is restored on rollback"
+        );
+        assert!(app.message.contains("отменён"), "msg: {}", app.message);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

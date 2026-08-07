@@ -449,7 +449,7 @@ fn render_footer(f: &mut Frame, app: &App<'_>, area: Rect) {
     let hints = if app.log.is_some() {
         "[space]mark [s]squash [d]drop [C]pick [r]reword [c]checkout [P]push [R]rebase/resolve [b]branch [u]undo [g]git-log [?]help [L/Esc]back"
     } else {
-        "[n]new [m]move [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [S]stash [g]git-log [?]help [q]quit"
+        "[n]new [m]move [space]mark [c]commit [u]rollback [P]push [L]log [R]rebase [U]reb+push [S]stash [g]git-log [?]help [q]quit"
     };
     let line = if app.message.is_empty() {
         Line::from(Span::styled(hints, Style::default().fg(t.fg_muted)))

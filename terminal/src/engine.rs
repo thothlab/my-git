@@ -103,6 +103,21 @@ pub struct BranchState {
     pub detached: bool,
 }
 
+/// The prediction from a rebase preflight — an in-memory `git merge-tree` replay of
+/// the branch's commits onto the base that touches nothing (no HEAD / index /
+/// working tree). `Clean` is a prediction, not a promise: the replay models git's
+/// rebase closely (it replays each commit, so it catches mid-rebase conflicts a
+/// single merge would miss) but not perfectly (merge strategy, rename detection).
+/// `Unknown` means the merge could not even be computed (bad ref, unrelated
+/// histories) — deliberately distinct from `Conflicts` so the UI never presents
+/// "couldn't check" as "will conflict".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Preflight {
+    Clean,
+    Conflicts(Vec<String>),
+    Unknown(String),
+}
+
 /// The operation surface from the PRD "API list". Callers depend on observable
 /// behaviour, not on which backend services a call.
 pub trait GitEngine {
@@ -162,6 +177,21 @@ pub trait GitEngine {
     /// Rebase the current branch onto `target`, auto-stashing any local (tracked)
     /// changes first and restoring them after (so a dirty tree doesn't block it).
     fn rebase_onto(&self, target: &str) -> Result<()>;
+    /// Predict whether rebasing `branch` onto `base` would conflict, WITHOUT
+    /// touching HEAD / the index / the working tree (a `git merge-tree` dry-run).
+    /// `base` is a full ref (e.g. `origin/develop`); `branch` is a branch name and
+    /// is resolved to its local tip, or `origin/<branch>` when no local branch of
+    /// that name exists (matching what `checkout_or_track` would rebase). See
+    /// [`Preflight`] for the accuracy caveat. Default (for mock engines): `Clean`.
+    fn rebase_preflight(&self, _base: &str, _branch: &str) -> Result<Preflight> {
+        Ok(Preflight::Clean)
+    }
+    /// Checkout `branch`; when no local branch of that name exists, create a local
+    /// tracking branch from `origin/<branch>` (the script's `checkout -t` path).
+    /// Default (for mock engines): a plain checkout.
+    fn checkout_or_track(&self, branch: &str) -> Result<()> {
+        self.checkout_branch(branch)
+    }
     /// Fetch the remote branch behind a remote-tracking ref (e.g. `origin/develop`
     /// → `git fetch origin develop`), updating the tracking ref. Split out so the
     /// UI can show a "fetching" frame before the "rebasing" one.
@@ -347,6 +377,13 @@ impl GixEngine {
             .map(str::to_string)
             .collect();
         Ok((base, commits))
+    }
+
+    /// Whether a local branch `refs/heads/<branch>` exists.
+    fn local_branch_exists(&self, branch: &str) -> bool {
+        self.git(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 
     fn detect_rebase(&self) -> Option<RebaseState> {
@@ -774,6 +811,101 @@ impl GitEngine for GixEngine {
         // them afterwards, so a dirty working tree doesn't block the rebase
         // (matches the JetBrains "rebase with uncommitted changes" behaviour).
         self.git_check(&["rebase", "--autostash", target])?;
+        Ok(())
+    }
+
+    fn rebase_preflight(&self, base: &str, branch: &str) -> Result<Preflight> {
+        // Rebase the same tip `checkout_or_track` would: the local branch if it
+        // exists, else its remote-tracking counterpart.
+        let branch_ref = if self.local_branch_exists(branch) {
+            branch.to_string()
+        } else {
+            format!("origin/{branch}")
+        };
+        // The merge-base anchors what `git rebase <base>` replays; failing to find
+        // one (bad ref, unrelated histories) is "couldn't check", never "conflict".
+        let mb = self.git(&["merge-base", base, &branch_ref])?;
+        if !mb.status.success() {
+            return Ok(Preflight::Unknown(
+                String::from_utf8_lossy(&mb.stderr).trim().to_string(),
+            ));
+        }
+        let mb = String::from_utf8_lossy(&mb.stdout).trim().to_string();
+        // The commits a rebase would replay, oldest-first (commits already in `base`
+        // are excluded, exactly as `git rebase` drops them).
+        let list = self.git(&["rev-list", "--reverse", &format!("{mb}..{branch_ref}")])?;
+        if !list.status.success() {
+            return Ok(Preflight::Unknown(
+                String::from_utf8_lossy(&list.stderr).trim().to_string(),
+            ));
+        }
+        let commits: Vec<String> = String::from_utf8_lossy(&list.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        if commits.is_empty() {
+            return Ok(Preflight::Clean); // nothing to replay
+        }
+        // Model the rebase honestly: replay each commit as an in-memory 3-way merge
+        // (`merge-tree --write-tree` with the commit's own parent as the merge base),
+        // threading the resulting tree forward as the next "ours". A single
+        // merge-tree at the branch's merge-base would miss conflicts that only a
+        // per-commit replay hits — a multi-commit branch can stop mid-rebase even
+        // when its *net* diff merges cleanly (verified: A->B->C onto A->C conflicts
+        // on the first replayed commit). Still an approximation of git's rebase
+        // (merge strategy, rename detection), so `Clean` predicts, never promises.
+        // Touches nothing on disk / HEAD / the index.
+        let mut ours = format!("{base}^{{tree}}");
+        for c in &commits {
+            let merge_base = format!("--merge-base={c}^");
+            let out = self.git(&[
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                &merge_base,
+                &ours,
+                c,
+            ])?;
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut lines = stdout.lines();
+            let first = lines.next().unwrap_or("").trim().to_string();
+            // A real merge (clean OR conflicting) prints the result tree OID first;
+            // a failure to compute one prints none (reason on stderr).
+            let is_oid = first.len() >= 40 && first.chars().all(|ch| ch.is_ascii_hexdigit());
+            if out.status.success() {
+                if is_oid {
+                    ours = first; // clean step — carry the new tree forward
+                }
+            } else if is_oid {
+                // Conflict at this commit — the rebase would stop here. The lines
+                // between the tree OID and the blank line are the conflicted paths.
+                let files: Vec<String> = lines
+                    .take_while(|l| !l.trim().is_empty())
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                return Ok(Preflight::Conflicts(files));
+            } else {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let msg = if err.trim().is_empty() {
+                    stdout.trim().to_string()
+                } else {
+                    err.trim().to_string()
+                };
+                return Ok(Preflight::Unknown(msg));
+            }
+        }
+        Ok(Preflight::Clean)
+    }
+
+    fn checkout_or_track(&self, branch: &str) -> Result<()> {
+        if self.local_branch_exists(branch) {
+            self.git_check(&["checkout", branch])?;
+        } else {
+            self.git_check(&["checkout", "-t", &format!("origin/{branch}")])?;
+        }
         Ok(())
     }
 
@@ -1389,6 +1521,111 @@ mod tests {
             "autostash restored the dirty change"
         );
         assert!(engine.status().unwrap().iter().any(|f| f.path == "a.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rebase_preflight_predicts_conflicts() {
+        let dir = init_repo();
+        let engine = GixEngine::discover(&dir).unwrap();
+        let run = |a: &[&str]| {
+            assert!(Command::new("git")
+                .current_dir(&dir)
+                .args(a)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        std::fs::write(dir.join("f.txt"), "base\n").unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "base", false)
+            .unwrap();
+        let main = engine.branch_state().unwrap().current_branch.unwrap();
+        // A "base" branch changes f.txt's only line.
+        run(&["checkout", "-q", "-b", "base"]);
+        std::fs::write(dir.join("f.txt"), "BASE-SIDE\n").unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "base-change", false)
+            .unwrap();
+        // A "feature" branch changes the same line divergently.
+        run(&["checkout", "-q", &main]);
+        run(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.join("f.txt"), "FEATURE-SIDE\n").unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "feat-change", false)
+            .unwrap();
+
+        // Rebasing feature onto base is predicted to conflict on f.txt — without
+        // touching HEAD or the working tree (still on feature, still clean).
+        match engine.rebase_preflight("base", "feature").unwrap() {
+            Preflight::Conflicts(files) => assert!(files.iter().any(|f| f == "f.txt")),
+            other => panic!("expected conflicts, got {other:?}"),
+        }
+        assert_eq!(
+            engine.branch_state().unwrap().current_branch.as_deref(),
+            Some("feature"),
+            "preflight must not switch branches"
+        );
+        assert!(
+            engine.status().unwrap().is_empty(),
+            "preflight must not dirty the tree"
+        );
+
+        // An independent change is predicted clean.
+        run(&["checkout", "-q", &main]);
+        run(&["checkout", "-q", "-b", "indep"]);
+        std::fs::write(dir.join("g.txt"), "g\n").unwrap();
+        engine.commit(&["g.txt".to_string()], "g", false).unwrap();
+        assert_eq!(
+            engine.rebase_preflight("base", "indep").unwrap(),
+            Preflight::Clean
+        );
+
+        // A base ref that can't be resolved is "couldn't check" — never Conflicts.
+        assert!(matches!(
+            engine.rebase_preflight("no-such-ref-xyz", "feature").unwrap(),
+            Preflight::Unknown(_)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rebase_preflight_models_per_commit_replay() {
+        // The net diff merges cleanly, but a rebase replays each commit and stops on
+        // the first — the preflight must model the replay, not one merge-base merge.
+        let dir = init_repo();
+        let engine = GixEngine::discover(&dir).unwrap();
+        let run = |a: &[&str]| {
+            assert!(Command::new("git")
+                .current_dir(&dir)
+                .args(a)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        std::fs::write(dir.join("x.txt"), "A\n").unwrap();
+        engine.commit(&["x.txt".to_string()], "base", false).unwrap();
+        let main = engine.branch_state().unwrap().current_branch.unwrap();
+        // develop: A -> C
+        run(&["checkout", "-q", "-b", "develop"]);
+        std::fs::write(dir.join("x.txt"), "C\n").unwrap();
+        engine
+            .commit(&["x.txt".to_string()], "dev-to-C", false)
+            .unwrap();
+        // feature: A -> B -> C (net C == develop, but the first replayed commit
+        // A->B conflicts against develop's C).
+        run(&["checkout", "-q", &main]);
+        run(&["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.join("x.txt"), "B\n").unwrap();
+        engine.commit(&["x.txt".to_string()], "feat1", false).unwrap();
+        std::fs::write(dir.join("x.txt"), "C\n").unwrap();
+        engine.commit(&["x.txt".to_string()], "feat2", false).unwrap();
+        match engine.rebase_preflight("develop", "feature").unwrap() {
+            Preflight::Conflicts(files) => assert!(files.iter().any(|f| f == "x.txt")),
+            other => panic!("per-commit replay should predict a conflict, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

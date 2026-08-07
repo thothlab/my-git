@@ -8,7 +8,8 @@ can be held as "not for commit".
 
 - **[`terminal/`](terminal/)** — the TUI (Rust + [ratatui](https://ratatui.rs)).
   Status: **MVP** — all acceptance criteria met (grouped changes, changelists, commit-by-list,
-  revert/reset, push/rebase). Lightweight: ~1 MB binary, single-digit-MB RAM, instant start.
+  revert/reset, push/rebase, rebase + force-push a branch with a conflict preflight).
+  Lightweight: ~1 MB binary, single-digit-MB RAM, instant start.
 - **`gui/`** — desktop GUI (planned). Will share the changelist format with the TUI.
 
 Both tools operate on one repository and share the same
@@ -65,7 +66,18 @@ its own. Move files between lists with `m`; commits are made per list.
 `j/k` navigate · `Tab` switch panel · `space` mark · `n/r/d` new/rename/delete list ·
 `m` move files · `c` commit · `A` amend · `u` rollback file ·
 `P` push · `F` fetch · `B` branches · `L` log (→ `v` revert / `x` reset) · `R` rebase ·
-`Ctrl-R` refresh · `?` help · `q` quit.
+`U` rebase + push a branch · `Ctrl-R` refresh · `?` help · `q` quit.
+
+### `U` — rebase a branch onto a base and force-push (like `rebase_and_push.sh`)
+
+Pick the branch and the base (`origin/...`) and the push mode (`--force-with-lease`
+by default, or `--force`). Then mygit: `fetch` → **previews the rebase** (commit by
+commit, in-memory `git merge-tree` — touches nothing) and, if conflicts are
+predicted, warns and asks whether to continue → stashes uncommitted changes →
+switches to the branch → rebases onto the base → force-pushes → switches back →
+restores the stash. If the rebase still stops on a conflict, **Continue** after
+resolving by hand, or **Abort**, which rolls the whole operation back (returns to
+the original branch and restores the stash).
 
 ## Docs
 
