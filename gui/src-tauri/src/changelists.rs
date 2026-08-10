@@ -365,13 +365,6 @@ pub fn list_paths(store: &Store, id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn remove_paths(store: &mut Store, paths: &[String]) {
-    let set: HashSet<&str> = paths.iter().map(|s| s.as_str()).collect();
-    for cl in &mut store.changelists {
-        cl.files.retain(|p| !set.contains(p.as_str()));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -41,3 +41,16 @@ body {
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: rgb(var(--fg-muted) / 0.35); border-radius: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* indeterminate progress bar shown while a git command runs (push/pull/fetch/…) */
+.busybar {
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgb(var(--accent)), transparent);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: busy 1s linear infinite;
+}
+@keyframes busy {
+  0% { background-position: -40% 0; }
+  100% { background-position: 140% 0; }
+}

@@ -1,11 +1,12 @@
 import { onCleanup, onMount, Show } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openRepo } from "./api";
-import { error, refresh, run } from "./store";
+import { busy, error, refresh, run } from "./store";
 import Toolbar from "./components/Toolbar";
 import ChangesView from "./components/ChangesView";
 import DiffView from "./components/DiffView";
 import CommitPanel from "./components/CommitPanel";
+import StatusBar from "./components/StatusBar";
 import { ModalHost } from "./components/Modals";
 
 export default function App() {
@@ -21,6 +22,11 @@ export default function App() {
   return (
     <div class="flex h-full flex-col bg-bg text-fg">
       <Toolbar />
+      <div class="h-0.5">
+        <Show when={busy()}>
+          <div class="busybar" />
+        </Show>
+      </div>
 
       <Show when={error()}>
         <pre class="max-h-32 overflow-auto whitespace-pre-wrap border-b border-border bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
@@ -40,6 +46,7 @@ export default function App() {
       <footer class="border-t border-border bg-bg-muted">
         <CommitPanel />
       </footer>
+      <StatusBar />
 
       <ModalHost />
     </div>
