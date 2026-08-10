@@ -740,4 +740,35 @@ mod tests {
         assert!(bs.iter().any(|b| b.name == "feature/x" && b.is_current && !b.is_remote));
         assert!(bs.iter().any(|b| b.name == "main" && !b.is_current));
     }
+
+    #[test]
+    fn launch_path_groups_and_persists_store() {
+        // The exact sequence build_state runs on window open, on a real repo (real
+        // .git dir): snapshot → load → sync → save → build_views.
+        use crate::changelists;
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "changed\n").unwrap(); // modified tracked
+        std::fs::write(p.join("new.txt"), "n\n").unwrap(); // untracked
+
+        let snap = CliEngine::new(p).snapshot().unwrap();
+        let mut store = changelists::load(p).unwrap();
+        if changelists::sync(&mut store, &snap) {
+            changelists::save(p, &store).unwrap();
+        }
+        let views = changelists::build_views(&store, &snap);
+
+        let def = views.iter().find(|v| v.is_default).unwrap();
+        assert!(def.files.iter().any(|f| f.path == "a.txt"), "modified file in Default");
+        assert!(
+            views
+                .iter()
+                .any(|v| v.is_unversioned && v.files.iter().any(|f| f.path == "new.txt")),
+            "untracked file in synthetic Unversioned"
+        );
+        assert!(
+            p.join(".git").join("changelists.json").exists(),
+            "store persisted into real .git/"
+        );
+    }
 }
