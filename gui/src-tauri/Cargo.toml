@@ -1,0 +1,33 @@
+[package]
+name = "mygit-gui"
+version = "0.1.0"
+edition = "2021"
+description = "my-git GUI — нативный десктоп git-менеджер с именованными changelist'ами"
+rust-version = "1.77"
+
+# Tauri 2 (mobile-ready) layout: a lib crate holds the app, main.rs is a thin entry.
+[lib]
+name = "mygit_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# No gix/git2: the MVP engine is CLI-first (shell-out to system `git`), which ТЗ §2.1
+# explicitly endorses and which keeps the binary light. The GitEngine trait keeps a
+# library-backed engine possible later without the frontend caring.
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1

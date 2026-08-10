@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Semantic design tokens (Pane names). Light is :root, dark is :root.dark — a
+   single class toggle on <html> swaps the whole palette. */
+:root {
+  --bg: 255 255 255;
+  --bg-muted: 244 245 247;
+  --fg: 23 25 28;
+  --fg-muted: 106 112 120;
+  --accent: 47 110 237;   /* Pane-brand-blue */
+  --success: 34 150 83;
+  --warn: 176 128 0;
+  --danger: 201 55 55;
+  --border: 221 224 228;
+}
+:root.dark {
+  --bg: 24 26 29;
+  --bg-muted: 32 35 39;
+  --fg: 224 226 229;
+  --fg-muted: 143 149 157;
+  --accent: 96 152 255;
+  --success: 63 185 108;
+  --warn: 214 165 42;
+  --danger: 233 96 96;
+  --border: 48 52 57;
+}
+
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: rgb(var(--bg));
+  color: rgb(var(--fg));
+  font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+::selection { background: rgb(var(--accent) / 0.3); }
+
+/* thin IDE-like scrollbars */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: rgb(var(--fg-muted) / 0.35); border-radius: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
