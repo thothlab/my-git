@@ -166,3 +166,31 @@ pub async fn hunk_revert(state: State<'_, AppState>, patch: String) -> Result<Re
     CliEngine::new(state.repo_path()?).apply_patch(&patch, false, true)?;
     build_state(&state)
 }
+
+// ── commit (task_05) ─────────────────────────────────────────────────────────
+
+/// Commit a changelist (`id`) or an explicit `paths` subset (marked files). Explicit
+/// paths win over `id`.
+#[tauri::command]
+pub async fn commit_list(
+    state: State<'_, AppState>,
+    id: Option<String>,
+    paths: Option<Vec<String>>,
+    message: String,
+    amend: bool,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    let store = changelists::load(&repo)?;
+    let paths = match paths {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            let id = id.ok_or_else(|| Error::Rule("не выбран список или файлы".into()))?;
+            changelists::list_paths(&store, &id)
+        }
+    };
+    if paths.is_empty() {
+        return Err(Error::Rule("нет файлов для коммита".into()));
+    }
+    CliEngine::new(&repo).commit_paths(&paths, &message, amend)?;
+    build_state(&state)
+}

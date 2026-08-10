@@ -25,6 +25,7 @@ pub fn run() {
             commands::hunk_stage,
             commands::hunk_unstage,
             commands::hunk_revert,
+            commands::commit_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

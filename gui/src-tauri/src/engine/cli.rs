@@ -146,6 +146,41 @@ impl CliEngine {
         }
         self.git_stdin(&args, patch.as_bytes())
     }
+
+    /// Stage EXACTLY these paths. Existing files are `git add`ed; worktree deletions
+    /// are staged via `git rm`. Never `git add -A` or `git add <dir>` — both would
+    /// sweep in other changelists' files or miss deletions (Правка `ad8c42e`; the
+    /// `-A`/`<dir>` ban is about *unscoped* staging, exactly what this avoids).
+    pub fn stage_paths(&self, paths: &[String]) -> Result<()> {
+        let (deleted, existing): (Vec<&String>, Vec<&String>) =
+            paths.iter().partition(|p| !self.repo.join(p).exists());
+        if !existing.is_empty() {
+            let mut args = vec!["add", "--"];
+            args.extend(existing.iter().map(|s| s.as_str()));
+            self.git(&args)?;
+        }
+        if !deleted.is_empty() {
+            let mut args = vec!["rm", "-q", "--"];
+            args.extend(deleted.iter().map(|s| s.as_str()));
+            self.git(&args)?;
+        }
+        Ok(())
+    }
+
+    /// Commit exactly the given paths: stage only them, then commit the index. Other
+    /// changelists' files, being unstaged, stay out of the commit (AC#3).
+    pub fn commit_paths(&self, paths: &[String], message: &str, amend: bool) -> Result<()> {
+        if message.trim().is_empty() {
+            return Err(Error::Rule("сообщение коммита не может быть пустым".into()));
+        }
+        self.stage_paths(paths)?;
+        let mut args = vec!["commit", "-m", message];
+        if amend {
+            args.push("--amend");
+        }
+        self.git(&args)?;
+        Ok(())
+    }
 }
 
 fn parse_hunk_header(h: &str) -> (u32, u32) {
@@ -487,5 +522,87 @@ mod tests {
         assert!(content.contains("CHANGED1"), "staged change stays in worktree");
         assert!(content.contains("line10"), "line 10 restored");
         assert!(!content.contains("CHANGED10"), "line 10 change reverted");
+    }
+
+    fn head_files(p: &Path) -> String {
+        String::from_utf8_lossy(
+            &Command::new("git")
+                .arg("-C")
+                .arg(p)
+                .args(["show", "--name-status", "--format=", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn commit_isolates_to_given_paths() {
+        // AC#3: committing one list excludes another's files.
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "A\n").unwrap(); // "Default"
+        std::fs::write(p.join("b.txt"), "B\n").unwrap(); // "Not for commit"
+
+        let eng = CliEngine::new(p);
+        eng.commit_paths(&["a.txt".to_string()], "commit a", false)
+            .unwrap();
+
+        assert!(head_files(p).contains("a.txt"), "a.txt is committed");
+        assert!(!head_files(p).contains("b.txt"), "b.txt stays out of the commit");
+        let snap = eng.snapshot().unwrap();
+        assert!(
+            snap.files.iter().any(|f| f.path == "b.txt"),
+            "b.txt is still a pending change"
+        );
+        assert!(!snap.files.iter().any(|f| f.path == "a.txt"));
+    }
+
+    #[test]
+    fn commit_records_a_deletion() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::remove_file(p.join("a.txt")).unwrap();
+        let eng = CliEngine::new(p);
+        eng.commit_paths(&["a.txt".to_string()], "remove a", false)
+            .unwrap();
+        assert!(head_files(p).contains("D\ta.txt"), "deletion committed");
+    }
+
+    #[test]
+    fn amend_folds_into_head_without_new_commit() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let count = |p: &Path| {
+            String::from_utf8_lossy(
+                &Command::new("git")
+                    .arg("-C")
+                    .arg(p)
+                    .args(["rev-list", "--count", "HEAD"])
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .trim()
+            .to_string()
+        };
+        let before = count(p);
+        std::fs::write(p.join("a.txt"), "amended\n").unwrap();
+        CliEngine::new(p)
+            .commit_paths(&["a.txt".to_string()], "init amended", true)
+            .unwrap();
+        assert_eq!(count(p), before, "amend does not add a commit");
+        assert!(head_files(p).contains("a.txt"));
+    }
+
+    #[test]
+    fn empty_message_is_rejected() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "x\n").unwrap();
+        assert!(CliEngine::new(p)
+            .commit_paths(&["a.txt".to_string()], "   ", false)
+            .is_err());
     }
 }

@@ -116,3 +116,17 @@ export const hunkUnstage = (patch: string) =>
   invoke<RepoState>("hunk_unstage", { patch });
 export const hunkRevert = (patch: string) =>
   invoke<RepoState>("hunk_revert", { patch });
+
+// commit (task_05)
+export const commitList = (a: {
+  id?: string;
+  paths?: string[];
+  message: string;
+  amend: boolean;
+}) =>
+  invoke<RepoState>("commit_list", {
+    id: a.id ?? null,
+    paths: a.paths ?? null,
+    message: a.message,
+    amend: a.amend,
+  });
