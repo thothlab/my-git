@@ -60,3 +60,22 @@ export const openRepo = (path?: string) =>
   invoke<RepoState>("repo_open", { path: path ?? null });
 
 export const repoState = () => invoke<RepoState>("repo_state");
+
+// changelists (task_02)
+export const changelistCreate = (name: string) =>
+  invoke<RepoState>("changelist_create", { name });
+
+export const changelistRename = (id: string, name: string) =>
+  invoke<RepoState>("changelist_rename", { id, name });
+
+export const changelistSetComment = (id: string, comment: string) =>
+  invoke<RepoState>("changelist_set_comment", { id, comment });
+
+export const changelistDelete = (id: string) =>
+  invoke<RepoState>("changelist_delete", { id });
+
+export const changelistSetActive = (id: string) =>
+  invoke<RepoState>("changelist_set_active", { id });
+
+export const filesMove = (paths: string[], toListId: string) =>
+  invoke<RepoState>("files_move", { paths, toListId });
