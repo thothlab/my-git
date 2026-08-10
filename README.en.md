@@ -10,7 +10,10 @@ can be held as "not for commit".
   Status: **MVP** — all acceptance criteria met (grouped changes, changelists, commit-by-list,
   revert/reset, push/rebase, rebase + force-push a branch with a conflict preflight).
   Lightweight: ~1 MB binary, single-digit-MB RAM, instant start.
-- **`gui/`** — desktop GUI (planned). Will share the changelist format with the TUI.
+- **[`gui/`](gui/)** — desktop GUI (Tauri 2 + Rust + SolidJS). Status: **MVP** —
+  changelists (byte-compatible with the TUI), side-by-side/unified diff with hunk
+  stage/revert, per-list commit, branches and push/pull, rollbacks, dark/light theme.
+  Native and light: release binary ~2.3 MB, no JVM. See [`gui/README.md`](gui/README.md).
 
 Both tools operate on one repository and share the same
 `<repo>/.git/changelists.json` format, so they see the same lists.

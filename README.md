@@ -10,8 +10,10 @@ JetBrains): изменённые файлы группируются в имен
   Статус: **MVP** — все критерии приёмки закрыты (группировка изменений, changelist'ы,
   коммит по списку, revert/reset, push/rebase, rebase + force-push ветки с проверкой
   конфликтов). Лёгкий: бинарник ~1 МБ, единицы МБ RAM, мгновенный старт.
-- **`gui/`** — десктопный GUI (планируется). Будет использовать тот же формат
-  changelist'ов, что и TUI.
+- **[`gui/`](gui/)** — десктопный GUI (Tauri 2 + Rust + SolidJS). Статус: **MVP** —
+  changelist'ы (byte-compat с TUI), side-by-side/unified diff со stage/revert по
+  hunk'ам, коммит по списку, ветки и push/pull, откаты, тема dark/light. Нативно и
+  легко: релиз-бинарник ~2.3 МБ, без JVM. Инструкции — [`gui/README.md`](gui/README.md).
 
 Оба инструмента работают на одном репозитории и делят формат
 `<repo>/.git/changelists.json`, поэтому видят одни и те же списки.
