@@ -1,9 +1,10 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use super::GitEngine;
 use crate::error::{Error, Result};
-use crate::model::{FileState, FileStatus, RepoSnapshot};
+use crate::model::{DiffLine, FileDiff, FileState, FileStatus, Hunk, RepoSnapshot};
 
 /// git backend implemented by shelling out to the system `git`.
 pub struct CliEngine {
@@ -70,6 +71,189 @@ impl CliEngine {
             }
         }
         Ok(())
+    }
+
+    /// Run git feeding `input` on stdin (used by `git apply`).
+    fn git_stdin(&self, args: &[&str], input: &[u8]) -> Result<()> {
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        {
+            let mut si = child
+                .stdin
+                .take()
+                .ok_or_else(|| Error::Io("no stdin".into()))?;
+            si.write_all(input).map_err(|e| Error::Io(e.to_string()))?;
+        } // drop stdin ⇒ EOF
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            return Err(Error::Git {
+                command: args.join(" "),
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Run git, returning stdout and ignoring a non-zero exit (for `diff --no-index`,
+    /// which exits 1 precisely when there is a difference to show).
+    fn git_allow_fail(&self, args: &[&str]) -> String {
+        Command::new("git")
+            .arg("-C")
+            .arg(&self.repo)
+            .args(args)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+    }
+
+    /// Diff a file against a base: `worktree` (unstaged), `index` (staged) or `head`.
+    pub fn diff_file(&self, path: &str, against: &str) -> Result<FileDiff> {
+        let raw = match against {
+            "index" => self.git(&["diff", "--cached", "--", path])?,
+            "head" => self.git(&["diff", "HEAD", "--", path])?,
+            _ => {
+                let d = self.git(&["diff", "--", path])?;
+                if d.trim().is_empty() {
+                    // untracked/new file: synthesize an all-add diff (view only)
+                    self.git_allow_fail(&["diff", "--no-index", "--", "/dev/null", path])
+                } else {
+                    d
+                }
+            }
+        };
+        Ok(parse_diff(path, &raw))
+    }
+
+    /// Apply a single-hunk patch to the index (`cached`) or worktree, forward or
+    /// reversed. This is the whole mechanism behind hunk-level stage (cached,
+    /// forward), unstage (cached, reverse) and revert (worktree, reverse) — the index
+    /// is touched only by the exact hunk, never by `git add -A`/`git add <dir>`
+    /// (which would over-stage other lists; cf. commit staging discipline, Правка
+    /// `ad8c42e`).
+    pub fn apply_patch(&self, patch: &str, cached: bool, reverse: bool) -> Result<()> {
+        let mut args = vec!["apply", "--whitespace=nowarn"];
+        if cached {
+            args.push("--cached");
+        }
+        if reverse {
+            args.push("-R");
+        }
+        self.git_stdin(&args, patch.as_bytes())
+    }
+}
+
+fn parse_hunk_header(h: &str) -> (u32, u32) {
+    // "@@ -a,b +c,d @@ section"
+    let (mut old_no, mut new_no) = (1u32, 1u32);
+    for tok in h.split_whitespace() {
+        if let Some(r) = tok.strip_prefix('-') {
+            old_no = r.split(',').next().unwrap_or("1").parse().unwrap_or(1);
+        } else if let Some(r) = tok.strip_prefix('+') {
+            new_no = r.split(',').next().unwrap_or("1").parse().unwrap_or(1);
+        }
+    }
+    (old_no, new_no)
+}
+
+/// Parse `git diff` output for a single file into hunks, keeping each hunk's exact
+/// applicable patch text (file header + hunk) so stage/revert is byte-exact.
+fn parse_diff(path: &str, raw: &str) -> FileDiff {
+    if raw.contains("Binary files ") || raw.contains("GIT binary patch") {
+        return FileDiff {
+            path: path.into(),
+            binary: true,
+            hunks: Vec::new(),
+        };
+    }
+    let lines: Vec<&str> = raw.split('\n').collect();
+    let Some(first) = lines.iter().position(|l| l.starts_with("@@")) else {
+        return FileDiff {
+            path: path.into(),
+            binary: false,
+            hunks: Vec::new(),
+        };
+    };
+    let header = lines[..first].join("\n");
+
+    let mut hunks = Vec::new();
+    let mut i = first;
+    while i < lines.len() {
+        if !lines[i].starts_with("@@") {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut j = i + 1;
+        while j < lines.len() && !lines[j].starts_with("@@") {
+            j += 1;
+        }
+        let block = &lines[start..j];
+
+        let (mut old_no, mut new_no) = parse_hunk_header(block[0]);
+        let mut dls = Vec::new();
+        for &l in &block[1..] {
+            if l.is_empty() || l.starts_with('\\') {
+                continue; // trailing artifact / "\ No newline at end of file"
+            }
+            let origin = l.as_bytes()[0] as char;
+            let content = l[1..].to_string();
+            match origin {
+                '+' => {
+                    dls.push(DiffLine {
+                        origin: "+".into(),
+                        content,
+                        old_no: None,
+                        new_no: Some(new_no),
+                    });
+                    new_no += 1;
+                }
+                '-' => {
+                    dls.push(DiffLine {
+                        origin: "-".into(),
+                        content,
+                        old_no: Some(old_no),
+                        new_no: None,
+                    });
+                    old_no += 1;
+                }
+                _ => {
+                    dls.push(DiffLine {
+                        origin: " ".into(),
+                        content,
+                        old_no: Some(old_no),
+                        new_no: Some(new_no),
+                    });
+                    old_no += 1;
+                    new_no += 1;
+                }
+            }
+        }
+
+        let mut patch = String::with_capacity(header.len() + 64);
+        patch.push_str(&header);
+        patch.push('\n');
+        patch.push_str(&block.join("\n"));
+        if !patch.ends_with('\n') {
+            patch.push('\n');
+        }
+        hunks.push(Hunk {
+            header: block[0].to_string(),
+            lines: dls,
+            patch,
+        });
+        i = j;
+    }
+
+    FileDiff {
+        path: path.into(),
+        binary: false,
+        hunks,
     }
 }
 
@@ -267,5 +451,41 @@ mod tests {
         assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "one\n");
         assert!(!p.join("added.txt").exists());
         assert!(eng.snapshot().unwrap().files.is_empty(), "tree is clean again");
+    }
+
+    #[test]
+    fn hunk_stage_and_revert_are_independent() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let base: String = (1..=10).map(|n| format!("line{n}\n")).collect();
+        std::fs::write(p.join("f.txt"), &base).unwrap();
+        run(p, &["add", "f.txt"]);
+        run(p, &["-c", "commit.gpgsign=false", "commit", "-m", "f"]);
+
+        // change line 1 and line 10 → two well-separated hunks
+        let mut lines: Vec<String> = (1..=10).map(|n| format!("line{n}")).collect();
+        lines[0] = "CHANGED1".into();
+        lines[9] = "CHANGED10".into();
+        std::fs::write(p.join("f.txt"), lines.join("\n") + "\n").unwrap();
+
+        let eng = CliEngine::new(p);
+        let diff = eng.diff_file("f.txt", "worktree").unwrap();
+        assert_eq!(diff.hunks.len(), 2, "two separated hunks");
+
+        // stage only the first hunk
+        eng.apply_patch(&diff.hunks[0].patch, true, false).unwrap();
+        assert!(eng
+            .git(&["diff", "--cached", "--name-only"])
+            .unwrap()
+            .contains("f.txt"));
+        let remaining = eng.diff_file("f.txt", "worktree").unwrap();
+        assert_eq!(remaining.hunks.len(), 1, "one hunk left unstaged");
+
+        // revert the remaining (line 10) hunk in the worktree
+        eng.apply_patch(&remaining.hunks[0].patch, false, true).unwrap();
+        let content = std::fs::read_to_string(p.join("f.txt")).unwrap();
+        assert!(content.contains("CHANGED1"), "staged change stays in worktree");
+        assert!(content.contains("line10"), "line 10 restored");
+        assert!(!content.contains("CHANGED10"), "line 10 change reverted");
     }
 }

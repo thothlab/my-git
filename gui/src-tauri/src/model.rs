@@ -51,6 +51,36 @@ pub struct ChangelistView {
     pub files: Vec<FileStatus>,
 }
 
+/// One line of a diff hunk. `origin` is " ", "+" or "-".
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffLine {
+    pub origin: String,
+    pub content: String,
+    pub old_no: Option<u32>,
+    pub new_no: Option<u32>,
+}
+
+/// A diff hunk. `patch` is the **exact, self-contained** patch text (file header +
+/// this hunk) so the frontend can hand it straight back to `git apply` for
+/// hunk-level stage/revert without any lossy reconstruction.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Hunk {
+    pub header: String,
+    pub lines: Vec<DiffLine>,
+    pub patch: String,
+}
+
+/// A file's diff against a chosen base.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDiff {
+    pub path: String,
+    pub binary: bool,
+    pub hunks: Vec<Hunk>,
+}
+
 /// Full repository state pushed to the UI on every mutation / refresh.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

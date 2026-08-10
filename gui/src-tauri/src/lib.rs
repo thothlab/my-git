@@ -21,6 +21,10 @@ pub fn run() {
             commands::files_move,
             commands::file_rollback,
             commands::list_rollback,
+            commands::diff_file,
+            commands::hunk_stage,
+            commands::hunk_unstage,
+            commands::hunk_revert,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -86,3 +86,33 @@ export const fileRollback = (paths: string[]) =>
 
 export const listRollback = (id: string) =>
   invoke<RepoState>("list_rollback", { id });
+
+// diff & hunk staging (task_04)
+export type DiffBase = "worktree" | "index" | "head";
+
+export interface DiffLine {
+  origin: " " | "+" | "-";
+  content: string;
+  oldNo: number | null;
+  newNo: number | null;
+}
+export interface Hunk {
+  header: string;
+  lines: DiffLine[];
+  patch: string;
+}
+export interface FileDiff {
+  path: string;
+  binary: boolean;
+  hunks: Hunk[];
+}
+
+export const diffFile = (path: string, against: DiffBase) =>
+  invoke<FileDiff>("diff_file", { path, against });
+
+export const hunkStage = (patch: string) =>
+  invoke<RepoState>("hunk_stage", { patch });
+export const hunkUnstage = (patch: string) =>
+  invoke<RepoState>("hunk_unstage", { patch });
+export const hunkRevert = (patch: string) =>
+  invoke<RepoState>("hunk_revert", { patch });

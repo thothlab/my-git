@@ -7,7 +7,7 @@ use crate::changelists::{self, Store};
 use crate::engine::cli::CliEngine;
 use crate::engine::GitEngine;
 use crate::error::{Error, Result};
-use crate::model::RepoState;
+use crate::model::{FileDiff, RepoState};
 
 /// Holds the currently open repository root. Commands are `async` at the Tauri layer
 /// (see lib.rs) so long git work never blocks the UI thread.
@@ -135,5 +135,34 @@ pub async fn list_rollback(state: State<'_, AppState>, id: String) -> Result<Rep
     let store = changelists::load(&repo)?;
     let paths = changelists::list_paths(&store, &id);
     CliEngine::new(&repo).rollback(&paths)?;
+    build_state(&state)
+}
+
+// ── diff & hunk-level staging (task_04) ──────────────────────────────────────
+
+#[tauri::command]
+pub async fn diff_file(
+    state: State<'_, AppState>,
+    path: String,
+    against: String,
+) -> Result<FileDiff> {
+    CliEngine::new(state.repo_path()?).diff_file(&path, &against)
+}
+
+#[tauri::command]
+pub async fn hunk_stage(state: State<'_, AppState>, patch: String) -> Result<RepoState> {
+    CliEngine::new(state.repo_path()?).apply_patch(&patch, true, false)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn hunk_unstage(state: State<'_, AppState>, patch: String) -> Result<RepoState> {
+    CliEngine::new(state.repo_path()?).apply_patch(&patch, true, true)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn hunk_revert(state: State<'_, AppState>, patch: String) -> Result<RepoState> {
+    CliEngine::new(state.repo_path()?).apply_patch(&patch, false, true)?;
     build_state(&state)
 }
