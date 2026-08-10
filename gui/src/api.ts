@@ -79,3 +79,10 @@ export const changelistSetActive = (id: string) =>
 
 export const filesMove = (paths: string[], toListId: string) =>
   invoke<RepoState>("files_move", { paths, toListId });
+
+// rollback (task_03)
+export const fileRollback = (paths: string[]) =>
+  invoke<RepoState>("file_rollback", { paths });
+
+export const listRollback = (id: string) =>
+  invoke<RepoState>("list_rollback", { id });

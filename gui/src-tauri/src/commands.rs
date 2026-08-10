@@ -120,3 +120,20 @@ pub async fn files_move(
 ) -> Result<RepoState> {
     mutate(&state, |s| changelists::move_files(s, &paths, &to_list_id))
 }
+
+#[tauri::command]
+pub async fn file_rollback(state: State<'_, AppState>, paths: Vec<String>) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    CliEngine::new(&repo).rollback(&paths)?;
+    // reverted files are no longer changed; build_state's sync prunes them
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn list_rollback(state: State<'_, AppState>, id: String) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    let store = changelists::load(&repo)?;
+    let paths = changelists::list_paths(&store, &id);
+    CliEngine::new(&repo).rollback(&paths)?;
+    build_state(&state)
+}

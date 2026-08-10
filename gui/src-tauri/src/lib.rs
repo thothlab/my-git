@@ -19,6 +19,8 @@ pub fn run() {
             commands::changelist_delete,
             commands::changelist_set_active,
             commands::files_move,
+            commands::file_rollback,
+            commands::list_rollback,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

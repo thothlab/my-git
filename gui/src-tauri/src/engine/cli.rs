@@ -49,6 +49,28 @@ impl CliEngine {
         }
         Ok(out.stdout)
     }
+
+    /// Run git capturing stdout as UTF-8 text (git errors still carry stderr).
+    fn git(&self, args: &[&str]) -> Result<String> {
+        Ok(String::from_utf8_lossy(&self.git_bytes(args)?).to_string())
+    }
+
+    /// Restore changed files to their HEAD content (discarding local edits). A file
+    /// that exists in HEAD is checked out from it; an added/new file (absent from
+    /// HEAD) is unstaged and removed from disk. Callers confirm on the UI first —
+    /// this is destructive.
+    pub fn rollback(&self, paths: &[String]) -> Result<()> {
+        for p in paths {
+            let in_head = self.git(&["cat-file", "-e", &format!("HEAD:{p}")]).is_ok();
+            if in_head {
+                self.git(&["checkout", "HEAD", "--", p])?;
+            } else {
+                let _ = self.git(&["rm", "-f", "--", p]); // unstage if it was `git add`ed
+                let _ = std::fs::remove_file(self.repo.join(p));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Build a `FileStatus` from a porcelain-v2 `<XY>` field. `X` is the index (staged)
@@ -228,5 +250,22 @@ mod tests {
 
         let b = snap.files.iter().find(|f| f.path == "b.txt").unwrap();
         assert_eq!(b.status, FileState::Untracked);
+    }
+
+    #[test]
+    fn rollback_restores_modified_and_removes_added() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "changed\n").unwrap(); // modify tracked
+        std::fs::write(p.join("added.txt"), "x\n").unwrap();
+        run(p, &["add", "added.txt"]); // staged-new (in index, not HEAD)
+
+        let eng = CliEngine::new(p);
+        eng.rollback(&["a.txt".to_string(), "added.txt".to_string()])
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "one\n");
+        assert!(!p.join("added.txt").exists());
+        assert!(eng.snapshot().unwrap().files.is_empty(), "tree is clean again");
     }
 }

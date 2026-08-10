@@ -1,35 +1,32 @@
-import { createSignal, onMount, onCleanup, For, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { openRepo, repoState, errText, type RepoState } from "./api";
+import { openRepo } from "./api";
+import { busy, error, refresh, run, state } from "./store";
+import ChangesView from "./components/ChangesView";
+import DiffView from "./components/DiffView";
+import CommitPanel from "./components/CommitPanel";
+import { ModalHost } from "./components/Modals";
 
-// task_01 shell: proves the IPC pipeline (open repo → status → grouped files) and
-// the theme tokens. Real ChangesView/DiffView/CommitPanel land in later tasks.
+type Theme = "auto" | "light" | "dark";
+
 export default function App() {
-  const [state, setState] = createSignal<RepoState | null>(null);
-  const [error, setError] = createSignal("");
-  const [busy, setBusy] = createSignal(false);
-
-  const refresh = async () => {
-    setBusy(true);
-    try {
-      setState(await repoState());
-      setError("");
-    } catch (e) {
-      setError(errText(e));
-    } finally {
-      setBusy(false);
-    }
-  };
+  const [theme, setTheme] = createSignal<Theme>(
+    (localStorage.getItem("theme") as Theme) || "auto",
+  );
+  createEffect(() => {
+    const t = theme();
+    const dark =
+      t === "dark" ||
+      (t === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.classList.toggle("dark", dark);
+    localStorage.setItem("theme", t);
+  });
+  const cycleTheme = () =>
+    setTheme((t) => (t === "auto" ? "light" : t === "light" ? "dark" : "auto"));
 
   onMount(async () => {
-    // default to the repo containing the working directory; a picker comes later
-    try {
-      setState(await openRepo("."));
-      setError("");
-    } catch (e) {
-      setError(errText(e));
-    }
-    // resync when the window regains focus (external git activity between sessions)
+    await run(openRepo("."));
+    // resync on window focus — external git activity between interactions
     const unlisten = await getCurrentWindow().onFocusChanged(({ payload }) => {
       if (payload) void refresh();
     });
@@ -38,59 +35,61 @@ export default function App() {
 
   return (
     <div class="flex h-full flex-col bg-bg text-fg">
-      <header class="flex items-center gap-3 border-b border-border bg-bg-muted px-3 py-2">
-        <span class="font-semibold">my-git GUI</span>
+      <header class="flex items-center gap-3 border-b border-border bg-bg-muted px-3 py-1.5 text-sm">
+        <span class="font-semibold">my-git</span>
         <Show when={state()}>
           {(s) => (
-            <span class="text-fg-muted">
-              {s().branch}
+            <span class="flex items-center gap-2 text-fg-muted">
+              <span class="rounded bg-bg px-1.5 py-0.5 font-mono text-xs">
+                {s().detached ? "detached" : s().branch}
+              </span>
               <Show when={s().upstream}>
-                {" "}
-                <span class="text-warn">
+                <span class="font-mono text-xs text-warn" title={s().upstream ?? ""}>
                   ↑{s().ahead} ↓{s().behind}
                 </span>
               </Show>
             </span>
           )}
         </Show>
-        <button
-          class="ml-auto rounded border border-border px-2 py-0.5 hover:bg-bg"
-          onClick={() => void refresh()}
-          disabled={busy()}
-        >
-          {busy() ? "…" : "Refresh"}
-        </button>
+
+        <div class="ml-auto flex items-center gap-2">
+          <button
+            class="rounded border border-border px-2 py-0.5 text-xs hover:bg-bg"
+            title="Тема: auto → light → dark"
+            onClick={cycleTheme}
+          >
+            {theme()}
+          </button>
+          <button
+            class="rounded border border-border px-2 py-0.5 text-xs hover:bg-bg"
+            onClick={() => void refresh()}
+            disabled={busy()}
+          >
+            {busy() ? "…" : "↻"}
+          </button>
+        </div>
       </header>
 
       <Show when={error()}>
-        <pre class="whitespace-pre-wrap border-b border-border bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
+        <pre class="max-h-32 overflow-auto whitespace-pre-wrap border-b border-border bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
           {error()}
         </pre>
       </Show>
 
-      <main class="flex-1 overflow-auto p-3">
-        <Show when={state()} fallback={<div class="text-fg-muted">Открываю репозиторий…</div>}>
-          {(s) => (
-            <For each={s().changelists}>
-              {(cl) => (
-                <div class="mb-3">
-                  <div class="mb-1 font-semibold">
-                    {cl.name} <span class="text-fg-muted">({cl.files.length})</span>
-                  </div>
-                  <For each={cl.files}>
-                    {(f) => (
-                      <div class="pl-3 font-mono text-xs">
-                        <span class="mr-2 uppercase text-fg-muted">{f.status[0]}</span>
-                        {f.path}
-                      </div>
-                    )}
-                  </For>
-                </div>
-              )}
-            </For>
-          )}
-        </Show>
-      </main>
+      <div class="flex min-h-0 flex-1">
+        <aside class="w-72 shrink-0 border-r border-border">
+          <ChangesView />
+        </aside>
+        <main class="min-w-0 flex-1 overflow-hidden">
+          <DiffView />
+        </main>
+      </div>
+
+      <footer class="border-t border-border bg-bg-muted">
+        <CommitPanel />
+      </footer>
+
+      <ModalHost />
     </div>
   );
 }
