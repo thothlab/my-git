@@ -7,7 +7,7 @@ use crate::changelists::{self, Store};
 use crate::engine::cli::CliEngine;
 use crate::engine::GitEngine;
 use crate::error::{Error, Result};
-use crate::model::{FileDiff, RepoState};
+use crate::model::{BranchInfo, FileDiff, RepoState};
 
 /// Holds the currently open repository root. Commands are `async` at the Tauri layer
 /// (see lib.rs) so long git work never blocks the UI thread.
@@ -192,5 +192,50 @@ pub async fn commit_list(
         return Err(Error::Rule("нет файлов для коммита".into()));
     }
     CliEngine::new(&repo).commit_paths(&paths, &message, amend)?;
+    build_state(&state)
+}
+
+// ── branches & remotes (task_06) ─────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn branch_list(state: State<'_, AppState>) -> Result<Vec<BranchInfo>> {
+    CliEngine::new(state.repo_path()?).branches()
+}
+
+#[tauri::command]
+pub async fn branch_create(
+    state: State<'_, AppState>,
+    name: String,
+    from: Option<String>,
+) -> Result<RepoState> {
+    CliEngine::new(state.repo_path()?).create_branch(&name, from.as_deref())?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn branch_checkout(
+    state: State<'_, AppState>,
+    name: String,
+    stash: bool,
+) -> Result<RepoState> {
+    CliEngine::new(state.repo_path()?).checkout(&name, stash)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn push(state: State<'_, AppState>, mode: String) -> Result<RepoState> {
+    CliEngine::new(state.repo_path()?).push(&mode)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn fetch(state: State<'_, AppState>) -> Result<RepoState> {
+    CliEngine::new(state.repo_path()?).fetch()?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn pull(state: State<'_, AppState>) -> Result<RepoState> {
+    CliEngine::new(state.repo_path()?).pull()?;
     build_state(&state)
 }

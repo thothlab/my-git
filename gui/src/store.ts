@@ -74,6 +74,20 @@ export function promptText(title: string, value = ""): Promise<string | null> {
   return new Promise((resolve) => setPromptState({ title, value, resolve }));
 }
 
+export type ChoiceOption = { key: string; label: string; danger?: boolean };
+export const [chooseState, setChooseState] = createSignal<{
+  message: string;
+  options: ChoiceOption[];
+  resolve: (key: string | null) => void;
+} | null>(null);
+
+export function chooseOption(
+  message: string,
+  options: ChoiceOption[],
+): Promise<string | null> {
+  return new Promise((resolve) => setChooseState({ message, options, resolve }));
+}
+
 /** Status → { letter, colour class }. Mirrors the TUI palette mapping. */
 export function statusMeta(s: FileState): { letter: string; cls: string } {
   switch (s) {

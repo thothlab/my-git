@@ -130,3 +130,22 @@ export const commitList = (a: {
     message: a.message,
     amend: a.amend,
   });
+
+// branches & remotes (task_06)
+export interface BranchInfo {
+  name: string;
+  isRemote: boolean;
+  isCurrent: boolean;
+  upstream?: string | null;
+}
+
+export const branchList = () => invoke<BranchInfo[]>("branch_list");
+export const branchCreate = (name: string, from?: string) =>
+  invoke<RepoState>("branch_create", { name, from: from ?? null });
+export const branchCheckout = (name: string, stash: boolean) =>
+  invoke<RepoState>("branch_checkout", { name, stash });
+
+export type PushMode = "normal" | "upstream" | "force";
+export const push = (mode: PushMode) => invoke<RepoState>("push", { mode });
+export const fetchRemote = () => invoke<RepoState>("fetch");
+export const pull = () => invoke<RepoState>("pull");

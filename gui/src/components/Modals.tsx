@@ -1,5 +1,7 @@
-import { Show, createEffect } from "solid-js";
+import { For, Show, createEffect } from "solid-js";
 import {
+  chooseState,
+  setChooseState,
   confirmState,
   setConfirmState,
   promptState,
@@ -12,6 +14,7 @@ export function ModalHost() {
     <>
       <ConfirmHost />
       <PromptHost />
+      <ChooseHost />
     </>
   );
 }
@@ -51,6 +54,36 @@ function ConfirmHost() {
             >
               Подтвердить
             </button>
+          </div>
+        </Backdrop>
+      )}
+    </Show>
+  );
+}
+
+function ChooseHost() {
+  const done = (key: string | null) => {
+    const s = chooseState();
+    setChooseState(null);
+    s?.resolve(key);
+  };
+  return (
+    <Show when={chooseState()}>
+      {(s) => (
+        <Backdrop>
+          <div class="mb-4 whitespace-pre-wrap text-sm">{s().message}</div>
+          <div class="flex flex-col gap-2">
+            <For each={s().options}>
+              {(o) => (
+                <button
+                  class="rounded border border-border px-3 py-1.5 text-left text-sm hover:bg-bg-muted"
+                  classList={{ "text-danger": o.danger }}
+                  onClick={() => done(o.key)}
+                >
+                  {o.label}
+                </button>
+              )}
+            </For>
           </div>
         </Backdrop>
       )}

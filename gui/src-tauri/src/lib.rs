@@ -26,6 +26,12 @@ pub fn run() {
             commands::hunk_unstage,
             commands::hunk_revert,
             commands::commit_list,
+            commands::branch_list,
+            commands::branch_create,
+            commands::branch_checkout,
+            commands::push,
+            commands::fetch,
+            commands::pull,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -81,6 +81,16 @@ pub struct FileDiff {
     pub hunks: Vec<Hunk>,
 }
 
+/// A branch (local or remote-tracking) for the branch picker.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchInfo {
+    pub name: String,
+    pub is_remote: bool,
+    pub is_current: bool,
+    pub upstream: Option<String>,
+}
+
 /// Full repository state pushed to the UI on every mutation / refresh.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

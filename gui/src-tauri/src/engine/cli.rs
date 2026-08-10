@@ -4,7 +4,9 @@ use std::process::{Command, Stdio};
 
 use super::GitEngine;
 use crate::error::{Error, Result};
-use crate::model::{DiffLine, FileDiff, FileState, FileStatus, Hunk, RepoSnapshot};
+use crate::model::{
+    BranchInfo, DiffLine, FileDiff, FileState, FileStatus, Hunk, RepoSnapshot,
+};
 
 /// git backend implemented by shelling out to the system `git`.
 pub struct CliEngine {
@@ -179,6 +181,94 @@ impl CliEngine {
             args.push("--amend");
         }
         self.git(&args)?;
+        Ok(())
+    }
+
+    // ── branches & remotes (task_06) ────────────────────────────────────────
+
+    fn current_branch(&self) -> Result<String> {
+        Ok(self.git(&["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string())
+    }
+
+    pub fn branches(&self) -> Result<Vec<BranchInfo>> {
+        let out = self.git(&[
+            "for-each-ref",
+            "--format=%(refname)%00%(refname:short)%00%(HEAD)%00%(upstream:short)",
+            "refs/heads",
+            "refs/remotes",
+        ])?;
+        let mut v = Vec::new();
+        for line in out.lines() {
+            let f: Vec<&str> = line.split('\u{0}').collect();
+            if f.len() < 3 {
+                continue;
+            }
+            let (full, short, head) = (f[0], f[1], f[2]);
+            let is_remote = full.starts_with("refs/remotes/");
+            if is_remote && short.ends_with("/HEAD") {
+                continue; // skip the origin/HEAD symref
+            }
+            v.push(BranchInfo {
+                name: short.to_string(),
+                is_remote,
+                is_current: head == "*",
+                upstream: f.get(3).filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            });
+        }
+        Ok(v)
+    }
+
+    /// Create a branch from HEAD (or `from`) and switch to it.
+    pub fn create_branch(&self, name: &str, from: Option<&str>) -> Result<()> {
+        let mut args = vec!["checkout", "-b", name];
+        if let Some(f) = from {
+            args.push(f);
+        }
+        self.git(&args)?;
+        Ok(())
+    }
+
+    /// Switch branch. `stash` first shelves tracked+untracked changes so a dirty
+    /// tree does not block the switch (the UI offers stash / switch-anyway / cancel).
+    pub fn checkout(&self, name: &str, stash: bool) -> Result<()> {
+        if stash {
+            self.git(&[
+                "stash",
+                "push",
+                "-u",
+                "-m",
+                &format!("mygit: переключение на {name}"),
+            ])?;
+        }
+        self.git(&["checkout", name])?;
+        Ok(())
+    }
+
+    /// Push. `upstream` sets `-u` for a branch with no upstream; `force` uses
+    /// `--force-with-lease` (only ever called behind explicit confirmation).
+    pub fn push(&self, mode: &str) -> Result<()> {
+        match mode {
+            "upstream" => {
+                let br = self.current_branch()?;
+                self.git(&["push", "-u", "origin", &br])?;
+            }
+            "force" => {
+                self.git(&["push", "--force-with-lease"])?;
+            }
+            _ => {
+                self.git(&["push"])?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn fetch(&self) -> Result<()> {
+        self.git(&["fetch", "--prune"])?;
+        Ok(())
+    }
+
+    pub fn pull(&self) -> Result<()> {
+        self.git(&["pull"])?;
         Ok(())
     }
 }
@@ -604,5 +694,50 @@ mod tests {
         assert!(CliEngine::new(p)
             .commit_paths(&["a.txt".to_string()], "   ", false)
             .is_err());
+    }
+
+    #[test]
+    fn push_sets_upstream_and_fetch_sees_remote_advance() {
+        // AC#5/#6 against a local bare repo used as origin — exercises the real push/
+        // fetch/ahead-behind code paths without a network.
+        let bare = tempfile::tempdir().unwrap();
+        run(bare.path(), &["init", "--bare", "-b", "main"]);
+        let bare_path = bare.path().to_str().unwrap();
+
+        let work = scratch_repo();
+        let wp = work.path();
+        run(wp, &["remote", "add", "origin", bare_path]);
+
+        let eng = CliEngine::new(wp);
+        eng.push("upstream").unwrap();
+
+        let snap = eng.snapshot().unwrap();
+        assert_eq!(snap.upstream.as_deref(), Some("origin/main"));
+        assert_eq!((snap.ahead, snap.behind), (0, 0));
+
+        // advance origin from a second clone
+        let w2 = tempfile::tempdir().unwrap();
+        run(w2.path(), &["clone", bare_path, "c"]);
+        let c = w2.path().join("c");
+        run(&c, &["config", "user.email", "t@e"]);
+        run(&c, &["config", "user.name", "T"]);
+        run(&c, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(c.join("r.txt"), "remote\n").unwrap();
+        run(&c, &["add", "r.txt"]);
+        run(&c, &["commit", "-m", "remote commit"]);
+        run(&c, &["push", "origin", "main"]);
+
+        eng.fetch().unwrap();
+        assert_eq!(eng.snapshot().unwrap().behind, 1, "fetch reflects remote advance");
+    }
+
+    #[test]
+    fn branches_lists_local_with_current_marked() {
+        let dir = scratch_repo();
+        let eng = CliEngine::new(dir.path());
+        eng.create_branch("feature/x", None).unwrap();
+        let bs = eng.branches().unwrap();
+        assert!(bs.iter().any(|b| b.name == "feature/x" && b.is_current && !b.is_remote));
+        assert!(bs.iter().any(|b| b.name == "main" && !b.is_current));
     }
 }
