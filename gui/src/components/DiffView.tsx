@@ -75,8 +75,12 @@ export default function DiffView() {
 
         <div class="flex-1 overflow-auto font-mono text-xs leading-tight">
           <Show
-            when={!diff.loading}
-            fallback={<div class="p-3 text-fg-muted">…</div>}
+            when={!diff.loading && !diff.error}
+            fallback={
+              <div class="p-3 text-fg-muted">
+                {diff.error ? "diff недоступен для этого состояния" : "…"}
+              </div>
+            }
           >
             <Show
               when={diff() && !diff()!.binary}
