@@ -1,4 +1,4 @@
-import { For, Show, createResource, createSignal } from "solid-js";
+import { For, Show, createResource, createSignal, onCleanup } from "solid-js";
 import {
   diffFile,
   hunkRevert,
@@ -10,16 +10,22 @@ import {
   type RepoState,
 } from "../api";
 import { confirmAction, run, selectedPath } from "../store";
+import { d } from "../i18n";
+import { beginDrag } from "./Resizer";
 
-const BASES: { id: DiffBase; label: string }[] = [
-  { id: "worktree", label: "Не в индексе" },
-  { id: "index", label: "В индексе" },
-  { id: "head", label: "vs HEAD" },
-];
+const SPLIT_RATIO_KEY = "diffSplitRatio";
+const clampRatio = (r: number) => Math.min(0.8, Math.max(0.2, r));
 
 export default function DiffView() {
   const [base, setBase] = createSignal<DiffBase>("worktree");
   const [split, setSplit] = createSignal(true);
+
+  // Function, not a module constant, so labels track the active locale.
+  const bases = (): { id: DiffBase; label: string }[] => [
+    { id: "worktree", label: d().unstaged() },
+    { id: "index", label: d().staged() },
+    { id: "head", label: d().vsHead() },
+  ];
 
   const source = () => {
     const p = selectedPath();
@@ -34,12 +40,48 @@ export default function DiffView() {
     refetch();
   };
 
+  // Split ratio: fraction of width given to the "old" (left) side, shared across
+  // every side-by-side row and driven by one draggable overlay handle.
+  const [ratio, setRatio] = createSignal(
+    clampRatio(Number(localStorage.getItem(SPLIT_RATIO_KEY)) || 0.5),
+  );
+  const persistRatio = () => localStorage.setItem(SPLIT_RATIO_KEY, String(ratio()));
+
+  // Safety net: the split handle lives inside <Show>, so a refresh landing
+  // mid-drag can tear it down while it holds the cursor override.
+  onCleanup(() => {
+    document.body.style.cursor = "";
+  });
+
+  let wrapEl: HTMLDivElement | undefined;
+  const onSplitDown = (e: PointerEvent) => {
+    e.preventDefault();
+    beginDrag(
+      e.currentTarget as HTMLElement,
+      e.pointerId,
+      (ev) => {
+        const rect = wrapEl?.getBoundingClientRect();
+        if (!rect || rect.width === 0) return;
+        setRatio(clampRatio((ev.clientX - rect.left) / rect.width));
+      },
+      persistRatio,
+    );
+  };
+
+  const hasSideBySide = () =>
+    split() &&
+    !diff.loading &&
+    !diff.error &&
+    !!diff() &&
+    !diff()!.binary &&
+    diff()!.hunks.length > 0;
+
   return (
     <Show
       when={selectedPath()}
       fallback={
         <div class="flex h-full items-center justify-center text-xs text-fg-muted">
-          Выберите файл слева, чтобы увидеть diff.
+          {d().selectFileHint()}
         </div>
       }
     >
@@ -49,7 +91,7 @@ export default function DiffView() {
             {selectedPath()}
           </span>
           <div class="ml-auto flex overflow-hidden rounded border border-border">
-            <For each={BASES}>
+            <For each={bases()}>
               {(b) => (
                 <button
                   class="px-1.5 py-0.5"
@@ -73,48 +115,62 @@ export default function DiffView() {
           </button>
         </div>
 
-        <div class="flex-1 overflow-auto font-mono text-xs leading-tight">
-          <Show
-            when={!diff.loading && !diff.error}
-            fallback={
-              <div class="p-3 text-fg-muted">
-                {diff.error ? "diff недоступен для этого состояния" : "…"}
-              </div>
-            }
-          >
+        <div class="relative min-h-0 flex-1" ref={wrapEl}>
+          <div class="absolute inset-0 overflow-auto font-mono text-xs leading-tight">
             <Show
-              when={diff() && !diff()!.binary}
+              when={!diff.loading && !diff.error}
               fallback={
                 <div class="p-3 text-fg-muted">
-                  {diff()?.binary ? "Бинарный файл" : "Нет изменений для этой базы."}
+                  {diff.error ? d().diffUnavailable() : "…"}
                 </div>
               }
             >
               <Show
-                when={diff()!.hunks.length > 0}
-                fallback={<div class="p-3 text-fg-muted">Нет изменений для этой базы.</div>}
+                when={diff() && !diff()!.binary}
+                fallback={
+                  <div class="p-3 text-fg-muted">
+                    {diff()?.binary ? d().binaryFile() : d().noChangesForBase()}
+                  </div>
+                }
               >
-                <For each={diff()!.hunks}>
-                  {(h) => (
-                    <HunkView
-                      hunk={h}
-                      base={base()}
-                      split={split()}
-                      onStage={() => act(() => hunkStage(h.patch))}
-                      onUnstage={() => act(() => hunkUnstage(h.patch))}
-                      onRevert={async () => {
-                        if (
-                          await confirmAction(
-                            "Откатить этот hunk в рабочем дереве? Правки будут потеряны.",
-                          )
-                        )
-                          await act(() => hunkRevert(h.patch));
-                      }}
-                    />
-                  )}
-                </For>
+                <Show
+                  when={diff()!.hunks.length > 0}
+                  fallback={<div class="p-3 text-fg-muted">{d().noChangesForBase()}</div>}
+                >
+                  <For each={diff()!.hunks}>
+                    {(h) => (
+                      <HunkView
+                        hunk={h}
+                        base={base()}
+                        split={split()}
+                        ratio={ratio()}
+                        onStage={() => act(() => hunkStage(h.patch))}
+                        onUnstage={() => act(() => hunkUnstage(h.patch))}
+                        onRevert={async () => {
+                          if (await confirmAction(d().revertHunkConfirm()))
+                            await act(() => hunkRevert(h.patch));
+                        }}
+                      />
+                    )}
+                  </For>
+                </Show>
               </Show>
             </Show>
+          </div>
+
+          {/* One draggable divider for the whole side-by-side view. Absolute over
+              the viewport (not the scrolling content), positioned at the split
+              ratio; it doubles as the vertical divider line. */}
+          <Show when={hasSideBySide()}>
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              class="group absolute inset-y-0 z-20 flex w-2 -translate-x-1/2 cursor-col-resize items-stretch justify-center"
+              style={{ left: `${ratio() * 100}%` }}
+              onPointerDown={onSplitDown}
+            >
+              <div class="w-px bg-border transition-colors group-hover:bg-accent" />
+            </div>
           </Show>
         </div>
       </div>
@@ -126,6 +182,7 @@ function HunkView(props: {
   hunk: Hunk;
   base: DiffBase;
   split: boolean;
+  ratio: number;
   onStage: () => void;
   onUnstage: () => void;
   onRevert: () => void;
@@ -145,7 +202,7 @@ function HunkView(props: {
         </div>
       </div>
       <Show when={props.split} fallback={<Unified lines={props.hunk.lines} />}>
-        <SideBySide lines={props.hunk.lines} />
+        <SideBySide lines={props.hunk.lines} ratio={props.ratio} />
       </Show>
     </div>
   );
@@ -219,16 +276,15 @@ function toRows(lines: DiffLine[]): Row[] {
   return rows;
 }
 
-function SideBySide(props: { lines: DiffLine[] }) {
+function SideBySide(props: { lines: DiffLine[]; ratio: number }) {
   const rows = () => toRows(props.lines);
   return (
     <div>
       <For each={rows()}>
         {(r) => (
           <div class="flex">
-            <Cell line={r.left} side="old" />
-            <div class="w-px shrink-0 bg-border" />
-            <Cell line={r.right} side="new" />
+            <Cell line={r.left} side="old" frac={props.ratio} />
+            <Cell line={r.right} side="new" frac={1 - props.ratio} />
           </div>
         )}
       </For>
@@ -236,12 +292,12 @@ function SideBySide(props: { lines: DiffLine[] }) {
   );
 }
 
-function Cell(props: { line?: DiffLine; side: "old" | "new" }) {
+function Cell(props: { line?: DiffLine; side: "old" | "new"; frac: number }) {
   const no = () =>
     props.side === "old" ? props.line?.oldNo : props.line?.newNo;
   const bg = () => (props.line ? lineBg(props.line.origin) : "bg-bg-muted/40");
   return (
-    <div class={`flex w-1/2 min-w-0 ${bg()}`}>
+    <div class={`flex min-w-0 ${bg()}`} style={{ width: `${props.frac * 100}%` }}>
       <span class="w-10 shrink-0 select-none pr-2 text-right text-fg-muted">
         {no() ?? ""}
       </span>
