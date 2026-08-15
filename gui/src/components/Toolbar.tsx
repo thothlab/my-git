@@ -1,7 +1,9 @@
 import { Show, createEffect, createSignal } from "solid-js";
 import { fetchRemote, pull, push } from "../api";
 import { busy, confirmAction, refresh, run, state } from "../store";
+import { d, locale, toggleLocale } from "../i18n";
 import BranchMenu from "./BranchMenu";
+import RepoMenu from "./RepoMenu";
 
 type Theme = "auto" | "light" | "dark";
 
@@ -28,7 +30,7 @@ export default function Toolbar() {
       return;
     }
     if (s.ahead > 0 && s.behind > 0) {
-      if (await confirmAction("Ветки разошлись. Выполнить push --force-with-lease?"))
+      if (await confirmAction(d().diverged()))
         await run(push("force"));
       return;
     }
@@ -38,6 +40,7 @@ export default function Toolbar() {
   return (
     <header class="flex items-center gap-2 border-b border-border bg-bg-muted px-3 py-1.5 text-sm">
       <span class="font-semibold">my-git</span>
+      <RepoMenu />
       <BranchMenu />
       <Show when={state()?.upstream}>
         <span class="font-mono text-xs text-warn" title={state()?.upstream ?? ""}>
@@ -53,8 +56,15 @@ export default function Toolbar() {
 
       <div class="ml-auto flex items-center gap-2">
         <button
+          class="rounded border border-border px-2 py-0.5 text-xs uppercase hover:bg-bg"
+          title={d().langTip()}
+          onClick={toggleLocale}
+        >
+          {locale()}
+        </button>
+        <button
           class="rounded border border-border px-2 py-0.5 text-xs hover:bg-bg"
-          title="Тема: auto → light → dark"
+          title={d().themeTip()}
           onClick={cycleTheme}
         >
           {theme()}
@@ -63,7 +73,7 @@ export default function Toolbar() {
           class="rounded border border-border px-2 py-0.5 text-xs hover:bg-bg"
           onClick={() => void refresh()}
           disabled={busy()}
-          title="Обновить"
+          title={d().refreshTip()}
         >
           {busy() ? "…" : "↻"}
         </button>

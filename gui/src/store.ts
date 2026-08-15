@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 import {
   errText,
+  openRepo as apiOpenRepo,
   repoState as apiRepoState,
   type FileState,
   type RepoState,
@@ -42,6 +43,65 @@ export async function run(p: Promise<RepoState>): Promise<void> {
 }
 
 export const refresh = () => run(apiRepoState());
+
+const LAST_REPO_KEY = "lastRepo";
+const RECENT_REPOS_KEY = "recentRepos";
+const RECENT_MAX = 10;
+
+const loadRecent = (): string[] => {
+  try {
+    const v = JSON.parse(localStorage.getItem(RECENT_REPOS_KEY) ?? "[]");
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+};
+
+/** Recently opened repos (resolved roots), most-recent first. Powers the repo menu. */
+export const [recentRepos, setRecentRepos] = createSignal<string[]>(loadRecent());
+
+/** Record a successfully-opened repo as last-used and at the front of recents. */
+function rememberOpened(repoPath: string) {
+  localStorage.setItem(LAST_REPO_KEY, repoPath);
+  const next = [repoPath, ...recentRepos().filter((p) => p !== repoPath)].slice(0, RECENT_MAX);
+  setRecentRepos(next);
+  localStorage.setItem(RECENT_REPOS_KEY, JSON.stringify(next));
+}
+
+/** Open a repo by path (absolute or relative) and remember it for next launch. */
+export async function openRepoAt(path: string): Promise<void> {
+  await run(apiOpenRepo(path));
+  const s = state();
+  if (s && !error()) {
+    rememberOpened(s.repoPath);
+  } else if (error()) {
+    // Opening failed (e.g. a recent whose folder was deleted): drop that path so
+    // it doesn't linger in the menu and re-error on every click. `path` is the
+    // stored resolved root for a recent-click; a dialog pick won't match (no-op).
+    const pruned = recentRepos().filter((p) => p !== path);
+    setRecentRepos(pruned);
+    localStorage.setItem(RECENT_REPOS_KEY, JSON.stringify(pruned));
+  }
+}
+
+/**
+ * Startup open. Prefer the launch directory (terminal `cd repo && mygit-gui`);
+ * if that isn't a git repo (e.g. launched from Finder with cwd "/"), fall back
+ * to the last-used repo so double-click still lands somewhere useful.
+ */
+export async function openInitial(): Promise<void> {
+  await run(apiOpenRepo("."));
+  if (!error()) {
+    const s = state();
+    if (s) rememberOpened(s.repoPath);
+    return;
+  }
+  const last = localStorage.getItem(LAST_REPO_KEY);
+  if (last) {
+    await openRepoAt(last);
+    if (error()) localStorage.removeItem(LAST_REPO_KEY); // stale — forget it
+  }
+}
 
 export function toggleChecked(path: string) {
   setChecked((prev) => {
