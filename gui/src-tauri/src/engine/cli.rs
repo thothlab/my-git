@@ -173,7 +173,7 @@ impl CliEngine {
     /// changelists' files, being unstaged, stay out of the commit (AC#3).
     pub fn commit_paths(&self, paths: &[String], message: &str, amend: bool) -> Result<()> {
         if message.trim().is_empty() {
-            return Err(Error::Rule("сообщение коммита не может быть пустым".into()));
+            return Err(Error::Rule("commit message cannot be empty".into()));
         }
         self.stage_paths(paths)?;
         let mut args = vec!["commit", "-m", message];
@@ -237,7 +237,7 @@ impl CliEngine {
                 "push",
                 "-u",
                 "-m",
-                &format!("mygit: переключение на {name}"),
+                &format!("mygit: switching to {name}"),
             ])?;
         }
         self.git(&["checkout", name])?;

@@ -1,5 +1,6 @@
 import { Show, createEffect, createSignal } from "solid-js";
 import { commitList, push } from "../api";
+import { d } from "../i18n";
 import {
   checked,
   error,
@@ -58,18 +59,18 @@ export default function CommitPanel() {
     <div class="flex flex-col gap-1.5 px-3 py-2">
       <div class="flex items-center gap-2 text-xs text-fg-muted">
         <span>
-          Commit:&nbsp;
+          {d().commitColon()}&nbsp;
           <span class="font-semibold text-fg">{list()?.name ?? "—"}</span>
           <Show when={subset()}>
-            <span> · выбрано {checked().size}</span>
+            <span>{d().selectedCount(checked().size)}</span>
           </Show>
         </span>
-        <span class="ml-auto">{count()} файлов</span>
+        <span class="ml-auto">{d().filesCount(count())}</span>
       </div>
 
       <textarea
         class="h-16 w-full resize-none rounded border border-border bg-bg px-2 py-1 text-sm outline-none focus:border-accent"
-        placeholder="Сообщение коммита"
+        placeholder={d().commitMessage()}
         value={message()}
         onInput={(e) => setMessage(e.currentTarget.value)}
       />
@@ -82,7 +83,7 @@ export default function CommitPanel() {
             checked={amend()}
             onChange={(e) => setAmend(e.currentTarget.checked)}
           />
-          Amend last commit
+          {d().amendLast()}
         </label>
 
         <div class="ml-auto flex overflow-hidden rounded">
@@ -90,7 +91,7 @@ export default function CommitPanel() {
             class="bg-accent px-3 py-1 text-sm font-medium text-white disabled:opacity-40"
             disabled={disabled()}
             onClick={() => void doCommit()}
-            title={list()?.isUnversioned && !subset() ? "Untracked-файлы коммитятся выбором" : ""}
+            title={list()?.isUnversioned && !subset() ? d().untrackedSelectTip() : ""}
           >
             Commit
           </button>
@@ -98,7 +99,7 @@ export default function CommitPanel() {
             class="border-l border-white/20 bg-accent px-2 py-1 text-sm text-white disabled:opacity-40"
             disabled={disabled()}
             onClick={() => void doCommitAndPush()}
-            title="Commit and Push"
+            title={d().commitAndPushTip()}
           >
             + Push
           </button>

@@ -263,10 +263,10 @@ fn name_taken(store: &Store, name: &str, except: Option<&str>) -> bool {
 pub fn create(store: &mut Store, name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(Error::Rule("имя списка не может быть пустым".into()));
+        return Err(Error::Rule("list name cannot be empty".into()));
     }
     if name_taken(store, name, None) {
-        return Err(Error::Rule(format!("список \"{name}\" уже существует")));
+        return Err(Error::Rule(format!("list \"{name}\" already exists")));
     }
     let id = slugify(name, store);
     store.changelists.push(StoredChangelist {
@@ -282,16 +282,16 @@ pub fn create(store: &mut Store, name: &str) -> Result<String> {
 pub fn rename(store: &mut Store, id: &str, name: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(Error::Rule("имя списка не может быть пустым".into()));
+        return Err(Error::Rule("list name cannot be empty".into()));
     }
     if name_taken(store, name, Some(id)) {
-        return Err(Error::Rule(format!("список \"{name}\" уже существует")));
+        return Err(Error::Rule(format!("list \"{name}\" already exists")));
     }
     let cl = store
         .changelists
         .iter_mut()
         .find(|c| c.id == id)
-        .ok_or_else(|| Error::Rule("список не найден".into()))?;
+        .ok_or_else(|| Error::Rule("list not found".into()))?;
     cl.name = name.into();
     Ok(())
 }
@@ -301,7 +301,7 @@ pub fn set_comment(store: &mut Store, id: &str, comment: &str) -> Result<()> {
         .changelists
         .iter_mut()
         .find(|c| c.id == id)
-        .ok_or_else(|| Error::Rule("список не найден".into()))?;
+        .ok_or_else(|| Error::Rule("list not found".into()))?;
     cl.comment = comment.to_string();
     Ok(())
 }
@@ -311,9 +311,9 @@ pub fn delete(store: &mut Store, id: &str) -> Result<()> {
         .changelists
         .iter()
         .position(|c| c.id == id)
-        .ok_or_else(|| Error::Rule("список не найден".into()))?;
+        .ok_or_else(|| Error::Rule("list not found".into()))?;
     if store.changelists[idx].is_default {
-        return Err(Error::Rule("список Default нельзя удалить".into()));
+        return Err(Error::Rule("the Default list cannot be deleted".into()));
     }
     let files = std::mem::take(&mut store.changelists[idx].files);
     store.changelists.remove(idx);
@@ -321,7 +321,7 @@ pub fn delete(store: &mut Store, id: &str) -> Result<()> {
         .changelists
         .iter_mut()
         .find(|c| c.is_default)
-        .ok_or_else(|| Error::Rule("нет списка Default".into()))?;
+        .ok_or_else(|| Error::Rule("no Default list".into()))?;
     def.files.extend(files); // files return to Default, not dropped
     if store.active_changelist_id == id {
         store.active_changelist_id = DEFAULT_ID.into();
@@ -331,7 +331,7 @@ pub fn delete(store: &mut Store, id: &str) -> Result<()> {
 
 pub fn set_active(store: &mut Store, id: &str) -> Result<()> {
     if !store.changelists.iter().any(|c| c.id == id) {
-        return Err(Error::Rule("список не найден".into()));
+        return Err(Error::Rule("list not found".into()));
     }
     store.active_changelist_id = id.into();
     Ok(())
@@ -340,7 +340,7 @@ pub fn set_active(store: &mut Store, id: &str) -> Result<()> {
 pub fn move_files(store: &mut Store, paths: &[String], to: &str) -> Result<()> {
     // Unversioned is synthetic and not in the store, so it is rejected as a target.
     if !store.changelists.iter().any(|c| c.id == to) {
-        return Err(Error::Rule("целевой список не найден".into()));
+        return Err(Error::Rule("target list not found".into()));
     }
     let set: HashSet<&str> = paths.iter().map(|s| s.as_str()).collect();
     for cl in &mut store.changelists {

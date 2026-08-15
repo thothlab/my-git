@@ -1,6 +1,7 @@
 import { For, Show, createSignal } from "solid-js";
 import { branchCheckout, branchCreate, branchList, type BranchInfo } from "../api";
 import { chooseOption, promptText, run, state } from "../store";
+import { d } from "../i18n";
 
 export default function BranchMenu() {
   const [open, setOpen] = createSignal(false);
@@ -29,14 +30,11 @@ export default function BranchMenu() {
     const target = b.isRemote ? b.name.split("/").slice(1).join("/") : b.name;
     let stash = false;
     if (dirty()) {
-      const k = await chooseOption(
-        `Есть незакоммиченные изменения. Переключиться на "${target}"?`,
-        [
-          { key: "stash", label: "Спрятать в stash и переключиться" },
-          { key: "switch", label: "Переключиться как есть" },
-          { key: "cancel", label: "Отмена" },
-        ],
-      );
+      const k = await chooseOption(d().switchDirty(target), [
+        { key: "stash", label: d().stashAndSwitch() },
+        { key: "switch", label: d().switchAsIs() },
+        { key: "cancel", label: d().cancel() },
+      ]);
       if (!k || k === "cancel") return;
       stash = k === "stash";
     }
@@ -45,7 +43,7 @@ export default function BranchMenu() {
 
   const newBranch = async () => {
     setOpen(false);
-    const name = await promptText("Новая ветка от HEAD", "");
+    const name = await promptText(d().newBranchFromHead(), "");
     if (name && name.trim()) await run(branchCreate(name.trim()));
   };
 
@@ -68,7 +66,7 @@ export default function BranchMenu() {
           <div class="absolute left-0 top-full z-30 mt-1 max-h-96 w-64 overflow-auto rounded-md border border-border bg-bg py-1 text-xs shadow-lg">
             <input
               class="mx-2 mb-1 w-[calc(100%-1rem)] rounded border border-border bg-bg-muted px-1.5 py-0.5 outline-none focus:border-accent"
-              placeholder="фильтр веток"
+              placeholder={d().filterBranches()}
               value={filter()}
               onInput={(e) => setFilter(e.currentTarget.value)}
             />
@@ -76,15 +74,15 @@ export default function BranchMenu() {
               class="block w-full px-3 py-1 text-left text-accent hover:bg-bg-muted"
               onClick={() => void newBranch()}
             >
-              ＋ Новая ветка…
+              ＋ {d().newBranchItem()}
             </button>
             <Section
-              title="Локальные"
+              title={d().local()}
               items={shown().filter((b) => !b.isRemote)}
               onPick={doCheckout}
             />
             <Section
-              title="Удалённые"
+              title={d().remote()}
               items={shown().filter((b) => b.isRemote)}
               onPick={doCheckout}
             />

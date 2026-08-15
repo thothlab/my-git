@@ -22,7 +22,7 @@ impl AppState {
             .lock()
             .unwrap()
             .clone()
-            .ok_or_else(|| Error::Rule("репозиторий не открыт".into()))
+            .ok_or_else(|| Error::Rule("repository not open".into()))
     }
 }
 
@@ -184,12 +184,12 @@ pub async fn commit_list(
     let paths = match paths {
         Some(p) if !p.is_empty() => p,
         _ => {
-            let id = id.ok_or_else(|| Error::Rule("не выбран список или файлы".into()))?;
+            let id = id.ok_or_else(|| Error::Rule("no list or files selected".into()))?;
             changelists::list_paths(&store, &id)
         }
     };
     if paths.is_empty() {
-        return Err(Error::Rule("нет файлов для коммита".into()));
+        return Err(Error::Rule("no files to commit".into()));
     }
     CliEngine::new(&repo).commit_paths(&paths, &message, amend)?;
     build_state(&state)

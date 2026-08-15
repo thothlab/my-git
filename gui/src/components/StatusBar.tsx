@@ -1,5 +1,6 @@
 import { Show } from "solid-js";
 import { state } from "../store";
+import { d } from "../i18n";
 
 export default function StatusBar() {
   const total = () =>
@@ -13,7 +14,7 @@ export default function StatusBar() {
             <span class="truncate font-mono" title={s().repoPath}>
               {s().repoPath}
             </span>
-            <span class="ml-auto">{total()} изменений</span>
+            <span class="ml-auto">{d().changesCount(total())}</span>
             <span class="text-fg-muted/70">my-git GUI 0.1.0</span>
           </>
         )}

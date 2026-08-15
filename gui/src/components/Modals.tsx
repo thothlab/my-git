@@ -1,4 +1,5 @@
 import { For, Show, createEffect } from "solid-js";
+import { d } from "../i18n";
 import {
   chooseState,
   setChooseState,
@@ -45,14 +46,14 @@ function ConfirmHost() {
               class="rounded border border-border px-3 py-1 text-sm hover:bg-bg-muted"
               onClick={() => done(false)}
             >
-              Отмена
+              {d().cancel()}
             </button>
             <button
               class="rounded px-3 py-1 text-sm text-white"
               classList={{ "bg-danger": s().danger, "bg-accent": !s().danger }}
               onClick={() => done(true)}
             >
-              Подтвердить
+              {d().confirm()}
             </button>
           </div>
         </Backdrop>
@@ -121,7 +122,7 @@ function PromptHost() {
               class="rounded border border-border px-3 py-1 text-sm hover:bg-bg-muted"
               onClick={() => done(null)}
             >
-              Отмена
+              {d().cancel()}
             </button>
             <button
               class="rounded bg-accent px-3 py-1 text-sm text-white"
