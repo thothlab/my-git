@@ -25,6 +25,7 @@ import {
   statusMeta,
   toggleChecked,
 } from "../store";
+import { d } from "../i18n";
 
 // Which paths a drag carries: the checked set if the dragged row is part of it,
 // otherwise just that one file.
@@ -42,31 +43,34 @@ export default function ChangesView() {
 
   const lists = () => state()?.changelists ?? [];
   const totalFiles = () => lists().reduce((n, c) => n + c.files.length, 0);
+  // A user-created (named) changelist must stay visible even with no files, or a
+  // just-created list vanishes on a clean tree. Default/Unversioned don't count.
+  const hasUserLists = () => lists().some((c) => !c.isDefault && !c.isUnversioned);
 
   const newList = async () => {
-    const name = await promptText("Новый changelist", "");
+    const name = await promptText(d().newChangelist(), "");
     if (name && name.trim()) await run(changelistCreate(name.trim()));
   };
 
   return (
     <div class="flex h-full flex-col">
       <div class="flex items-center gap-2 border-b border-border px-2 py-1.5">
-        <span class="text-xs font-semibold uppercase tracking-wide text-fg-muted">Changes</span>
+        <span class="text-xs font-semibold uppercase tracking-wide text-fg-muted">{d().changes()}</span>
         <button
           class="ml-auto rounded border border-border px-1.5 text-xs hover:bg-bg-muted"
-          title="Новый changelist"
+          title={d().newChangelist()}
           onClick={newList}
         >
-          + список
+          {d().newListBtn()}
         </button>
       </div>
 
       <div class="flex-1 overflow-auto py-1">
         <Show
-          when={totalFiles() > 0}
+          when={totalFiles() > 0 || hasUserLists()}
           fallback={
             <div class="p-4 text-center text-xs text-fg-muted">
-              Нет изменений — рабочее дерево чистое.
+              {d().cleanTree()}
             </div>
           }
         >
@@ -117,7 +121,7 @@ function ListNode(props: { cl: ChangelistView }) {
         onDragOver={(e) => !cl().isUnversioned && e.preventDefault()}
         onDrop={onDrop}
       >
-        <Show when={!cl().isUnversioned}>
+        <Show when={!cl().isUnversioned && cl().files.length > 0}>
           <input
             type="checkbox"
             class="accent-accent"
@@ -129,19 +133,8 @@ function ListNode(props: { cl: ChangelistView }) {
         <span class="font-semibold">{cl().name}</span>
         <span class="text-fg-muted">({cl().files.length})</span>
         <Show when={isActive()}>
-          <span class="rounded bg-accent/20 px-1 text-[10px] text-accent">активный</span>
+          <span class="rounded bg-accent/20 px-1 text-[10px] text-accent">{d().active()}</span>
         </Show>
-        <button
-          class="ml-auto px-1 text-fg-muted hover:text-fg"
-          title="Действия со списком"
-          onClick={(e) => {
-            e.stopPropagation();
-            const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-            setMenu({ x: r.left, y: r.bottom, list: cl() });
-          }}
-        >
-          ⋯
-        </button>
       </div>
 
       <For each={cl().files}>{(f) => <FileRow file={f} listId={cl().id} />}</For>
@@ -196,24 +189,19 @@ function ContextMenu() {
     (state()?.changelists ?? []).filter((c) => !c.isUnversioned);
 
   const rollbackFile = async (path: string) => {
-    if (await confirmAction(`Откатить ${path} к HEAD? Локальные правки будут потеряны.`))
+    if (await confirmAction(d().revertFileConfirm(path)))
       await run(fileRollback([path]));
   };
   const rollbackList = async (cl: ChangelistView) => {
-    if (
-      cl.files.length &&
-      (await confirmAction(
-        `Откатить все файлы списка "${cl.name}" к HEAD? Локальные правки будут потеряны.`,
-      ))
-    )
+    if (cl.files.length && (await confirmAction(d().revertListConfirm(cl.name))))
       await run(listRollback(cl.id));
   };
   const rename = async (cl: ChangelistView) => {
-    const name = await promptText("Переименовать changelist", cl.name);
+    const name = await promptText(d().renameChangelist(), cl.name);
     if (name && name.trim()) await run(changelistRename(cl.id, name.trim()));
   };
   const del = async (cl: ChangelistView) => {
-    if (await confirmAction(`Удалить список "${cl.name}"? Файлы вернутся в Default.`, false))
+    if (await confirmAction(d().deleteListConfirm(cl.name), false))
       await run(changelistDelete(cl.id));
   };
 
@@ -228,7 +216,7 @@ function ContextMenu() {
           <Show when={mm().file}>
             {(path) => (
               <>
-                <div class="px-3 py-1 text-[10px] uppercase text-fg-muted">Переместить в</div>
+                <div class="px-3 py-1 text-[10px] uppercase text-fg-muted">{d().moveTo()}</div>
                 <For each={moveTargets()}>
                   {(c) => (
                     <MenuItem
@@ -242,7 +230,7 @@ function ContextMenu() {
                 </For>
                 <Divider />
                 <MenuItem
-                  label="Откатить к HEAD"
+                  label={d().revertToHead()}
                   danger
                   onClick={() => {
                     setMenu(null);
@@ -257,7 +245,7 @@ function ContextMenu() {
             {(cl) => (
               <>
                 <MenuItem
-                  label="Сделать активным"
+                  label={d().makeActive()}
                   onClick={() => {
                     setMenu(null);
                     void run(changelistSetActive(cl().id));
@@ -265,7 +253,7 @@ function ContextMenu() {
                 />
                 <Show when={!cl().isUnversioned}>
                   <MenuItem
-                    label="Переименовать…"
+                    label={d().renameItem()}
                     onClick={() => {
                       setMenu(null);
                       void rename(cl());
@@ -273,7 +261,7 @@ function ContextMenu() {
                   />
                   <Show when={!cl().isDefault}>
                     <MenuItem
-                      label="Удалить список"
+                      label={d().deleteList()}
                       onClick={() => {
                         setMenu(null);
                         void del(cl());
@@ -282,7 +270,7 @@ function ContextMenu() {
                   </Show>
                   <Divider />
                   <MenuItem
-                    label="Откатить список к HEAD"
+                    label={d().revertListToHead()}
                     danger
                     onClick={() => {
                       setMenu(null);
