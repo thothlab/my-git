@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use tauri::State;
@@ -7,13 +8,15 @@ use crate::changelists::{self, Store};
 use crate::engine::cli::CliEngine;
 use crate::engine::GitEngine;
 use crate::error::{Error, Result};
-use crate::model::{BranchInfo, FileDiff, RepoState};
+use crate::model::{BranchInfo, ChangelistView, FileDiff, FileState, FileStatus, RepoState};
 
 /// Holds the currently open repository root. Commands are `async` at the Tauri layer
 /// (see lib.rs) so long git work never blocks the UI thread.
 #[derive(Default)]
 pub struct AppState {
     pub repo: Mutex<Option<PathBuf>>,
+    /// Whether the synthetic "Ignored Files" list is included in the state.
+    pub show_ignored: AtomicBool,
 }
 
 impl AppState {
@@ -38,7 +41,33 @@ pub fn build_state(state: &State<AppState>) -> Result<RepoState> {
     if changelists::sync(&mut store, &snap) {
         changelists::save(&repo, &store)?;
     }
-    let views = changelists::build_views(&store, &snap);
+    let mut views = changelists::build_views(&store, &snap);
+
+    // Append the synthetic, read-only "Ignored Files" list when requested. Fetched
+    // separately (never through `sync`) so ignored paths never touch the store.
+    if state.show_ignored.load(Ordering::Relaxed) {
+        let ignored = CliEngine::new(&repo).ignored()?;
+        if !ignored.is_empty() {
+            views.push(ChangelistView {
+                id: "ignored".into(),
+                name: "Ignored Files".into(),
+                comment: String::new(),
+                is_default: false,
+                is_unversioned: true,
+                is_ignored: true,
+                files: ignored
+                    .into_iter()
+                    .map(|p| FileStatus {
+                        path: p,
+                        status: FileState::Ignored,
+                        old_path: None,
+                        staged: false,
+                        unstaged: false,
+                    })
+                    .collect(),
+            });
+        }
+    }
 
     Ok(RepoState {
         repo_path: repo.display().to_string(),
@@ -50,6 +79,13 @@ pub fn build_state(state: &State<AppState>) -> Result<RepoState> {
         active_changelist_id: store.active_changelist_id.clone(),
         changelists: views,
     })
+}
+
+/// Toggle inclusion of the synthetic "Ignored Files" list (session-scoped).
+#[tauri::command]
+pub async fn set_show_ignored(state: State<'_, AppState>, value: bool) -> Result<RepoState> {
+    state.show_ignored.store(value, Ordering::Relaxed);
+    build_state(&state)
 }
 
 /// Load store → run a validated mutation → persist → recompute state.

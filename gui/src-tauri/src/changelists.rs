@@ -202,6 +202,7 @@ pub fn build_views(store: &Store, snap: &RepoSnapshot) -> Vec<ChangelistView> {
             comment: cl.comment.clone(),
             is_default: cl.is_default,
             is_unversioned: false,
+            is_ignored: false,
             files: cl
                 .files
                 .iter()
@@ -223,6 +224,7 @@ pub fn build_views(store: &Store, snap: &RepoSnapshot) -> Vec<ChangelistView> {
             comment: String::new(),
             is_default: false,
             is_unversioned: true,
+            is_ignored: false,
             files: untracked,
         });
     }

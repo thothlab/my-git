@@ -58,6 +58,22 @@ impl CliEngine {
         Ok(String::from_utf8_lossy(&self.git_bytes(args)?).to_string())
     }
 
+    /// Ignored paths for the "Show Ignored" view. git collapses ignored
+    /// directories to a single entry (trailing slash), so this stays small even
+    /// with a fat `node_modules`/`target`. Parsed from porcelain v1 `!!` records;
+    /// kept separate from `snapshot()` so ignored paths never reach the changelist
+    /// store via `sync()`.
+    pub fn ignored(&self) -> Result<Vec<String>> {
+        let out = self.git_bytes(&["status", "--porcelain", "-z", "--ignored"])?;
+        let mut v = Vec::new();
+        for tok in out.split(|&c| c == 0) {
+            if tok.len() > 3 && &tok[0..3] == b"!! " {
+                v.push(String::from_utf8_lossy(&tok[3..]).to_string());
+            }
+        }
+        Ok(v)
+    }
+
     /// Restore changed files to their HEAD content (discarding local edits). A file
     /// that exists in HEAD is checked out from it; an added/new file (absent from
     /// HEAD) is unstaged and removed from disk. Callers confirm on the UI first —

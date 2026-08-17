@@ -10,6 +10,7 @@ pub enum FileState {
     Renamed,
     Untracked,
     Conflicted,
+    Ignored,
 }
 
 /// A changed file with its status and index/worktree staging flags.
@@ -48,6 +49,8 @@ pub struct ChangelistView {
     pub comment: String,
     pub is_default: bool,
     pub is_unversioned: bool,
+    #[serde(default)]
+    pub is_ignored: bool,
     pub files: Vec<FileStatus>,
 }
 

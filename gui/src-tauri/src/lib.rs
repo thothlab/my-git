@@ -14,6 +14,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::repo_open,
             commands::repo_state,
+            commands::set_show_ignored,
             commands::changelist_create,
             commands::changelist_rename,
             commands::changelist_set_comment,
