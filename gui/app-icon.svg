@@ -7,13 +7,13 @@
   </defs>
   <rect x="96" y="96" width="832" height="832" rx="190" fill="url(#bg)"/>
   <g fill="none" stroke="#ffffff" stroke-width="44" stroke-linecap="round" stroke-linejoin="round">
-    <line x1="372" y1="332" x2="372" y2="692"/>
-    <path d="M372 404 C372 486 652 438 652 520"/>
-    <path d="M652 520 C652 602 372 554 372 636"/>
-  </g>
-  <g fill="#ffffff">
-    <circle cx="372" cy="332" r="70"/>
-    <circle cx="372" cy="692" r="70"/>
-    <circle cx="652" cy="520" r="70"/>
+    <!-- trunk between the top and bottom node edges -->
+    <line x1="390" y1="386" x2="390" y2="638"/>
+    <!-- branch curving from the trunk up to the right node -->
+    <path d="M390 610 C390 560 540 560 582 560"/>
+    <!-- ring nodes (hollow, so the blue shows through) -->
+    <circle cx="390" cy="322" r="64"/>
+    <circle cx="390" cy="702" r="64"/>
+    <circle cx="640" cy="560" r="58"/>
   </g>
 </svg>
