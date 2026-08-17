@@ -87,14 +87,14 @@ export default function DiffView() {
     >
       <div class="flex h-full flex-col">
         <div class="flex items-center gap-2 border-b border-border px-2 py-1 text-xs">
-          <span class="truncate font-mono" title={selectedPath()!}>
+          <span class="min-w-0 truncate font-mono" title={selectedPath()!}>
             {selectedPath()}
           </span>
-          <div class="ml-auto flex overflow-hidden rounded border border-border">
+          <div class="ml-auto flex shrink-0 overflow-hidden rounded border border-border">
             <For each={bases()}>
               {(b) => (
                 <button
-                  class="px-1.5 py-0.5"
+                  class="whitespace-nowrap px-1.5 py-0.5"
                   classList={{
                     "bg-accent text-white": base() === b.id,
                     "hover:bg-bg-muted": base() !== b.id,
@@ -107,7 +107,7 @@ export default function DiffView() {
             </For>
           </div>
           <button
-            class="rounded border border-border px-1.5 py-0.5 hover:bg-bg-muted"
+            class="w-20 shrink-0 whitespace-nowrap rounded border border-border px-1.5 py-0.5 text-center hover:bg-bg-muted"
             onClick={() => setSplit((v) => !v)}
             title="Side-by-side / unified"
           >
