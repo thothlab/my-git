@@ -1,0 +1,144 @@
+name: release-gui
+
+# Builds the my-git GUI (Tauri desktop app) installers for macOS (universal),
+# Linux (x86_64) and Windows (x86_64).
+#   - The matrix `build` job builds each platform's installer(s) and uploads
+#     them as run artifacts.
+#   - A single `release` job then publishes ONE GitHub Release with all of them
+#     (on a gui-v* tag). Publishing from one job avoids the create-release race
+#     you get when every matrix job tries to create the same tag's release.
+#   - On manual dispatch: artifacts are downloadable from the run (no release).
+#
+# Cut a GUI release:
+#   1. Bump `version` in gui/src-tauri/tauri.conf.json (+ Cargo.toml + package.json), commit.
+#   2. git tag gui-v0.x.y && git push origin gui-v0.x.y
+#
+# Builds are UNSIGNED (no Apple/Windows signing certs in CI), so recipients must
+# bypass Gatekeeper/SmartScreen once — see the release notes below.
+
+on:
+  push:
+    tags: ["gui-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # One universal macOS .dmg runs on both Apple Silicon and Intel.
+          - runner: macos-14
+            target: universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            bundles: dmg
+            name: macos-universal
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            rust-targets: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+            name: linux-x86_64
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            rust-targets: x86_64-pc-windows-msvc
+            bundles: nsis
+            name: windows-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui/src-tauri
+
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend deps
+        working-directory: gui
+        run: npm ci
+
+      - name: Build Tauri bundles
+        working-directory: gui
+        run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      - name: Collect installers
+        shell: bash
+        run: |
+          mkdir -p dist
+          b="gui/src-tauri/target/${{ matrix.target }}/release/bundle"
+          find "$b" -type f \( \
+            -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \
+            -o -name '*.msi' -o -name '*.exe' \
+          \) -exec cp -v {} dist/ \;
+          echo "--- collected ---"
+          ls -la dist
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    # always() so a partial release still publishes if one platform's build
+    # fails (first run on untested runners — better to ship macOS than nothing).
+    if: always() && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: false
+          fail_on_unmatched_files: false
+          name: my-git GUI ${{ github.ref_name }}
+          body: |
+            **my-git GUI** desktop installers for `${{ github.ref_name }}`.
+
+            > These builds are **unsigned** (no Apple/Windows certificates), so
+            > you must bypass the OS warning once:
+            > - **macOS** — after moving the app to Applications, run:
+            >   `xattr -dr com.apple.quarantine "/Applications/my-git GUI.app"`
+            >   (or right-click the app → Open → Open).
+            > - **Windows** — on the SmartScreen prompt: "More info" → "Run anyway".
+
+            Downloads:
+            - **macOS** (Intel + Apple Silicon): `.dmg` — open it, drag the app to Applications.
+            - **Linux** (x86_64): `.AppImage` (`chmod +x` then run) or `.deb` (`sudo dpkg -i`).
+            - **Windows** (x86_64): the `*-setup.exe` (NSIS installer).
+
+            Launch it from a terminal inside a git repository, or use **Open…**
+            in the app to pick a repository.
