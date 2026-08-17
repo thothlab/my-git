@@ -3,6 +3,7 @@ import {
   errText,
   openRepo as apiOpenRepo,
   repoState as apiRepoState,
+  setShowIgnored as apiSetShowIgnored,
   type FileState,
   type RepoState,
 } from "./api";
@@ -94,13 +95,38 @@ export async function openInitial(): Promise<void> {
   if (!error()) {
     const s = state();
     if (s) rememberOpened(s.repoPath);
-    return;
+  } else {
+    const last = localStorage.getItem(LAST_REPO_KEY);
+    if (last) {
+      await openRepoAt(last);
+      if (error()) localStorage.removeItem(LAST_REPO_KEY); // stale — forget it
+    }
   }
-  const last = localStorage.getItem(LAST_REPO_KEY);
-  if (last) {
-    await openRepoAt(last);
-    if (error()) localStorage.removeItem(LAST_REPO_KEY); // stale — forget it
-  }
+  // The backend's show-ignored flag is per app-session; re-apply the saved choice.
+  if (showIgnored() && !error()) await run(apiSetShowIgnored(true));
+}
+
+// ── View toggles (persisted) ─────────────────────────────────────────────────
+
+const SHOW_IGNORED_KEY = "showIgnored";
+export const [showIgnored, setShowIgnoredSig] = createSignal(
+  localStorage.getItem(SHOW_IGNORED_KEY) === "1",
+);
+export async function toggleShowIgnored(): Promise<void> {
+  const next = !showIgnored();
+  setShowIgnoredSig(next);
+  localStorage.setItem(SHOW_IGNORED_KEY, next ? "1" : "0");
+  await run(apiSetShowIgnored(next));
+}
+
+const GROUP_BY_DIR_KEY = "groupByDir";
+export const [groupByDir, setGroupByDirSig] = createSignal(
+  localStorage.getItem(GROUP_BY_DIR_KEY) === "1",
+);
+export function toggleGroupByDir(): void {
+  const next = !groupByDir();
+  setGroupByDirSig(next);
+  localStorage.setItem(GROUP_BY_DIR_KEY, next ? "1" : "0");
 }
 
 export function toggleChecked(path: string) {
@@ -163,5 +189,7 @@ export function statusMeta(s: FileState): { letter: string; cls: string } {
       return { letter: "C", cls: "text-danger" };
     case "untracked":
       return { letter: "?", cls: "text-fg-muted" };
+    case "ignored":
+      return { letter: "!", cls: "text-fg-muted" };
   }
 }

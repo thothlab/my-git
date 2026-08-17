@@ -8,7 +8,8 @@ export type FileState =
   | "deleted"
   | "renamed"
   | "untracked"
-  | "conflicted";
+  | "conflicted"
+  | "ignored";
 
 export interface FileStatus {
   path: string;
@@ -24,6 +25,7 @@ export interface ChangelistView {
   comment: string;
   isDefault: boolean;
   isUnversioned: boolean;
+  isIgnored?: boolean;
   files: FileStatus[];
 }
 
@@ -60,6 +62,9 @@ export const openRepo = (path?: string) =>
   invoke<RepoState>("repo_open", { path: path ?? null });
 
 export const repoState = () => invoke<RepoState>("repo_state");
+
+export const setShowIgnored = (value: boolean) =>
+  invoke<RepoState>("set_show_ignored", { value });
 
 // changelists (task_02)
 export const changelistCreate = (name: string) =>

@@ -1,4 +1,4 @@
-import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import {
   changelistCreate,
   changelistDelete,
@@ -11,19 +11,25 @@ import {
   type FileStatus,
 } from "../api";
 import {
+  busy,
   checked,
   confirmAction,
+  groupByDir,
   isChecked,
   promptText,
+  refresh,
   run,
   selectedListId,
   selectedPath,
   setChecked,
   setSelectedListId,
   setSelectedPath,
+  showIgnored,
   state,
   statusMeta,
   toggleChecked,
+  toggleGroupByDir,
+  toggleShowIgnored,
 } from "../store";
 import { d } from "../i18n";
 
@@ -33,6 +39,77 @@ let dragPaths: string[] = [];
 
 type Menu = { x: number; y: number; file?: string; list?: ChangelistView };
 const [menu, setMenu] = createSignal<Menu | null>(null);
+// id of the changelist currently under a file drag (for drop highlight)
+const [dragOverId, setDragOverId] = createSignal<string | null>(null);
+
+// Collapsed tree nodes (changelist ids; directory keys added in group-by mode).
+const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
+const isCollapsed = (key: string) => collapsed().has(key);
+const toggleCollapsed = (key: string) =>
+  setCollapsed((prev) => {
+    const n = new Set(prev);
+    n.has(key) ? n.delete(key) : n.add(key);
+    return n;
+  });
+
+// ── Directory-tree grouping ──────────────────────────────────────────────────
+
+type TreeNode = { name: string; path: string; dirs: TreeNode[]; files: FileStatus[] };
+
+const baseName = (p: string) => p.split("/").pop() || p;
+
+/** Build a directory tree from flat file paths. */
+function buildTree(files: FileStatus[]): TreeNode {
+  const root: TreeNode = { name: "", path: "", dirs: [], files: [] };
+  for (const f of files) {
+    const parts = f.path.split("/");
+    parts.pop(); // drop the file name
+    let node = root;
+    let acc = "";
+    for (const seg of parts) {
+      acc = acc ? `${acc}/${seg}` : seg;
+      let child = node.dirs.find((d) => d.name === seg);
+      if (!child) {
+        child = { name: seg, path: acc, dirs: [], files: [] };
+        node.dirs.push(child);
+      }
+      node = child;
+    }
+    node.files.push(f);
+  }
+  root.dirs = root.dirs.map(compactDir);
+  return root;
+}
+
+/** Merge single-child directory chains (a/b/c) into one node, like Android Studio. */
+function compactDir(node: TreeNode): TreeNode {
+  let merged: TreeNode = { ...node, dirs: node.dirs.map(compactDir) };
+  while (merged.files.length === 0 && merged.dirs.length === 1) {
+    const child = merged.dirs[0];
+    merged = {
+      name: `${merged.name}/${child.name}`,
+      path: child.path,
+      dirs: child.dirs,
+      files: child.files,
+    };
+  }
+  return merged;
+}
+
+/** Every intermediate directory path in the file set (for collapse-all). */
+function allDirPaths(files: FileStatus[]): string[] {
+  const set = new Set<string>();
+  for (const f of files) {
+    const parts = f.path.split("/");
+    parts.pop();
+    let acc = "";
+    for (const seg of parts) {
+      acc = acc ? `${acc}/${seg}` : seg;
+      set.add(acc);
+    }
+  }
+  return [...set];
+}
 
 export default function ChangesView() {
   onMount(() => {
@@ -52,17 +129,50 @@ export default function ChangesView() {
     if (name && name.trim()) await run(changelistCreate(name.trim()));
   };
 
+  const rollbackChecked = async () => {
+    const paths = [...checked()];
+    if (paths.length === 0) return;
+    if (await confirmAction(d().rollbackConfirm(paths.length))) {
+      await run(fileRollback(paths));
+      setChecked(new Set<string>());
+    }
+  };
+
+  const collapseAll = () => {
+    const keys = new Set<string>();
+    for (const cl of lists()) {
+      keys.add(cl.id);
+      if (groupByDir() && !cl.isIgnored) {
+        for (const p of allDirPaths(cl.files)) keys.add(`dir:${cl.id}:${p}`);
+      }
+    }
+    setCollapsed(keys);
+  };
+  const expandAll = () => setCollapsed(new Set<string>());
+
   return (
     <div class="flex h-full flex-col">
-      <div class="flex items-center gap-2 border-b border-border px-2 py-1.5">
-        <span class="text-xs font-semibold uppercase tracking-wide text-fg-muted">{d().changes()}</span>
-        <button
-          class="ml-auto rounded border border-border px-1.5 text-xs hover:bg-bg-muted"
-          title={d().newChangelist()}
-          onClick={newList}
+      <div class="flex items-center gap-0.5 border-b border-border px-1 py-1 text-fg-muted">
+        <TbBtn title={d().refreshTip()} onClick={() => void refresh()} disabled={busy()}>
+          ↻
+        </TbBtn>
+        <TbBtn
+          title={d().rollbackTip()}
+          onClick={() => void rollbackChecked()}
+          disabled={checked().size === 0}
         >
-          {d().newListBtn()}
-        </button>
+          ↺
+        </TbBtn>
+        <TbBtn title={d().expandAll()} onClick={expandAll}>
+          <IconExpandAll />
+        </TbBtn>
+        <TbBtn title={d().collapseAll()} onClick={collapseAll}>
+          <IconCollapseAll />
+        </TbBtn>
+        <ViewOptionsMenu />
+        <TbBtn title={d().newChangelist()} onClick={() => void newList()} class="ml-auto">
+          ＋
+        </TbBtn>
       </div>
 
       <div class="flex-1 overflow-auto py-1">
@@ -87,6 +197,9 @@ function ListNode(props: { cl: ChangelistView }) {
   const cl = () => props.cl;
   const isActive = () => state()?.activeChangelistId === cl().id;
   const isSelected = () => selectedListId() === cl().id;
+  const listCollapsed = () => isCollapsed(cl().id);
+  const tree = createMemo(() => buildTree(cl().files));
+  const treeMode = () => groupByDir() && !cl().isIgnored;
 
   const allChecked = () =>
     cl().files.length > 0 && cl().files.every((f) => isChecked(f.path));
@@ -101,84 +214,186 @@ function ListNode(props: { cl: ChangelistView }) {
     });
   };
 
+  const canDrop = () => !cl().isUnversioned && dragPaths.length > 0;
+  const onDragOver = (e: DragEvent) => {
+    if (!canDrop()) return;
+    e.preventDefault(); // allow drop
+    setDragOverId(cl().id);
+  };
   const onDrop = (e: DragEvent) => {
     e.preventDefault();
+    setDragOverId(null);
     if (cl().isUnversioned || dragPaths.length === 0) return;
     void run(filesMove(dragPaths, cl().id));
   };
 
+  // Whole changelist block is the drop target (header + its files), not just the
+  // header row — dropping onto an empty list must work too.
   return (
-    <div>
+    <div
+      class="rounded"
+      classList={{ "bg-accent/10 ring-1 ring-inset ring-accent/50": dragOverId() === cl().id }}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+    >
       <div
-        class="flex items-center gap-1.5 px-2 py-0.5 text-xs"
-        classList={{ "bg-accent/10": isSelected() }}
+        class="flex items-center gap-1 px-2 py-0.5 text-xs"
+        classList={{ "bg-accent/10": isSelected() && dragOverId() !== cl().id }}
         onClick={() => setSelectedListId(cl().id)}
         onContextMenu={(e) => {
           e.preventDefault();
           setSelectedListId(cl().id);
+          if (cl().isUnversioned) return; // synthetic lists have no list actions
           setMenu({ x: e.clientX, y: e.clientY, list: cl() });
         }}
-        onDragOver={(e) => !cl().isUnversioned && e.preventDefault()}
-        onDrop={onDrop}
       >
+        <Disclosure
+          show={cl().files.length > 0}
+          collapsed={listCollapsed()}
+          onToggle={() => toggleCollapsed(cl().id)}
+        />
         <Show when={!cl().isUnversioned && cl().files.length > 0}>
-          <input
-            type="checkbox"
-            class="accent-accent"
-            checked={allChecked()}
-            onClick={(e) => e.stopPropagation()}
-            onChange={toggleAll}
-          />
+          <span class="flex h-4 w-4 shrink-0 items-center justify-center">
+            <input
+              type="checkbox"
+              class="accent-accent"
+              checked={allChecked()}
+              onClick={(e) => e.stopPropagation()}
+              onChange={toggleAll}
+            />
+          </span>
         </Show>
-        <span class="font-semibold">{cl().name}</span>
-        <span class="text-fg-muted">({cl().files.length})</span>
+        <span class="truncate font-semibold">{cl().name}</span>
+        <span class="shrink-0 text-fg-muted">({cl().files.length})</span>
         <Show when={isActive()}>
-          <span class="rounded bg-accent/20 px-1 text-[10px] text-accent">{d().active()}</span>
+          <span class="shrink-0 rounded bg-accent/20 px-1 text-[10px] text-accent">
+            {d().active()}
+          </span>
         </Show>
       </div>
 
-      <For each={cl().files}>{(f) => <FileRow file={f} listId={cl().id} />}</For>
+      <Show when={!listCollapsed()}>
+        <Show
+          when={treeMode()}
+          fallback={
+            <For each={cl().files}>
+              {(f) => <FileRow file={f} listId={cl().id} depth={1} name={f.path} />}
+            </For>
+          }
+        >
+          <TreeChildren node={tree()} listId={cl().id} depth={1} />
+        </Show>
+      </Show>
     </div>
   );
 }
 
-function FileRow(props: { file: FileStatus; listId: string }) {
+function FileRow(props: { file: FileStatus; listId: string; depth: number; name: string }) {
   const f = () => props.file;
   const m = () => statusMeta(f().status);
   const selected = () => selectedPath() === f().path;
+  // Ignored rows are read-only: no checkbox, no drag, no diff-select, no menu —
+  // so an ignored path can never be checked, committed, or diffed.
+  const readOnly = () => f().status === "ignored";
 
   return (
     <div
-      class="flex cursor-default items-center gap-1.5 py-0.5 pl-6 pr-2 font-mono text-xs hover:bg-bg-muted"
-      classList={{ "bg-accent/15": selected() }}
-      draggable={true}
+      class="flex cursor-default items-center gap-1 py-0.5 pr-2 font-mono text-xs hover:bg-bg-muted"
+      classList={{ "bg-accent/15": selected() && !readOnly() }}
+      style={{ "padding-left": `${8 + props.depth * 16}px` }}
+      draggable={!readOnly()}
       onDragStart={() => {
+        if (readOnly()) return;
         dragPaths = isChecked(f().path) ? [...checked()] : [f().path];
       }}
+      onDragEnd={() => {
+        dragPaths = [];
+        setDragOverId(null);
+      }}
       onClick={() => {
+        if (readOnly()) return;
         setSelectedPath(f().path);
         setSelectedListId(props.listId);
       }}
       onContextMenu={(e) => {
         e.preventDefault();
+        if (readOnly()) return;
         setSelectedPath(f().path);
         setMenu({ x: e.clientX, y: e.clientY, file: f().path });
       }}
     >
-      <input
-        type="checkbox"
-        class="accent-accent"
-        checked={isChecked(f().path)}
-        onClick={(e) => e.stopPropagation()}
-        onChange={() => toggleChecked(f().path)}
-      />
-      <span class={`w-3 text-center font-bold ${m().cls}`} title={f().status}>
+      <span class="w-4 shrink-0" />
+      <span class="flex h-4 w-4 shrink-0 items-center justify-center">
+        <Show when={!readOnly()}>
+          <input
+            type="checkbox"
+            class="accent-accent"
+            checked={isChecked(f().path)}
+            onClick={(e) => e.stopPropagation()}
+            onChange={() => toggleChecked(f().path)}
+          />
+        </Show>
+      </span>
+      <span class={`w-3 shrink-0 text-center font-bold ${m().cls}`} title={f().status}>
         {m().letter}
       </span>
-      <span class="truncate" title={f().path}>
-        {f().path}
+      <span class="truncate" classList={{ "text-fg-muted": readOnly() }} title={f().path}>
+        {props.name}
       </span>
     </div>
+  );
+}
+
+// One directory node in the grouped tree: a disclosure + folder + name, with its
+// children (subdirs then files) rendered one level deeper.
+function DirNode(props: { dir: TreeNode; listId: string; depth: number }) {
+  const key = () => `dir:${props.listId}:${props.dir.path}`;
+  const dirCollapsed = () => isCollapsed(key());
+  return (
+    <>
+      <div
+        class="flex cursor-default items-center gap-1 py-0.5 pr-2 text-xs hover:bg-bg-muted"
+        style={{ "padding-left": `${8 + props.depth * 16}px` }}
+        onClick={() => toggleCollapsed(key())}
+      >
+        <Disclosure show={true} collapsed={dirCollapsed()} onToggle={() => toggleCollapsed(key())} />
+        <FolderIcon />
+        <span class="truncate text-fg-subtle">{props.dir.name}</span>
+      </div>
+      <Show when={!dirCollapsed()}>
+        <TreeChildren node={props.dir} listId={props.listId} depth={props.depth + 1} />
+      </Show>
+    </>
+  );
+}
+
+// Renders a tree node's children: subdirectories first, then its own files.
+function TreeChildren(props: { node: TreeNode; listId: string; depth: number }) {
+  return (
+    <>
+      <For each={props.node.dirs}>
+        {(dir) => <DirNode dir={dir} listId={props.listId} depth={props.depth} />}
+      </For>
+      <For each={props.node.files}>
+        {(f) => (
+          <FileRow file={f} listId={props.listId} depth={props.depth} name={baseName(f.path)} />
+        )}
+      </For>
+    </>
+  );
+}
+
+function FolderIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 16 16"
+      fill="currentColor"
+      class="shrink-0 text-fg-subtle"
+    >
+      <path d="M1.5 4A1.5 1.5 0 0 1 3 2.5h2.6l1.4 1.4H13A1.5 1.5 0 0 1 14.5 5.4v6.1A1.5 1.5 0 0 1 13 13H3a1.5 1.5 0 0 1-1.5-1.5z" />
+    </svg>
   );
 }
 
@@ -301,4 +516,178 @@ function MenuItem(props: { label: string; danger?: boolean; onClick: () => void 
 
 function Divider() {
   return <div class="my-1 border-t border-border" />;
+}
+
+// A compact icon button for the CHANGES toolbar.
+function TbBtn(props: {
+  title: string;
+  onClick: () => void;
+  disabled?: boolean;
+  active?: boolean;
+  class?: string;
+  children: any;
+}) {
+  return (
+    <button
+      class={`flex h-6 w-6 items-center justify-center rounded text-sm hover:bg-bg-muted hover:text-fg disabled:opacity-30 disabled:hover:bg-transparent ${props.class ?? ""}`}
+      classList={{ "bg-accent/15 text-accent": props.active }}
+      title={props.title}
+      disabled={props.disabled}
+      onClick={props.onClick}
+    >
+      {props.children}
+    </button>
+  );
+}
+
+// Rotating filled triangle used as the changelist/directory disclosure. Reserves
+// a fixed-width gutter so rows with and without an arrow line up in one column.
+function Disclosure(props: { show: boolean; collapsed: boolean; onToggle: () => void }) {
+  return (
+    <span
+      class="flex h-4 w-4 shrink-0 cursor-default items-center justify-center text-fg-subtle"
+      onClick={(e) => {
+        if (props.show) {
+          e.stopPropagation();
+          props.onToggle();
+        }
+      }}
+    >
+      <Show when={props.show}>
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          style={{
+            transform: props.collapsed ? "none" : "rotate(90deg)",
+            transition: "transform 0.12s",
+          }}
+        >
+          <path d="M6 4l4 4-4 4" />
+        </svg>
+      </Show>
+    </span>
+  );
+}
+
+// Android-Studio-style toolbar glyphs: two chevrons pointing down = expand all,
+// two chevrons converging = collapse all.
+function IconExpandAll() {
+  // chevrons pointing apart (up over down) — Android Studio's expand-all glyph
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.6"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <path d="M4 6l4-3 4 3" />
+      <path d="M4 10l4 3 4-3" />
+    </svg>
+  );
+}
+function IconCollapseAll() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.6"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <path d="M4 3l4 3 4-3" />
+      <path d="M4 13l4-3 4 3" />
+    </svg>
+  );
+}
+
+// Group-by-directory toggle (folder glyph).
+function IconTree() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M1.5 4A1.5 1.5 0 0 1 3 2.5h2.6l1.4 1.4H13A1.5 1.5 0 0 1 14.5 5.4v6.1A1.5 1.5 0 0 1 13 13H3a1.5 1.5 0 0 1-1.5-1.5z" />
+    </svg>
+  );
+}
+
+// Show-ignored toggle (eye glyph).
+function IconEye() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.4"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <path d="M1 8s2.6-4.5 7-4.5S15 8 15 8s-2.6 4.5-7 4.5S1 8 1 8z" />
+      <circle cx="8" cy="8" r="2" />
+    </svg>
+  );
+}
+
+// View-options dropdown (Android Studio's "eye" menu): Group By / Show toggles.
+function ViewOptionsMenu() {
+  const [open, setOpen] = createSignal(false);
+  return (
+    <div class="relative">
+      <TbBtn
+        title={d().viewOptionsTip()}
+        onClick={() => setOpen((v) => !v)}
+        active={open() || groupByDir() || showIgnored()}
+      >
+        <IconEye />
+      </TbBtn>
+      <Show when={open()}>
+        <>
+          <div class="fixed inset-0 z-20" onClick={() => setOpen(false)} />
+          <div class="absolute left-0 top-full z-30 mt-1 min-w-44 rounded-md border border-border bg-bg py-1 text-xs text-fg shadow-lg">
+            <div class="px-3 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">
+              {d().groupByHeader()}
+            </div>
+            <MenuToggle
+              checked={groupByDir()}
+              label={d().directory()}
+              onClick={() => toggleGroupByDir()}
+            />
+            <div class="mt-1 border-t border-border px-3 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">
+              {d().showHeader()}
+            </div>
+            <MenuToggle
+              checked={showIgnored()}
+              label={d().ignoredFiles()}
+              onClick={() => void toggleShowIgnored()}
+            />
+          </div>
+        </>
+      </Show>
+    </div>
+  );
+}
+
+function MenuToggle(props: { checked: boolean; label: string; onClick: () => void }) {
+  return (
+    <button
+      class="flex w-full items-center gap-2 px-3 py-1 text-left hover:bg-bg-muted"
+      onClick={props.onClick}
+    >
+      <span class="w-3 text-center text-accent">{props.checked ? "✓" : ""}</span>
+      <span>{props.label}</span>
+    </button>
+  );
 }

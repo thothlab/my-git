@@ -1,6 +1,6 @@
 import { Show, createEffect, createSignal } from "solid-js";
 import { fetchRemote, pull, push } from "../api";
-import { busy, confirmAction, refresh, run, state } from "../store";
+import { busy, confirmAction, run, state } from "../store";
 import { d, locale, toggleLocale } from "../i18n";
 import BranchMenu from "./BranchMenu";
 import RepoMenu from "./RepoMenu";
@@ -68,14 +68,6 @@ export default function Toolbar() {
           onClick={cycleTheme}
         >
           {theme()}
-        </button>
-        <button
-          class="rounded border border-border px-2 py-0.5 text-xs hover:bg-bg"
-          onClick={() => void refresh()}
-          disabled={busy()}
-          title={d().refreshTip()}
-        >
-          {busy() ? "…" : "↻"}
         </button>
       </div>
     </header>
