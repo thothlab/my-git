@@ -10,8 +10,10 @@ export default {
     extend: {
       colors: {
         bg: "rgb(var(--bg) / <alpha-value>)",
+        "bg-subtle": "rgb(var(--bg-subtle) / <alpha-value>)",
         "bg-muted": "rgb(var(--bg-muted) / <alpha-value>)",
         fg: "rgb(var(--fg) / <alpha-value>)",
+        "fg-subtle": "rgb(var(--fg-subtle) / <alpha-value>)",
         "fg-muted": "rgb(var(--fg-muted) / <alpha-value>)",
         accent: "rgb(var(--accent) / <alpha-value>)",
         success: "rgb(var(--success) / <alpha-value>)",

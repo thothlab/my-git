@@ -5,26 +5,30 @@
 /* Semantic design tokens (Pane names). Light is :root, dark is :root.dark — a
    single class toggle on <html> swaps the whole palette. */
 :root {
-  --bg: 255 255 255;
-  --bg-muted: 244 245 247;
-  --fg: 23 25 28;
-  --fg-muted: 106 112 120;
-  --accent: 47 110 237;   /* Pane-brand-blue */
+  --bg: 248 249 251;
+  --bg-subtle: 240 242 246;
+  --bg-muted: 230 232 238;
+  --fg: 20 23 30;
+  --fg-subtle: 60 65 75;   /* readable secondary text (Pane) */
+  --fg-muted: 110 116 130;
+  --accent: 37 99 235;     /* Pane-brand-blue */
   --success: 34 150 83;
   --warn: 176 128 0;
   --danger: 201 55 55;
-  --border: 221 224 228;
+  --border: 215 218 226;
 }
 :root.dark {
-  --bg: 24 26 29;
-  --bg-muted: 32 35 39;
-  --fg: 224 226 229;
-  --fg-muted: 143 149 157;
-  --accent: 96 152 255;
+  --bg: 15 17 22;
+  --bg-subtle: 22 24 30;
+  --bg-muted: 30 32 40;
+  --fg: 230 232 240;
+  --fg-subtle: 190 195 210;
+  --fg-muted: 130 138 158;
+  --accent: 96 165 250;
   --success: 63 185 108;
   --warn: 214 165 42;
   --danger: 233 96 96;
-  --border: 48 52 57;
+  --border: 45 50 60;
 }
 
 html, body, #root { height: 100%; margin: 0; }
