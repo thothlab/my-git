@@ -1,6 +1,6 @@
 {
   "name": "mygit-gui",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "my-git GUI — нативный десктоп git-менеджер (Tauri + SolidJS) с именованными changelist'ами",

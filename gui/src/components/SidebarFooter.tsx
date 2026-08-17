@@ -134,7 +134,7 @@ function AboutModal(props: { onClose: () => void }) {
       <div class="flex flex-col items-center gap-2 text-center">
         <AppMark />
         <div class="text-base font-semibold">my-git GUI</div>
-        <div class="text-xs text-fg-muted">v{version() ?? "0.1.0"}</div>
+        <div class="text-xs text-fg-muted">v{version() ?? "0.1.1"}</div>
         <div class="text-xs text-fg-subtle">{d().aboutBlurb()}</div>
         <button
           class="mt-1 text-xs text-accent hover:underline"
