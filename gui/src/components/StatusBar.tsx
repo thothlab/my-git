@@ -7,7 +7,7 @@ export default function StatusBar() {
     (state()?.changelists ?? []).reduce((n, c) => n + c.files.length, 0);
 
   return (
-    <div class="flex items-center gap-3 border-t border-border bg-bg-muted px-3 py-0.5 text-[11px] text-fg-muted">
+    <div class="flex items-center gap-3 border-t border-border bg-bg-muted px-3 py-2 text-xs text-fg-muted">
       <Show when={state()} fallback={<span>—</span>}>
         {(s) => (
           <>
