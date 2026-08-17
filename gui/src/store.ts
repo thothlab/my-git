@@ -23,6 +23,32 @@ export const [selectedListId, setSelectedListId] = createSignal<string>("default
 /** multi-select for move/commit-subset */
 export const [checked, setChecked] = createSignal<Set<string>>(new Set());
 
+// ── Theme (auto / light / dark) ──────────────────────────────────────────────
+// Lifted out of Toolbar so the Settings dialog and the toolbar toggle share it.
+
+export type Theme = "auto" | "light" | "dark";
+const [theme, setThemeSignal] = createSignal<Theme>(
+  (localStorage.getItem("theme") as Theme) || "auto",
+);
+export { theme };
+
+function applyTheme() {
+  const t = theme();
+  const dark =
+    t === "dark" ||
+    (t === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.classList.toggle("dark", dark);
+}
+export function setTheme(t: Theme) {
+  setThemeSignal(t);
+  localStorage.setItem("theme", t);
+  applyTheme();
+}
+export function cycleTheme() {
+  setTheme(theme() === "auto" ? "light" : theme() === "light" ? "dark" : "auto");
+}
+applyTheme();
+
 export async function run(p: Promise<RepoState>): Promise<void> {
   setBusy(true);
   try {

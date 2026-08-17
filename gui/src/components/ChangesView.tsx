@@ -32,6 +32,7 @@ import {
   toggleShowIgnored,
 } from "../store";
 import { d } from "../i18n";
+import SidebarFooter from "./SidebarFooter";
 
 // Which paths a drag carries: the checked set if the dragged row is part of it,
 // otherwise just that one file.
@@ -188,6 +189,7 @@ export default function ChangesView() {
         </Show>
       </div>
 
+      <SidebarFooter />
       <ContextMenu />
     </div>
   );

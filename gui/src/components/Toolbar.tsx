@@ -1,27 +1,11 @@
-import { Show, createEffect, createSignal } from "solid-js";
+import { Show } from "solid-js";
 import { fetchRemote, pull, push } from "../api";
 import { busy, confirmAction, run, state } from "../store";
-import { d, locale, toggleLocale } from "../i18n";
+import { d } from "../i18n";
 import BranchMenu from "./BranchMenu";
 import RepoMenu from "./RepoMenu";
 
-type Theme = "auto" | "light" | "dark";
-
 export default function Toolbar() {
-  const [theme, setTheme] = createSignal<Theme>(
-    (localStorage.getItem("theme") as Theme) || "auto",
-  );
-  createEffect(() => {
-    const t = theme();
-    const dark =
-      t === "dark" ||
-      (t === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-    document.documentElement.classList.toggle("dark", dark);
-    localStorage.setItem("theme", t);
-  });
-  const cycleTheme = () =>
-    setTheme((t) => (t === "auto" ? "light" : t === "light" ? "dark" : "auto"));
-
   const doPush = async () => {
     const s = state();
     if (!s) return;
@@ -54,22 +38,6 @@ export default function Toolbar() {
         <TBtn label="Push" onClick={() => void doPush()} accent />
       </div>
 
-      <div class="ml-auto flex items-center gap-2">
-        <button
-          class="rounded border border-border px-2 py-0.5 text-xs uppercase hover:bg-bg"
-          title={d().langTip()}
-          onClick={toggleLocale}
-        >
-          {locale()}
-        </button>
-        <button
-          class="rounded border border-border px-2 py-0.5 text-xs hover:bg-bg"
-          title={d().themeTip()}
-          onClick={cycleTheme}
-        >
-          {theme()}
-        </button>
-      </div>
     </header>
   );
 }
