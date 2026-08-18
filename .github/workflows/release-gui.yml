@@ -1,6 +1,6 @@
 name: release-gui
 
-# Builds the my-git GUI (Tauri desktop app) installers for macOS (universal),
+# Builds Graft (the Tauri desktop git manager) installers for macOS (universal),
 # Linux (x86_64) and Windows (x86_64).
 #   - The matrix `build` job builds each platform's installer(s) and uploads
 #     them as run artifacts.
@@ -124,14 +124,14 @@ jobs:
           files: dist/*
           draft: false
           fail_on_unmatched_files: false
-          name: my-git GUI ${{ github.ref_name }}
+          name: Graft ${{ github.ref_name }}
           body: |
-            **my-git GUI** desktop installers for `${{ github.ref_name }}`.
+            **Graft** — desktop git manager. Installers for `${{ github.ref_name }}`.
 
             > These builds are **unsigned** (no Apple/Windows certificates), so
             > you must bypass the OS warning once:
             > - **macOS** — after moving the app to Applications, run:
-            >   `xattr -dr com.apple.quarantine "/Applications/my-git GUI.app"`
+            >   `xattr -dr com.apple.quarantine "/Applications/Graft.app"`
             >   (or right-click the app → Open → Open).
             > - **Windows** — on the SmartScreen prompt: "More info" → "Run anyway".
 

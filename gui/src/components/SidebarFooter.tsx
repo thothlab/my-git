@@ -133,8 +133,8 @@ function AboutModal(props: { onClose: () => void }) {
     <ModalShell title={d().about()} onClose={props.onClose}>
       <div class="flex flex-col items-center gap-2 text-center">
         <AppMark />
-        <div class="text-base font-semibold">my-git GUI</div>
-        <div class="text-xs text-fg-muted">v{version() ?? "0.1.1"}</div>
+        <div class="text-base font-semibold">Graft</div>
+        <div class="text-xs text-fg-muted">v{version() ?? "0.1.2"}</div>
         <div class="text-xs text-fg-subtle">{d().aboutBlurb()}</div>
         <button
           class="mt-1 text-xs text-accent hover:underline"

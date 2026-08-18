@@ -23,7 +23,7 @@ export default function Toolbar() {
 
   return (
     <header class="flex items-center gap-2 border-b border-border bg-bg-muted px-3 py-1.5 text-sm">
-      <span class="font-semibold">my-git</span>
+      <span class="font-semibold">Graft</span>
       <RepoMenu />
       <BranchMenu />
       <Show when={state()?.upstream}>

@@ -1,9 +1,9 @@
 {
-  "name": "mygit-gui",
-  "version": "0.1.1",
+  "name": "graft",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
-  "description": "my-git GUI — нативный десктоп git-менеджер (Tauri + SolidJS) с именованными changelist'ами",
+  "description": "Graft — нативный десктоп git-менеджер (Tauri + SolidJS) с именованными changelist'ами",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -112,7 +112,7 @@ export async function openRepoAt(path: string): Promise<void> {
 }
 
 /**
- * Startup open. Prefer the launch directory (terminal `cd repo && mygit-gui`);
+ * Startup open. Prefer the launch directory (terminal `cd repo && graft`);
  * if that isn't a git repo (e.g. launched from Finder with cwd "/"), fall back
  * to the last-used repo so double-click still lands somewhere useful.
  */

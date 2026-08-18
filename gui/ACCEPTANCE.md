@@ -1,4 +1,4 @@
-# MVP acceptance — my-git GUI (prd_01)
+# MVP acceptance — Graft (prd_01)
 
 Статус критериев приёмки §7 ТЗ. Разделено честно: что проверено **автоматически
 здесь** (тесты бэкенда на реальных git-репозиториях + сборка) и что требует
@@ -20,7 +20,7 @@
 
 - `npm run build` → фронт `dist/` (68 КБ).
 - `cargo build --release` → бинарник **2.3 МБ** (LTO+strip, arm64).
-- `npm run tauri build` → **`my-git GUI.app` (2.3 МБ)** и **`.dmg` (1.2 МБ)** собраны.
+- `npm run tauri build` → **`Graft.app` (2.3 МБ)** и **`.dmg` (1.2 МБ)** собраны.
 
 ## Что должен прогнать человек (шаги)
 

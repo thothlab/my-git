@@ -1,6 +1,6 @@
-# my-git GUI
+# Graft
 
-Нативное десктоп-приложение git-менеджера в стиле git-панели JetBrains/Android
+**Graft** — нативное десктоп-приложение git-менеджера в стиле git-панели JetBrains/Android
 Studio, с ядром в виде **именованных changelist'ов**. Делит формат
 `<repo>/.git/changelists.json` с [terminal-версией](../terminal/) (byte-compat),
 поэтому оба инструмента работают на одном репозитории вперемешку.

@@ -1,13 +1,13 @@
 [package]
-name = "mygit-gui"
-version = "0.1.1"
+name = "graft"
+version = "0.1.2"
 edition = "2021"
-description = "my-git GUI — нативный десктоп git-менеджер с именованными changelist'ами"
+description = "Graft — нативный десктоп git-менеджер с именованными changelist'ами"
 rust-version = "1.77"
 
 # Tauri 2 (mobile-ready) layout: a lib crate holds the app, main.rs is a thin entry.
 [lib]
-name = "mygit_gui_lib"
+name = "graft_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

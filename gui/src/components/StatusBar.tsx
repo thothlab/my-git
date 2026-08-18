@@ -15,7 +15,7 @@ export default function StatusBar() {
               {s().repoPath}
             </span>
             <span class="ml-auto">{d().changesCount(total())}</span>
-            <span class="text-fg-muted/70">my-git GUI 0.1.1</span>
+            <span class="text-fg-muted/70">Graft 0.1.2</span>
           </>
         )}
       </Show>
