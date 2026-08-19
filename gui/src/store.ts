@@ -15,6 +15,26 @@ import {
 export const [state, setState] = createSignal<RepoState | null>(null);
 export const [error, setError] = createSignal("");
 export const [busy, setBusy] = createSignal(false);
+/** Name of the operation currently running, shown next to the busy bar. */
+export const [busyLabel, setBusyLabel] = createSignal("");
+
+// ── Window mode (Changes | Log) ──────────────────────────────────────────────
+// The Log mode is a second main area, not a second window. Switching does not
+// touch the Changes state: checked files and the selected changelist live in
+// module signals here, so they survive the panels being unmounted. History is
+// not read while the mode is "changes" — nothing in this store fetches it.
+
+export type ViewMode = "changes" | "log";
+const VIEW_MODE_KEY = "viewMode";
+const [viewMode, setViewModeSignal] = createSignal<ViewMode>(
+  localStorage.getItem(VIEW_MODE_KEY) === "log" ? "log" : "changes",
+);
+export { viewMode };
+export function setViewMode(m: ViewMode) {
+  setViewModeSignal(m);
+  localStorage.setItem(VIEW_MODE_KEY, m);
+}
+export const toggleViewMode = () => setViewMode(viewMode() === "log" ? "changes" : "log");
 
 /** path of the file whose diff is shown on the right */
 export const [selectedPath, setSelectedPath] = createSignal<string | null>(null);
@@ -49,8 +69,13 @@ export function cycleTheme() {
 }
 applyTheme();
 
-export async function run(p: Promise<RepoState>): Promise<void> {
+/**
+ * `label` names the operation for the busy indicator: an unlabelled bar during
+ * a long fetch or rebase says only "something is happening".
+ */
+export async function run(p: Promise<RepoState>, label = ""): Promise<void> {
   setBusy(true);
+  setBusyLabel(label);
   try {
     const s = await p;
     setState(s);
@@ -66,6 +91,7 @@ export async function run(p: Promise<RepoState>): Promise<void> {
     setError(errText(e));
   } finally {
     setBusy(false);
+    setBusyLabel("");
   }
 }
 
@@ -199,6 +225,10 @@ export function chooseOption(
 ): Promise<string | null> {
   return new Promise((resolve) => setChooseState({ message, options, resolve }));
 }
+
+/** True while any modal is up — the keyboard layer stands down meanwhile. */
+export const modalOpen = () =>
+  confirmState() !== null || promptState() !== null || chooseState() !== null;
 
 /** Status → { letter, colour class }. Mirrors the TUI palette mapping. */
 export function statusMeta(s: FileState): { letter: string; cls: string } {

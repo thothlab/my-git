@@ -1,4 +1,4 @@
-import { For, Show, createEffect } from "solid-js";
+import { For, Show, createEffect, onCleanup } from "solid-js";
 import { d } from "../i18n";
 import {
   chooseState,
@@ -8,6 +8,26 @@ import {
   promptState,
   setPromptState,
 } from "../store";
+
+/**
+ * While a modal is up it owns Escape, and it takes it in the capture phase so no
+ * panel or shortcut can see the key first. Everything else is left alone: the
+ * application shortcut layer already stands down on `modalOpen()`, and grabbing
+ * the rest here would keep the prompt field from receiving what is typed into it.
+ */
+function useModalEscape(active: () => boolean, onEscape: () => void) {
+  createEffect(() => {
+    if (!active()) return;
+    const h = (e: KeyboardEvent) => {
+      if (e.code !== "Escape") return;
+      e.stopPropagation();
+      e.preventDefault();
+      onEscape();
+    };
+    window.addEventListener("keydown", h, true);
+    onCleanup(() => window.removeEventListener("keydown", h, true));
+  });
+}
 
 /** Renders whichever modal is active. Mounted once in App. */
 export function ModalHost() {
@@ -31,11 +51,18 @@ function Backdrop(props: { children: any }) {
 }
 
 function ConfirmHost() {
+  let cancelBtn: HTMLButtonElement | undefined;
   const done = (ok: boolean) => {
     const s = confirmState();
     setConfirmState(null);
     s?.resolve(ok);
   };
+  useModalEscape(() => confirmState() !== null, () => done(false));
+  // Cancel takes focus, so a reflex Enter on a destructive confirmation cancels
+  // it instead of performing it.
+  createEffect(() => {
+    if (confirmState()) queueMicrotask(() => cancelBtn?.focus());
+  });
   return (
     <Show when={confirmState()}>
       {(s) => (
@@ -43,7 +70,8 @@ function ConfirmHost() {
           <div class="mb-4 whitespace-pre-wrap text-sm">{s().message}</div>
           <div class="flex justify-end gap-2">
             <button
-              class="rounded border border-border px-3 py-1 text-sm hover:bg-bg-muted"
+              ref={cancelBtn}
+              class="rounded border border-border px-3 py-1 text-sm outline-none hover:bg-bg-muted focus:border-accent"
               onClick={() => done(false)}
             >
               {d().cancel()}
@@ -68,6 +96,7 @@ function ChooseHost() {
     setChooseState(null);
     s?.resolve(key);
   };
+  useModalEscape(() => chooseState() !== null, () => done(null));
   return (
     <Show when={chooseState()}>
       {(s) => (
@@ -99,6 +128,7 @@ function PromptHost() {
     setPromptState(null);
     s?.resolve(v);
   };
+  useModalEscape(() => promptState() !== null, () => done(null));
   createEffect(() => {
     if (promptState()) queueMicrotask(() => input?.focus());
   });

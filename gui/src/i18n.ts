@@ -119,6 +119,40 @@ const en = {
   revertHunkConfirm: () => "Revert this hunk in the working tree? Changes will be lost.",
   // StatusBar
   changesCount: (n: number) => `${n} ${n === 1 ? "change" : "changes"}`,
+  // Window modes
+  modeChanges: () => "Changes",
+  modeLog: () => "Log",
+  modeChangesTip: () => "Local changes (Cmd/Ctrl+1)",
+  modeLogTip: () => "Git history (Cmd/Ctrl+2)",
+  focusHint: () => "Tab / Shift+Tab moves focus between panels",
+  // Busy phases
+  busyFetch: () => "Fetching…",
+  busyPull: () => "Pulling…",
+  busyPush: () => "Pushing…",
+  // Log mode — panels
+  branchesTitle: () => "Branches",
+  logTitle: () => "Log",
+  commitDetailsTitle: () => "Commit details",
+  diffTitle: () => "Diff",
+  changedFiles: () => "Changed files",
+  favorites: () => "Favorites",
+  detachedHead: (hash: string) => (hash ? `HEAD (detached at ${hash})` : "HEAD (detached)"),
+  onBranch: (name: string) => `HEAD → ${name}`,
+  // Log mode — empty and special states
+  noCommitsTitle: () => "This repository has no commits yet",
+  noCommitsHint: () => "Make the first commit in the Changes mode.",
+  noRemoteBranches: () => "No remote branches",
+  noBranchesYet: () => "No branches to show",
+  loadingHistory: () => "Loading history…",
+  selectCommitHint: () => "Select a commit to see its details.",
+  historyPending: () => "History is not wired up yet",
+  actionPending: () => "Not available yet — needs the history backend",
+  // Log mode — toolbars
+  expandAllTip: () => "Expand all",
+  collapseAllTip: () => "Collapse all",
+  favoritesOnlyTip: () => "Show favourites only",
+  newBranchTip: () => "New branch…",
+  filterCommits: () => "filter commits",
 };
 
 type Dict = typeof en;
@@ -204,6 +238,35 @@ const ru: Dict = {
   revertHunkConfirm: () =>
     "Откатить этот hunk в рабочем дереве? Правки будут потеряны.",
   changesCount: (n) => `${n} ${ruPlural(n, "изменение", "изменения", "изменений")}`,
+  modeChanges: () => "Изменения",
+  modeLog: () => "Лог",
+  modeChangesTip: () => "Локальные изменения (Cmd/Ctrl+1)",
+  modeLogTip: () => "История git (Cmd/Ctrl+2)",
+  focusHint: () => "Tab / Shift+Tab переключают фокус между панелями",
+  busyFetch: () => "Забираем изменения…",
+  busyPull: () => "Подтягиваем изменения…",
+  busyPush: () => "Отправляем изменения…",
+  branchesTitle: () => "Ветки",
+  logTitle: () => "Лог",
+  commitDetailsTitle: () => "Детали коммита",
+  diffTitle: () => "Diff",
+  changedFiles: () => "Изменённые файлы",
+  favorites: () => "Избранное",
+  detachedHead: (hash) => (hash ? `HEAD (отделён на ${hash})` : "HEAD (отделён)"),
+  onBranch: (name) => `HEAD → ${name}`,
+  noCommitsTitle: () => "В репозитории пока нет коммитов",
+  noCommitsHint: () => "Сделайте первый коммит в режиме «Изменения».",
+  noRemoteBranches: () => "Нет удалённых веток",
+  noBranchesYet: () => "Веток пока нет",
+  loadingHistory: () => "Загружаем историю…",
+  selectCommitHint: () => "Выберите коммит, чтобы увидеть детали.",
+  historyPending: () => "История ещё не подключена",
+  actionPending: () => "Пока недоступно — нужен бэкенд истории",
+  expandAllTip: () => "Развернуть всё",
+  collapseAllTip: () => "Свернуть всё",
+  favoritesOnlyTip: () => "Только избранные",
+  newBranchTip: () => "Новая ветка…",
+  filterCommits: () => "фильтр коммитов",
 };
 
 /** Current locale's dictionary. Reactive: reads the `locale` signal. */
