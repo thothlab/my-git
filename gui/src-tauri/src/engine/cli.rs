@@ -130,16 +130,86 @@ impl CliEngine {
             .unwrap_or_default()
     }
 
+    /// Resolve paths **inside the git directory** by asking git, never by joining
+    /// `.git` onto the worktree root: in a linked worktree and in a submodule `.git`
+    /// is a file, and the real markers live under `.git/worktrees/<name>/`. One
+    /// `rev-parse` answers for all names at once. A path git returns relative is
+    /// relative to the worktree root it was run in.
+    pub(crate) fn git_paths(&self, names: &[&str]) -> Result<Vec<PathBuf>> {
+        let mut args = vec!["rev-parse"];
+        for n in names {
+            args.push("--git-path");
+            args.push(n);
+        }
+        let out = self.git(&args)?;
+        let paths: Vec<PathBuf> = out
+            .lines()
+            .map(|l| {
+                let p = PathBuf::from(l.trim());
+                if p.is_absolute() {
+                    p
+                } else {
+                    self.repo.join(p)
+                }
+            })
+            .collect();
+        if paths.len() != names.len() {
+            return Err(Error::Parse(format!(
+                "rev-parse --git-path returned {} paths for {} names",
+                paths.len(),
+                names.len()
+            )));
+        }
+        Ok(paths)
+    }
+
+    /// Whether git has the path in the index (i.e. it is not an untracked file).
+    fn is_tracked(&self, path: &str) -> bool {
+        !self
+            .git_allow_fail(&["ls-files", "--", path])
+            .trim()
+            .is_empty()
+    }
+
     /// Diff a file against a base: `worktree` (unstaged), `index` (staged) or `head`.
-    pub fn diff_file(&self, path: &str, against: &str) -> Result<FileDiff> {
+    ///
+    /// `whitespace` is one of `none` (do not ignore — the historical behaviour),
+    /// `trailing` (`--ignore-space-at-eol`) or `all` (`-w`). Any other value is
+    /// treated as `none`, so a caller that has not been taught about the mode yet
+    /// keeps seeing every difference rather than silently hiding some.
+    pub fn diff_file(&self, path: &str, against: &str, whitespace: &str) -> Result<FileDiff> {
+        let ws = whitespace_args(whitespace)?;
         let raw = match against {
-            "index" => self.git(&["diff", "--cached", "--", path])?,
-            "head" => self.git(&["diff", "HEAD", "--", path])?,
+            "index" => {
+                let mut a = vec!["diff", "--cached"];
+                a.extend_from_slice(&ws);
+                a.extend_from_slice(&["--", path]);
+                self.git(&a)?
+            }
+            "head" => {
+                let mut a = vec!["diff", "HEAD"];
+                a.extend_from_slice(&ws);
+                a.extend_from_slice(&["--", path]);
+                self.git(&a)?
+            }
             _ => {
-                let d = self.git(&["diff", "--", path])?;
-                if d.trim().is_empty() {
+                let mut a = vec!["diff"];
+                a.extend_from_slice(&ws);
+                a.extend_from_slice(&["--", path]);
+                let d = self.git(&a)?;
+                // "Empty diff ⇒ untracked file" is exactly right while nothing is
+                // ignored, and that is the behaviour `none` must keep. Only when a
+                // whitespace mode is active can an empty diff also mean "the change
+                // is whitespace-only" — there, and only there, ask git whether it
+                // knows the path, so a whitespace-only change is not re-rendered as
+                // an all-add diff of the whole file.
+                let empty_means_untracked = ws.is_empty() || !self.is_tracked(path);
+                if d.trim().is_empty() && empty_means_untracked {
                     // untracked/new file: synthesize an all-add diff (view only)
-                    self.git_allow_fail(&["diff", "--no-index", "--", "/dev/null", path])
+                    let mut a = vec!["diff", "--no-index"];
+                    a.extend_from_slice(&ws);
+                    a.extend_from_slice(&["--", "/dev/null", path]);
+                    self.git_allow_fail(&a)
                 } else {
                     d
                 }
@@ -422,6 +492,22 @@ fn make_status(xy: &str, path: String, old_path: Option<String>, renamed: bool) 
     }
 }
 
+/// git flags for a whitespace mode: `none` | `trailing` | `all`.
+///
+/// A closed dictionary crossing the Tauri boundary as a string is checked, not
+/// folded into a default: a typo that silently means "none" shows a diff the user
+/// did not ask for and reports nothing.
+pub fn whitespace_args(mode: &str) -> Result<Vec<&'static str>> {
+    match mode {
+        "none" => Ok(vec![]),
+        "trailing" => Ok(vec!["--ignore-space-at-eol"]),
+        "all" => Ok(vec!["--ignore-all-space"]),
+        other => Err(Error::Rule(format!(
+            "unknown whitespace mode: {other} (expected none, trailing or all)"
+        ))),
+    }
+}
+
 impl GitEngine for CliEngine {
     fn snapshot(&self) -> Result<RepoSnapshot> {
         // porcelain=v2 gives per-side staging + rename detail; --branch adds the
@@ -526,7 +612,7 @@ impl GitEngine for CliEngine {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn run(dir: &Path, args: &[&str]) {
@@ -610,7 +696,7 @@ mod tests {
         std::fs::write(p.join("f.txt"), lines.join("\n") + "\n").unwrap();
 
         let eng = CliEngine::new(p);
-        let diff = eng.diff_file("f.txt", "worktree").unwrap();
+        let diff = eng.diff_file("f.txt", "worktree", "none").unwrap();
         assert_eq!(diff.hunks.len(), 2, "two separated hunks");
 
         // stage only the first hunk
@@ -619,7 +705,7 @@ mod tests {
             .git(&["diff", "--cached", "--name-only"])
             .unwrap()
             .contains("f.txt"));
-        let remaining = eng.diff_file("f.txt", "worktree").unwrap();
+        let remaining = eng.diff_file("f.txt", "worktree", "none").unwrap();
         assert_eq!(remaining.hunks.len(), 1, "one hunk left unstaged");
 
         // revert the remaining (line 10) hunk in the worktree
@@ -787,4 +873,91 @@ mod tests {
             "store persisted into real .git/"
         );
     }
+    /// R34i: three whitespace modes. `none` must keep the historical behaviour —
+    /// a whitespace-only change is still a difference.
+    #[test]
+    fn diff_file_whitespace_modes() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("f.txt"), "alpha\nbeta\n").unwrap();
+        run(p, &["add", "f.txt"]);
+        run(p, &["-c", "commit.gpgsign=false", "commit", "-m", "f"]);
+        // indent one line and add a trailing space on the other: whitespace only
+        std::fs::write(p.join("f.txt"), "    alpha\nbeta   \n").unwrap();
+
+        let eng = CliEngine::new(p);
+        assert_eq!(
+            eng.diff_file("f.txt", "worktree", "none").unwrap().hunks.len(),
+            1,
+            "do-not-ignore shows the whitespace-only change"
+        );
+        assert!(
+            eng.diff_file("f.txt", "worktree", "all").unwrap().hunks.is_empty(),
+            "ignore-all-whitespace hides it"
+        );
+        let trailing = eng.diff_file("f.txt", "worktree", "trailing").unwrap();
+        assert_eq!(
+            trailing.hunks.len(),
+            1,
+            "ignore-trailing still shows the leading indent"
+        );
+        assert!(
+            trailing.hunks[0]
+                .lines
+                .iter()
+                .filter(|l| l.origin != " ")
+                .all(|l| !l.content.contains("beta")),
+            "the trailing-space-only line is context, not a difference"
+        );
+    }
+
+    /// DoD: `none` gives the prior result. A tracked file with everything staged had
+    /// an empty worktree diff even before whitespace modes existed, and the fallback
+    /// synthesized an all-add diff for it — that stays.
+    #[test]
+    fn diff_file_none_mode_keeps_prior_empty_diff_fallback() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("f.txt"), "alpha\n").unwrap();
+        run(p, &["add", "f.txt"]);
+        run(p, &["-c", "commit.gpgsign=false", "commit", "-m", "f"]);
+        std::fs::write(p.join("f.txt"), "alpha\nbeta\n").unwrap();
+        run(p, &["add", "f.txt"]);
+
+        let eng = CliEngine::new(p);
+        let d = eng.diff_file("f.txt", "worktree", "none").unwrap();
+        assert_eq!(d.hunks.len(), 1, "prior behaviour: synthesized all-add diff");
+        assert!(d.hunks[0].lines.iter().all(|l| l.origin == "+"));
+        assert_eq!(
+            eng.diff_file("f.txt", "index", "none").unwrap().hunks.len(),
+            1,
+            "the staged change is visible against the index"
+        );
+    }
+
+    /// A closed dictionary is checked at the boundary, not folded into a default.
+    #[test]
+    fn diff_file_rejects_unknown_whitespace_mode() {
+        let dir = scratch_repo();
+        let err = CliEngine::new(dir.path())
+            .diff_file("a.txt", "worktree", "ignore-everything")
+            .unwrap_err();
+        match err {
+            Error::Rule(m) => assert!(m.contains("ignore-everything"), "{m}"),
+            other => panic!("expected a rule error, got {other:?}"),
+        }
+    }
+
+    /// An untracked file still gets the synthesized all-add diff.
+    #[test]
+    fn diff_file_untracked_file_is_all_add() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("new.txt"), "alpha\nbeta\n").unwrap();
+
+        let diff = CliEngine::new(p).diff_file("new.txt", "worktree", "none").unwrap();
+        assert_eq!(diff.hunks.len(), 1, "untracked file shows as one all-add hunk");
+        assert!(diff.hunks[0].lines.iter().all(|l| l.origin == "+"));
+    }
+
 }

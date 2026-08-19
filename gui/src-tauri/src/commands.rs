@@ -8,7 +8,12 @@ use crate::changelists::{self, Store};
 use crate::engine::cli::CliEngine;
 use crate::engine::GitEngine;
 use crate::error::{Error, Result};
-use crate::model::{BranchInfo, ChangelistView, FileDiff, FileState, FileStatus, RepoState};
+use crate::engine::{branches, commit as commit_engine, log as log_engine, ops};
+use crate::model::{
+    BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, FileDiff, FileState,
+    FileStatus, LogCursor, LogFilter, LogPage, RepoState, UiState,
+};
+use crate::uistate;
 
 /// Holds the currently open repository root. Commands are `async` at the Tauri layer
 /// (see lib.rs) so long git work never blocks the UI thread.
@@ -78,6 +83,10 @@ pub fn build_state(state: &State<AppState>) -> Result<RepoState> {
         detached: snap.detached,
         active_changelist_id: store.active_changelist_id.clone(),
         changelists: views,
+        // The unfinished-operation banner has to appear on its own (История 30), and
+        // every mutation already returns RepoState — so this travels with the state
+        // instead of a second `op_state` command that would be a rival source of truth.
+        operation: ops::detect_state(&repo)?,
     })
 }
 
@@ -181,8 +190,9 @@ pub async fn diff_file(
     state: State<'_, AppState>,
     path: String,
     against: String,
+    whitespace: String,
 ) -> Result<FileDiff> {
-    CliEngine::new(state.repo_path()?).diff_file(&path, &against)
+    CliEngine::new(state.repo_path()?).diff_file(&path, &against, &whitespace)
 }
 
 #[tauri::command]
@@ -274,4 +284,190 @@ pub async fn fetch(state: State<'_, AppState>) -> Result<RepoState> {
 pub async fn pull(state: State<'_, AppState>) -> Result<RepoState> {
     CliEngine::new(state.repo_path()?).pull()?;
     build_state(&state)
+}
+
+// ── history panel: log (prd_02, task 03) ─────────────────────────────────────
+
+#[tauri::command]
+pub async fn log_page(
+    state: State<'_, AppState>,
+    filter: LogFilter,
+    cursor: Option<LogCursor>,
+    limit: u32,
+) -> Result<LogPage> {
+    log_engine::page(&state.repo_path()?, &filter, cursor.as_ref(), limit)
+}
+
+#[tauri::command]
+pub async fn log_authors(state: State<'_, AppState>) -> Result<Vec<String>> {
+    log_engine::authors(&state.repo_path()?)
+}
+
+// ── history panel: one commit (prd_02, task 04) ──────────────────────────────
+
+#[tauri::command]
+pub async fn commit_details(state: State<'_, AppState>, hash: String) -> Result<CommitDetails> {
+    commit_engine::details(&state.repo_path()?, &hash)
+}
+
+#[tauri::command]
+pub async fn commit_files(
+    state: State<'_, AppState>,
+    hash: String,
+) -> Result<Vec<CommitFileEntry>> {
+    commit_engine::files(&state.repo_path()?, &hash)
+}
+
+#[tauri::command]
+pub async fn commit_file_diff(
+    state: State<'_, AppState>,
+    hash: String,
+    path: String,
+    whitespace: String,
+) -> Result<FileDiff> {
+    commit_engine::file_diff(&state.repo_path()?, &hash, &path, &whitespace)
+}
+
+#[tauri::command]
+pub async fn commits_compare(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> Result<Vec<CommitFileEntry>> {
+    commit_engine::compare(&state.repo_path()?, &from, &to)
+}
+
+#[tauri::command]
+pub async fn commits_compare_diff(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+    path: String,
+    whitespace: String,
+) -> Result<FileDiff> {
+    commit_engine::compare_diff(&state.repo_path()?, &from, &to, &path, &whitespace)
+}
+
+// ── history panel: branch tree (prd_02, task 05) ─────────────────────────────
+
+#[tauri::command]
+pub async fn branch_tree(state: State<'_, AppState>) -> Result<Vec<BranchNode>> {
+    branches::tree(&state.repo_path()?)
+}
+
+#[tauri::command]
+pub async fn branch_rename(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> Result<RepoState> {
+    branches::rename(&state.repo_path()?, &from, &to)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn branch_delete(
+    state: State<'_, AppState>,
+    name: String,
+    remote: bool,
+    force: bool,
+) -> Result<RepoState> {
+    branches::delete(&state.repo_path()?, &name, remote, force)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn branch_merge(state: State<'_, AppState>, name: String) -> Result<RepoState> {
+    branches::merge(&state.repo_path()?, &name)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn branch_rebase_onto(state: State<'_, AppState>, name: String) -> Result<RepoState> {
+    branches::rebase_onto(&state.repo_path()?, &name)?;
+    build_state(&state)
+}
+
+// ── history panel: operations on commits (prd_02, task 06) ───────────────────
+
+#[tauri::command]
+pub async fn commit_revert(state: State<'_, AppState>, hash: String) -> Result<RepoState> {
+    ops::revert(&state.repo_path()?, &hash)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn commit_reset(
+    state: State<'_, AppState>,
+    hash: String,
+    mode: String,
+) -> Result<RepoState> {
+    ops::reset(&state.repo_path()?, &hash, &mode)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn commit_cherry_pick(state: State<'_, AppState>, hash: String) -> Result<RepoState> {
+    ops::cherry_pick(&state.repo_path()?, &hash)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn commit_checkout(state: State<'_, AppState>, hash: String) -> Result<RepoState> {
+    ops::checkout_rev(&state.repo_path()?, &hash)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn tag_create(
+    state: State<'_, AppState>,
+    hash: String,
+    name: String,
+    message: Option<String>,
+) -> Result<RepoState> {
+    ops::tag_create(&state.repo_path()?, &hash, &name, message.as_deref())?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn op_continue(state: State<'_, AppState>) -> Result<RepoState> {
+    ops::op_continue(&state.repo_path()?)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn op_abort(state: State<'_, AppState>) -> Result<RepoState> {
+    ops::op_abort(&state.repo_path()?)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn op_skip(state: State<'_, AppState>) -> Result<RepoState> {
+    ops::op_skip(&state.repo_path()?)?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn stash_list_app(state: State<'_, AppState>) -> Result<Vec<String>> {
+    ops::stash_list_app(&state.repo_path()?)
+}
+
+#[tauri::command]
+pub async fn stash_restore(state: State<'_, AppState>, name: String) -> Result<RepoState> {
+    ops::stash_restore(&state.repo_path()?, &name)?;
+    build_state(&state)
+}
+
+// ── history panel: UI state file (prd_02, task 01) ───────────────────────────
+
+#[tauri::command]
+pub async fn ui_state_get(state: State<'_, AppState>) -> Result<UiState> {
+    uistate::get(&state.repo_path()?)
+}
+
+#[tauri::command]
+pub async fn ui_state_set(state: State<'_, AppState>, ui: UiState) -> Result<UiState> {
+    let repo = state.repo_path()?;
+    uistate::set(&repo, &ui)?;
+    uistate::get(&repo)
 }

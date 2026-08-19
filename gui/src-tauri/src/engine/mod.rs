@@ -1,7 +1,11 @@
 use crate::error::Result;
 use crate::model::RepoSnapshot;
 
+pub mod branches;
 pub mod cli;
+pub mod commit;
+pub mod log;
+pub mod ops;
 
 /// Abstraction over the git backend.
 ///
