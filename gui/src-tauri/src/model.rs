@@ -76,11 +76,26 @@ pub struct Hunk {
 }
 
 /// A file's diff against a chosen base.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `old_size` / `new_size` exist for a **binary** file, where there is no text to
+/// show and the only honest statement is how many bytes the file had on each side
+/// (prd_02 История 68). A side where the file does not exist — an addition or a
+/// deletion — has `None`, and a text diff carries neither.
+///
+/// `merge_first_parent` marks a merge commit's diff: it is the comparison against
+/// the commit's *first* parent, one of several possible readings, so the panel must
+/// say so. The fact travels with the diff rather than being reassembled by the UI
+/// from a second call.
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileDiff {
     pub path: String,
     pub binary: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_size: Option<u64>,
+    pub merge_first_parent: bool,
     pub hunks: Vec<Hunk>,
 }
 

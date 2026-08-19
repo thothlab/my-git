@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use super::GitEngine;
 use crate::error::{Error, Result};
 use crate::model::{
-    BranchInfo, DiffLine, FileDiff, FileState, FileStatus, Hunk, RepoSnapshot,
+    BranchInfo, DiffLine, FileDiff, FileState, FileStatus, Hunk, RefKind, RefLabel, RepoSnapshot,
 };
 
 /// git backend implemented by shelling out to the system `git`.
@@ -174,9 +174,9 @@ impl CliEngine {
     /// Diff a file against a base: `worktree` (unstaged), `index` (staged) or `head`.
     ///
     /// `whitespace` is one of `none` (do not ignore — the historical behaviour),
-    /// `trailing` (`--ignore-space-at-eol`) or `all` (`-w`). Any other value is
-    /// treated as `none`, so a caller that has not been taught about the mode yet
-    /// keeps seeing every difference rather than silently hiding some.
+    /// `trailing` (`--ignore-space-at-eol`) or `all` (`--ignore-all-space`). Any
+    /// other value is rejected with `Error::Rule`: a mode folded into a default
+    /// would show a diff nobody asked for and report nothing.
     pub fn diff_file(&self, path: &str, against: &str, whitespace: &str) -> Result<FileDiff> {
         let ws = whitespace_args(whitespace)?;
         let raw = match against {
@@ -374,12 +374,16 @@ fn parse_hunk_header(h: &str) -> (u32, u32) {
 
 /// Parse `git diff` output for a single file into hunks, keeping each hunk's exact
 /// applicable patch text (file header + hunk) so stage/revert is byte-exact.
-fn parse_diff(path: &str, raw: &str) -> FileDiff {
+///
+/// Visible to the whole engine: a commit's diff has the same shape as a worktree
+/// diff, and a second parser would be a second set of edge cases (binary files,
+/// renames, "\ No newline") drifting away from this one.
+pub(crate) fn parse_diff(path: &str, raw: &str) -> FileDiff {
     if raw.contains("Binary files ") || raw.contains("GIT binary patch") {
         return FileDiff {
             path: path.into(),
             binary: true,
-            hunks: Vec::new(),
+            ..FileDiff::default()
         };
     }
     let lines: Vec<&str> = raw.split('\n').collect();
@@ -387,7 +391,7 @@ fn parse_diff(path: &str, raw: &str) -> FileDiff {
         return FileDiff {
             path: path.into(),
             binary: false,
-            hunks: Vec::new(),
+            ..FileDiff::default()
         };
     };
     let header = lines[..first].join("\n");
@@ -465,6 +469,7 @@ fn parse_diff(path: &str, raw: &str) -> FileDiff {
         path: path.into(),
         binary: false,
         hunks,
+        ..FileDiff::default()
     }
 }
 
@@ -490,6 +495,42 @@ fn make_status(xy: &str, path: String, old_path: Option<String>, renamed: bool) 
         staged: x != '.',
         unstaged: y != '.',
     }
+}
+
+/// Parse the `%D` decoration of a commit — "HEAD -> main, origin/main, tag: v1" —
+/// into typed labels.
+///
+/// Lives here, next to the other parsers of git output, because the log rows and the
+/// commit card decorate the same commits and two copies of this parse drift apart:
+/// the first thing lost is the distinction between a remote branch and a local one
+/// whose name merely contains a slash. `remotes` is the repo's remote list — the
+/// only way to tell `origin/main` from a local `origin/main`-shaped branch.
+pub(crate) fn parse_refs(deco: &str, remotes: &[String]) -> Vec<RefLabel> {
+    let mut out = Vec::new();
+    for raw in deco.split(", ") {
+        let t = raw.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let (name, kind) = if let Some(tag) = t.strip_prefix("tag: ") {
+            (tag.trim(), RefKind::Tag)
+        } else if let Some(branch) = t.strip_prefix("HEAD -> ") {
+            // the branch HEAD currently points at
+            (branch.trim(), RefKind::Head)
+        } else if t == "HEAD" {
+            // detached: HEAD decorates the commit on its own
+            (t, RefKind::Head)
+        } else if remotes.iter().any(|r| t.starts_with(&format!("{r}/"))) {
+            (t, RefKind::Remote)
+        } else {
+            (t, RefKind::Local)
+        };
+        out.push(RefLabel {
+            name: name.to_string(),
+            kind,
+        });
+    }
+    out
 }
 
 /// git flags for a whitespace mode: `none` | `trailing` | `all`.
@@ -642,6 +683,28 @@ pub(crate) mod tests {
         run(p, &["add", "a.txt"]);
         run(p, &["commit", "-m", "init"]);
         dir
+    }
+
+    #[test]
+    fn ref_labels_carry_their_kind() {
+        let remotes = vec!["origin".to_string()];
+        let refs = parse_refs("HEAD -> main, origin/main, tag: v1, later, feature/main", &remotes);
+        let kind = |name: &str| {
+            refs.iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no ref {name} in {refs:?}"))
+                .kind
+        };
+        assert_eq!(refs.len(), 5, "every decoration becomes one label: {refs:?}");
+        assert_eq!(kind("main"), RefKind::Head, "HEAD -> main is the current branch head");
+        assert_eq!(kind("origin/main"), RefKind::Remote);
+        assert_eq!(kind("v1"), RefKind::Tag);
+        assert_eq!(kind("later"), RefKind::Local);
+        assert_eq!(kind("feature/main"), RefKind::Local, "a slash alone does not make a remote");
+
+        // detached HEAD decorates on its own, and an empty decoration is no labels
+        assert_eq!(parse_refs("HEAD", &remotes)[0].kind, RefKind::Head);
+        assert!(parse_refs("", &remotes).is_empty());
     }
 
     #[test]

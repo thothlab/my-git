@@ -376,6 +376,14 @@ pub async fn branch_delete(
     build_state(&state)
 }
 
+/// Read-only: how many commits deleting `name` would lose, by git's own definition
+/// of "not fully merged". Its own command because the confirmation dialog has to
+/// name the number **before** the deletion, not learn it from a failed attempt.
+#[tauri::command]
+pub async fn branch_unmerged_count(state: State<'_, AppState>, name: String) -> Result<u32> {
+    branches::unmerged_count(&state.repo_path()?, &name)
+}
+
 #[tauri::command]
 pub async fn branch_merge(state: State<'_, AppState>, name: String) -> Result<RepoState> {
     branches::merge(&state.repo_path()?, &name)?;
@@ -410,6 +418,28 @@ pub async fn commit_reset(
 pub async fn commit_cherry_pick(state: State<'_, AppState>, hash: String) -> Result<RepoState> {
     ops::cherry_pick(&state.repo_path()?, &hash)?;
     build_state(&state)
+}
+
+/// Read-only: is this commit already on the current branch (by ancestry or by an
+/// equivalent patch)? Its own command because История 58 disables the cherry-pick
+/// menu item **before** it is clicked, with the reason stated.
+#[tauri::command]
+pub async fn commit_contains(state: State<'_, AppState>, hash: String) -> Result<bool> {
+    ops::contains_commit(&state.repo_path()?, &hash)
+}
+
+/// Read-only: how many commits a reset to `hash` would discard. История 57 makes
+/// the hard-reset confirmation name the number before the operation, not after.
+#[tauri::command]
+pub async fn commit_reset_lost_count(state: State<'_, AppState>, hash: String) -> Result<u32> {
+    ops::commits_after(&state.repo_path()?, &hash)
+}
+
+/// Read-only: does the working tree or index carry anything uncommitted? The other
+/// half of the hard-reset warning.
+#[tauri::command]
+pub async fn repo_local_changes(state: State<'_, AppState>) -> Result<bool> {
+    ops::has_local_changes(&state.repo_path()?)
 }
 
 #[tauri::command]
