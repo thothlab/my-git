@@ -58,3 +58,37 @@ body {
   0% { background-position: -40% 0; }
   100% { background-position: 140% 0; }
 }
+
+/* Graph lane colours. Twelve is the lane budget (PRD prd_02 §Решения): a lane's
+   colour is its index modulo twelve, decided by the commit that opens the line
+   and stable for its whole life, so the picture does not change between loads or
+   break at a page boundary. They are design tokens like the ones above — the
+   graph never writes a literal colour. */
+:root {
+  --lane-0: 37 99 235;
+  --lane-1: 34 150 83;
+  --lane-2: 201 55 55;
+  --lane-3: 176 128 0;
+  --lane-4: 138 79 205;
+  --lane-5: 0 145 160;
+  --lane-6: 214 106 30;
+  --lane-7: 190 60 140;
+  --lane-8: 70 120 175;
+  --lane-9: 100 140 40;
+  --lane-10: 150 90 60;
+  --lane-11: 90 100 130;
+}
+:root.dark {
+  --lane-0: 96 165 250;
+  --lane-1: 63 185 108;
+  --lane-2: 233 96 96;
+  --lane-3: 214 165 42;
+  --lane-4: 176 130 240;
+  --lane-5: 60 190 205;
+  --lane-6: 240 150 80;
+  --lane-7: 230 120 190;
+  --lane-8: 130 175 225;
+  --lane-9: 160 200 90;
+  --lane-10: 200 145 110;
+  --lane-11: 150 160 195;
+}
