@@ -1,7 +1,7 @@
 import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import Resizer, { RowResizer } from "../Resizer";
 import DiffPanel from "../diff/DiffPanel";
-import type { DiffSource } from "../diff/model";
+import { sameDiffSource, type DiffSource } from "../diff/model";
 import { focusPanel } from "../../hotkeys";
 import { commits } from "../../logStore";
 import CommitDetailsPane from "./CommitDetailsPane";
@@ -47,15 +47,23 @@ export default function LogView() {
    * (nothing selects one today) yields no source at all rather than a diff
    * claiming a root commit.
    */
-  const diffSource = createMemo<DiffSource | null>(() => {
-    const file = selectedCommitFile();
-    if (!file) return null;
-    const cmp = compareTarget();
-    if (cmp) return { kind: "compare", path: file.path, from: cmp.from, to: cmp.to };
-    const row = commits().find((c) => c.hash === file.hash);
-    if (!row) return null;
-    return { kind: "commit", path: file.path, hash: file.hash, parent: row.parents[0] ?? null };
-  });
+  const diffSource = createMemo<DiffSource | null>(
+    () => {
+      const file = selectedCommitFile();
+      if (!file) return null;
+      const cmp = compareTarget();
+      if (cmp) return { kind: "compare", path: file.path, from: cmp.from, to: cmp.to };
+      const row = commits().find((c) => c.hash === file.hash);
+      if (!row) return null;
+      return { kind: "commit", path: file.path, hash: file.hash, parent: row.parents[0] ?? null };
+    },
+    null,
+    // By value, because the value is rebuilt on every change of `commits()` —
+    // a page appended at the foot of the log, a refresh — while naming the same
+    // file of the same commit. Compared by identity, each of those re-asked git
+    // for the diff and blanked the panel to its placeholder meanwhile.
+    { equals: sameDiffSource },
+  );
 
   const clampDetails = (w: number) => {
     const total = bottomEl?.clientWidth ?? window.innerWidth;

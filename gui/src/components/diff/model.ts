@@ -255,3 +255,23 @@ export function sideLabels(
       : { text: words.working, readOnly: false };
   return { left, right };
 }
+
+/**
+ * Do two sources name the same comparison?
+ *
+ * The panel's request is keyed on the source *value*, but a source is built
+ * fresh by whoever selects a file — in the Log mode from the selected file plus
+ * the loaded rows — so its identity changes whenever those change, and a page
+ * appended at the foot of the log would otherwise re-ask git for the file the
+ * reader is already looking at and blank the panel while the answer travels.
+ * Compared field by field, "the same file of the same commit" stays the same
+ * source no matter how many times it is rebuilt.
+ */
+export function sameDiffSource(a: DiffSource | null, b: DiffSource | null): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.kind !== b.kind || a.path !== b.path) return false;
+  if (a.kind === "worktree") return a.base === (b as typeof a).base;
+  if (a.kind === "commit")
+    return a.hash === (b as typeof a).hash && a.parent === (b as typeof a).parent;
+  return a.from === (b as typeof a).from && a.to === (b as typeof a).to;
+}
