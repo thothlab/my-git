@@ -12,6 +12,7 @@ import {
 import { branchList, logAuthors, type LogFilter } from "../../api";
 import { d, fmtDate } from "../../i18n";
 import { registerHotkey } from "../../hotkeys";
+import { IconButton } from "../IconButton";
 import {
   applyFilter,
   dim,
@@ -350,16 +351,12 @@ function ToggleBtn(props: { label: string; tip: string; on: boolean; onClick: ()
   );
 }
 
+/** Same control as every other toolbar button in the window. */
 function BarBtn(props: { label: string; tip: string; disabled?: boolean; onClick: () => void }) {
   return (
-    <button
-      class="rounded border border-transparent px-1.5 py-0.5 text-fg-muted hover:border-border hover:bg-bg disabled:cursor-not-allowed disabled:opacity-40"
-      title={props.tip}
-      disabled={props.disabled}
-      onClick={props.onClick}
-    >
+    <IconButton tip={props.tip} disabled={props.disabled} onClick={props.onClick}>
       {props.label}
-    </button>
+    </IconButton>
   );
 }
 

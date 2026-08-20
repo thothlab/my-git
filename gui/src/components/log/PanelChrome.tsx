@@ -1,5 +1,6 @@
 import type { JSX } from "solid-js";
 import { usePanel, type PanelHandlers, type PanelId } from "../../hotkeys";
+import { IconButton } from "../IconButton";
 
 /**
  * Frame shared by the three Log-mode panels: header with a title and a toolbar,
@@ -33,9 +34,9 @@ export function PanelChrome(props: {
       classList={{ "ring-1 ring-accent": panel.focused() }}
       aria-label={props.title}
     >
-      <header class="flex h-7 shrink-0 items-center gap-1 border-b border-border bg-bg-muted px-2 text-xs">
+      <header class="flex h-7 shrink-0 items-center gap-0.5 border-b border-border bg-bg-muted px-1.5 text-xs">
         <span class="truncate font-semibold">{props.title}</span>
-        <div class="ml-auto flex items-center gap-1">{props.toolbar}</div>
+        <div class="ml-auto flex items-center gap-0.5">{props.toolbar}</div>
       </header>
       <div class="min-h-0 flex-1 overflow-auto">{props.children}</div>
     </section>
@@ -43,26 +44,30 @@ export function PanelChrome(props: {
 }
 
 /**
- * Toolbar button. Every button carries a tooltip (R49i); one whose action does
- * not exist yet is disabled and its tooltip says why, instead of silently doing
- * nothing on click.
+ * Toolbar button of a Log panel. A thin naming layer over the window-wide
+ * `IconButton` (`components/IconButton.tsx`) — the header of a Log panel and the
+ * header of the CHANGES panel draw the same control, so neither owns its look.
+ * Every button carries a tooltip (R49i); one whose action is unavailable is
+ * disabled and its tooltip says why, instead of silently doing nothing on click.
  */
 export function PanelBtn(props: {
-  label: string;
+  label: JSX.Element;
   tip: string;
   disabled?: boolean;
   disabledTip?: string;
+  active?: boolean;
   onClick?: () => void;
 }) {
   return (
-    <button
-      class="rounded border border-transparent px-1.5 py-0.5 text-xs text-fg-muted hover:border-border hover:bg-bg disabled:cursor-not-allowed disabled:opacity-40"
-      title={props.disabled ? (props.disabledTip ?? props.tip) : props.tip}
+    <IconButton
+      tip={props.tip}
       disabled={props.disabled}
+      disabledTip={props.disabledTip}
+      active={props.active}
       onClick={() => props.onClick?.()}
     >
       {props.label}
-    </button>
+    </IconButton>
   );
 }
 

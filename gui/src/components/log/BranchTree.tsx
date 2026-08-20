@@ -10,6 +10,14 @@ import {
 import { d } from "../../i18n";
 import { busy, setError, state } from "../../store";
 import { PanelBtn, PanelChrome, PanelNote } from "./PanelChrome";
+import {
+  IconCollapseAll,
+  IconExpandAll,
+  IconFetch,
+  IconPlus,
+  IconRefresh,
+  IconStar,
+} from "../IconButton";
 import { setSelectedBranch } from "./branchSelection";
 import {
   branchMenuItems,
@@ -22,9 +30,14 @@ import { ActionDialogHost } from "./actions/dialogs";
 import { operationActive, repoRevision } from "./actions/repoRefresh";
 
 /**
- * Branch tree panel: HEAD on top, then Local and Remote groups, branch names
- * split into collapsible folders, favourites first inside their group,
- * ahead/behind for tracking branches, and a filter field.
+ * Branch tree panel: HEAD on top, then the Favourites section, then the Local
+ * and Remote groups, branch names split into collapsible folders, ahead/behind
+ * for tracking branches, and a filter field.
+ *
+ * **A favourite leaves its group.** It used to be sorted first *inside* its
+ * folder, which is invisible from outside the folder — the star read as a button
+ * that does nothing. A favourite now rises into its own section at the top of
+ * the panel, by its full name, and is not drawn a second time below.
  *
  * Three seams worth knowing before changing anything here:
  *
@@ -58,7 +71,6 @@ interface BranchLeaf {
   kind: "branch";
   name: string;
   node: BranchNode;
-  favorite: boolean;
 }
 type TreeNode = FolderNode | BranchLeaf;
 
@@ -165,15 +177,33 @@ export default function BranchTree() {
 
   const headNode = createMemo(() => branches()?.find((b) => b.fullRef === DETACHED_REF));
 
+  const needle = () => filter().trim().toLowerCase();
+  const matches = (b: BranchNode) => !needle() || b.name.toLowerCase().includes(needle());
+
+  /**
+   * The groups hold everything that is *not* a favourite: a favourite is drawn
+   * once, in the section above, and a second copy inside its folder would make
+   * the star look like it merely duplicated the row.
+   */
   const groupTree = (group: Group) => {
     const list = (branches() ?? []).filter((b) =>
       group === "remote" ? b.isRemote : !b.isRemote && b.fullRef !== DETACHED_REF,
     );
-    const picked = list.filter((b) => (favOnly() ? favorites().has(favKey(b)) : true));
-    const needle = filter().trim().toLowerCase();
-    const matched = needle ? picked.filter((b) => b.name.toLowerCase().includes(needle)) : picked;
-    return sortTree(buildTree(matched, favorites()));
+    const picked = list.filter((b) => !favorites().has(favKey(b)) && matches(b));
+    return sortTree(buildTree(picked));
   };
+
+  /**
+   * Favourites, flat and by full name. Flat because a favourite is precisely a
+   * branch pulled out of the structure; by full name because the last path
+   * segment alone is ambiguous once the folders are gone — `feature/x` and
+   * `origin/x` would both read as `x`.
+   */
+  const favBranches = createMemo(() =>
+    (branches() ?? [])
+      .filter((b) => b.fullRef !== DETACHED_REF && favorites().has(favKey(b)) && matches(b))
+      .sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent) || a.name.localeCompare(b.name)),
+  );
 
   const localTree = createMemo(() => groupTree("local"));
   const remoteTree = createMemo(() => groupTree("remote"));
@@ -198,7 +228,7 @@ export default function BranchTree() {
             depth,
             group,
             node: n.node,
-            favorite: n.favorite,
+            favorite: false,
           });
           continue;
         }
@@ -220,6 +250,18 @@ export default function BranchTree() {
     return out;
   };
 
+  const favRows = createMemo<Row[]>(() =>
+    favBranches().map((b) => ({
+      key: `b:${b.fullRef}`,
+      kind: "branch" as const,
+      label: b.name,
+      depth: 0,
+      group: b.isRemote ? ("remote" as Group) : ("local" as Group),
+      node: b,
+      favorite: true,
+    })),
+  );
+
   const localRows = createMemo(() => rowsOf("local", localTree()));
   const remoteRows = createMemo(() => rowsOf("remote", remoteTree()));
 
@@ -234,7 +276,12 @@ export default function BranchTree() {
   });
 
   /** Flat order for the keyboard only — each section renders its own slice. */
-  const rows = createMemo<Row[]>(() => [...headRow(), ...localRows(), ...remoteRows()]);
+  const rows = createMemo<Row[]>(() => [
+    ...headRow(),
+    ...favRows(),
+    ...localRows(),
+    ...remoteRows(),
+  ]);
 
   // A change of repository drops the selection back to HEAD. Keeping the row
   // selected by key alone would carry a branch name into a repository that need
@@ -331,11 +378,17 @@ export default function BranchTree() {
   const loaded = () => branches() !== undefined && ui() !== undefined;
   /** No HEAD node and no refs at all — a repository whose first commit is missing. */
   const noCommits = () => loaded() && (branches() ?? []).length === 0 && !state()?.detached;
+  /**
+   * Judged on what is *drawn*, not on what was computed: with "favourites only"
+   * on, the groups still hold every other branch, they are simply not rendered.
+   * Counting them would leave a reader who has starred nothing looking at a
+   * panel holding one HEAD line and no explanation at all.
+   */
   const nothingMatched = () =>
     loaded() &&
     (branches() ?? []).length > 0 &&
-    localRows().length === 0 &&
-    remoteRows().length === 0 &&
+    favRows().length === 0 &&
+    (favOnly() || (localRows().length === 0 && remoteRows().length === 0)) &&
     narrowed();
 
   const refreshAll = () => {
@@ -370,23 +423,28 @@ export default function BranchTree() {
       }}
       toolbar={
         <>
-          <PanelBtn label="⟳" tip={d().refreshTip()} onClick={refreshAll} />
+          <PanelBtn label={<IconRefresh />} tip={d().refreshTip()} onClick={refreshAll} />
           <PanelBtn
-            label="↓"
+            label={<IconFetch />}
             tip={d().fetchPruneTip()}
             disabled={busy() || operationActive()}
             disabledTip={operationActive() ? d().whyOperationRunning() : d().fetching()}
             onClick={() => void fetchAll()}
           />
-          <PanelBtn label="▾" tip={d().expandAllTip()} onClick={expandAllFolders} />
-          <PanelBtn label="▸" tip={d().collapseAllTip()} onClick={collapseAll} />
+          <PanelBtn label={<IconExpandAll />} tip={d().expandAllTip()} onClick={expandAllFolders} />
+          <PanelBtn label={<IconCollapseAll />} tip={d().collapseAllTip()} onClick={collapseAll} />
+          {/* The second star in the panel, and the one that confuses: this is a
+              *filter over the list*, not the mark on a row. It is told apart by
+              its pressed state and by a tooltip that names the list, never the
+              branch. */}
           <PanelBtn
-            label={favOnly() ? "★" : "☆"}
-            tip={d().favoritesOnlyTip()}
+            label={<IconStar filled={favOnly()} />}
+            tip={favOnly() ? d().favoritesShowAllTip() : d().favoritesOnlyTip()}
+            active={favOnly()}
             onClick={() => setFavOnly((v) => !v)}
           />
           <PanelBtn
-            label="+"
+            label={<IconPlus />}
             tip={d().newBranchTip()}
             disabled={operationActive()}
             disabledTip={d().whyOperationRunning()}
@@ -428,7 +486,15 @@ export default function BranchTree() {
               when={!noCommits()}
               fallback={<PanelNote title={d().noCommitsTitle()} hint={d().noCommitsHint()} />}
             >
-              <Show when={!nothingMatched()} fallback={<PanelNote title={d().noMatches()} />}>
+              <Show
+                when={!nothingMatched()}
+                fallback={
+                  <PanelNote
+                    title={favOnly() && !filter().trim() ? d().noFavorites() : d().noMatches()}
+                    hint={favOnly() && !filter().trim() ? d().noFavoritesHint() : undefined}
+                  />
+                }
+              >
                 <div ref={listEl} class="min-h-0 flex-1 overflow-auto py-1">
                   <For each={headRow()}>
                     {(row) => (
@@ -442,6 +508,31 @@ export default function BranchTree() {
                     )}
                   </For>
 
+                  <Show when={favRows().length > 0}>
+                    <Section title={d().favoritesSection()}>
+                      <For each={favRows()}>
+                        {(row) => (
+                          <RowView
+                            row={row}
+                            selected={selectedKey() === row.key}
+                            onSelect={() => setSelectedKey(row.key)}
+                            onToggleFavorite={() => row.node && toggleFavorite(row.node)}
+                            onActivate={() => {
+                              if (row.node && !row.node.isCurrent) void checkoutBranch(row.node);
+                            }}
+                            onContextMenu={(e) =>
+                              openMenuFor(row.node ?? null, { x: e.clientX, y: e.clientY })
+                            }
+                          />
+                        )}
+                      </For>
+                    </Section>
+                  </Show>
+
+                  {/* "Favourites only" hides the groups rather than emptying
+                      them: an empty Local group under a full Favourites section
+                      reads as "this repository has no local branches". */}
+                  <Show when={!favOnly()}>
                   <Section title={d().local()}>
                     <Show
                       when={localRows().length > 0}
@@ -497,6 +588,7 @@ export default function BranchTree() {
                       </For>
                     </Show>
                   </Section>
+                  </Show>
                 </div>
               </Show>
             </Show>
@@ -539,17 +631,26 @@ function RowView(props: {
       }}
       title={props.row.node?.name ?? props.row.label}
     >
+      {/* The mark on the row, not a toolbar button: no frame, no pressed
+          background — the header star is the control that filters the list.
+          Filled versus outlined is the whole of the state, readable without
+          hovering; the previous version differed only in opacity and read as a
+          button that does nothing. */}
       <Show when={props.row.kind === "branch"}>
         <button
-          class="shrink-0 text-warn"
-          classList={{ "opacity-30": !props.row.favorite }}
-          title={d().favoriteTip()}
+          class="flex shrink-0 items-center hover:text-warn"
+          classList={{
+            "text-warn": props.row.favorite,
+            "text-fg-subtle": !props.row.favorite,
+          }}
+          title={props.row.favorite ? d().favoriteRemoveTip() : d().favoriteAddTip()}
+          aria-pressed={props.row.favorite}
           onClick={(e) => {
             e.stopPropagation();
             props.onToggleFavorite();
           }}
         >
-          {props.row.favorite ? "★" : "☆"}
+          <IconStar filled={props.row.favorite} />
         </button>
       </Show>
       <Show when={props.row.kind === "folder"}>
@@ -593,11 +694,11 @@ function Note(props: { text: string }) {
  * Three differences, none of them cosmetic:
  *
  * - The leaf is a branch, not a file: it is a full row with its own actions,
- *   favourite flag and context menu, and it is *interleaved* with folders in one
- *   `children` array — `sortTree` orders folders and branches against each other
- *   (current branch, then favourites, then alphabetically). `pathTree` keeps
- *   `dirs` and `files` in separate buckets and always draws folders first, which
- *   would hoist every folder above a favourite branch.
+ *   context menu, and it is *interleaved* with folders in one `children` array —
+ *   `sortTree` orders folders and branches against each other (current branch,
+ *   then alphabetically). `pathTree` keeps `dirs` and `files` in separate buckets
+ *   and always draws folders first, which would hoist every folder above the
+ *   current branch.
  * - A folder merges only when its single child is a *folder*; a folder holding
  *   one branch stays a folder. The file version merges while `files.length === 0`
  *   — the same thing said in the file world, but not expressible on a single
@@ -610,7 +711,7 @@ function Note(props: { text: string }) {
  * walks the compacted tree, so a merged chain has one key, exactly like
  * `treeDirPaths`. Change one, look at the other.
  */
-function buildTree(list: BranchNode[], favs: Set<string>): TreeNode[] {
+function buildTree(list: BranchNode[]): TreeNode[] {
   const root: FolderNode = { kind: "folder", name: "", path: "", children: [] };
   for (const b of list) {
     const segs = b.name.split("/");
@@ -630,7 +731,6 @@ function buildTree(list: BranchNode[], favs: Set<string>): TreeNode[] {
       kind: "branch",
       name: segs[segs.length - 1],
       node: b,
-      favorite: favs.has(favKey(b)),
     });
   }
   return root.children.map(compact);
@@ -653,12 +753,15 @@ function compact(node: TreeNode): TreeNode {
 }
 
 /**
- * Current branch first, then favourites, then everything alphabetically —
- * applied at every level, so a favourite keeps the folder it belongs to instead
- * of being hoisted out of the structure the folders exist to show.
+ * Current branch first, then everything alphabetically — applied at every level.
+ *
+ * There is no favourite rank here any more: a favourite is not sorted inside its
+ * folder, it is lifted out of the groups entirely into the Favourites section
+ * (see the panel docblock). Ranking it here as well would only reorder rows that
+ * are no longer in this tree.
  */
 function sortTree(nodes: TreeNode[]): TreeNode[] {
-  const rank = (n: TreeNode) => (n.kind === "branch" && n.node.isCurrent ? 0 : n.kind === "branch" && n.favorite ? 1 : 2);
+  const rank = (n: TreeNode) => (n.kind === "branch" && n.node.isCurrent ? 0 : 1);
   return nodes
     .map((n) => (n.kind === "folder" ? { ...n, children: sortTree(n.children) } : n))
     .sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));

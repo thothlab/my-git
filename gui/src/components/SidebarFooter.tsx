@@ -12,6 +12,7 @@ import {
   updaterLastCheckedAt,
   updatesSupported,
 } from "../updater";
+import { DISABLED_CLASS } from "./IconButton";
 
 const REPO_URL = "https://github.com/thothlab/my-git";
 
@@ -184,7 +185,7 @@ function AboutModal(props: { onClose: () => void }) {
               <Show when={pendingUpdate()}>
                 {(u) => (
                   <button
-                    class="rounded bg-accent px-3 py-1 text-xs text-white disabled:opacity-60"
+                    class={`rounded bg-accent px-3 py-1 text-xs text-white ${DISABLED_CLASS}`}
                     disabled={installing()}
                     onClick={() => void onInstall()}
                   >
@@ -193,7 +194,7 @@ function AboutModal(props: { onClose: () => void }) {
                 )}
               </Show>
               <button
-                class="rounded border border-border px-3 py-1 text-xs hover:bg-bg-muted disabled:opacity-60"
+                class={`rounded border border-border px-3 py-1 text-xs hover:bg-bg-muted ${DISABLED_CLASS}`}
                 disabled={isCheckingForUpdates() || installing()}
                 onClick={() => void onCheck()}
               >

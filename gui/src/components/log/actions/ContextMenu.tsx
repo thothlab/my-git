@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { Portal } from "solid-js/web";
+import { DISABLED_CLASS } from "../../IconButton";
 
 /**
  * The context menu shared by the branch tree and the log.
@@ -143,7 +144,7 @@ export default function ContextMenu(props: {
                   props.items().slice(0, i()).filter(isAction).length;
                 return (
                   <button
-                    class="block w-full cursor-default px-3 py-1 text-left disabled:cursor-not-allowed disabled:opacity-40"
+                    class={`block w-full cursor-default px-3 py-1 text-left ${DISABLED_CLASS}`}
                     classList={{
                       "text-danger": !!a().danger && !a().disabled,
                       "bg-bg-muted": cursor() === actionIndex() && !a().disabled,

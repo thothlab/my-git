@@ -2,6 +2,7 @@ import { For, Show, createEffect, createSignal, onCleanup, onMount } from "solid
 import { Portal } from "solid-js/web";
 import { d } from "../../../i18n";
 import { registerModalSource } from "../../../store";
+import { DISABLED_CLASS } from "../../IconButton";
 
 /**
  * The form dialogs of the panel's actions: a branch name, a tag with an optional
@@ -208,7 +209,7 @@ function DialogView(props: { spec: OpenDialog }) {
               {d().cancel()}
             </button>
             <button
-              class="rounded bg-accent px-3 py-1 text-sm text-white disabled:opacity-40"
+              class={`rounded bg-accent px-3 py-1 text-sm text-white ${DISABLED_CLASS}`}
               disabled={busy() || !canSubmit()}
               onClick={() => void submit()}
             >
