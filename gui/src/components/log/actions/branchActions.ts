@@ -16,7 +16,7 @@ import {
   stashRestore,
   type BranchNode,
 } from "../../../api";
-import { d, locale } from "../../../i18n";
+import { d, fmtDateTime } from "../../../i18n";
 import { chooseOption, confirmAction, run, setError, state } from "../../../store";
 import { selectedBranch, setSelectedBranch } from "../branchSelection";
 import { copyText } from "./clipboard";
@@ -253,7 +253,7 @@ export async function restoreStashed(): Promise<void> {
     d().stashRestoreTitle(),
     entries.map((raw) => {
       const e = parseAppStash(raw);
-      const when = new Date(e.at * 1000).toLocaleString(locale() === "ru" ? "ru-RU" : "en-GB");
+      const when = fmtDateTime(e.at);
       const mark = marks.has(stashMark(e)) ? ` — ${d().stashRestoredMark()}` : "";
       return { key: raw, label: `${when} · ${e.label}${mark}` };
     }),

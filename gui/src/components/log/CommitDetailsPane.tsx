@@ -17,7 +17,7 @@ import {
   type CommitFileEntry,
 } from "../../api";
 import { focusPanel } from "../../hotkeys";
-import { d, locale } from "../../i18n";
+import { d, fmtDateTime } from "../../i18n";
 import { setSelectedPath, setViewMode, state, statusMeta } from "../../store";
 import type { CompareTarget } from "./actions/compareSelection";
 import { PanelBtn, PanelChrome, PanelNote } from "./PanelChrome";
@@ -59,12 +59,45 @@ export default function CommitDetailsPane(props: {
 
   /** What the panel is showing. One key for both modes: a comparison and a
    * commit must never be in flight at once and settle in the wrong order. */
-  const subject = (): { cmp: CompareTarget } | { hash: string } | null => {
+  const rawSubject = (): { cmp: CompareTarget } | { hash: string } | null => {
     const cmp = props.compare?.() ?? null;
     if (cmp) return { cmp };
     const hash = props.selected();
     return hash ? { hash } : null;
   };
+
+  /**
+   * The subject the reader stopped on, not every subject they passed over.
+   *
+   * Reading a commit costs two git processes (`show` and the file list) and the
+   * memory to hold both answers, and holding the arrow key down walks the cursor
+   * over hundreds of commits a second. Fetched per step, that was the single
+   * largest source of the log panel's memory growth: a keyboard pass down a long
+   * history asked git for hundreds of commits nobody ever saw, and the browser
+   * heap grew to hold every answer. So the request waits for the cursor to
+   * settle; what stands still on screen is what gets read.
+   *
+   * The wait applies to *arriving* at a subject, never to leaving one: clearing
+   * is immediate, so the panel does not show the previous commit's card while
+   * the selection is empty.
+   */
+  const SETTLE_MS = 120;
+  const [settled, setSettled] = createSignal<{ cmp: CompareTarget } | { hash: string } | null>(
+    rawSubject(),
+  );
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
+  createEffect(() => {
+    const next = rawSubject();
+    clearTimeout(settleTimer);
+    if (next === null) {
+      setSettled(null);
+      return;
+    }
+    settleTimer = setTimeout(() => setSettled(next), SETTLE_MS);
+  });
+  onCleanup(() => clearTimeout(settleTimer));
+
+  const subject = settled;
 
   const [data] = createResource(subject, async (s) => {
     if ("cmp" in s) {
@@ -524,9 +557,7 @@ function Chevron(props: { collapsed: boolean }) {
 }
 
 /**
- * Unix seconds from git (`%at` / `%ct`) in the app's own locale and the user's
- * zone. Reading `locale()` here also makes the dates re-render on a language
- * switch, like every other visible string.
+ * Unix seconds from git (`%at` / `%ct`) in the window's one date format
+ * (`i18n.fmtDateTime`) and the user's zone.
  */
-const fmtTime = (unixSeconds: number) =>
-  new Date(unixSeconds * 1000).toLocaleString(locale());
+const fmtTime = (unixSeconds: number) => fmtDateTime(unixSeconds);

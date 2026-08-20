@@ -10,7 +10,7 @@ import {
   type JSX,
 } from "solid-js";
 import { branchList, logAuthors, type LogFilter } from "../../api";
-import { d, locale } from "../../i18n";
+import { d, fmtDate } from "../../i18n";
 import { registerHotkey } from "../../hotkeys";
 import {
   applyFilter,
@@ -138,7 +138,7 @@ export default function FilterBar() {
 
   const dateLabel = () => {
     const f = filter();
-    const fmt = (t: number) => new Date(t * 1000).toLocaleDateString(locale());
+    const fmt = fmtDate;
     if (f.since && f.until) return d().fltDateRange(fmt(f.since), fmt(f.until));
     if (f.since) return d().fltDateSince(fmt(f.since));
     if (f.until) return d().fltDateUntil(fmt(f.until));

@@ -1,7 +1,7 @@
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
 import { commitContains, type LogCommit, type RefLabel } from "../../api";
-import { d } from "../../i18n";
+import { d, fmtDate, fmtDateTime } from "../../i18n";
 import {
   atEnd,
   capped,
@@ -696,7 +696,10 @@ const emphasis = (c: LogCommit): boolean | null => {
 const two = (n: number) => String(n).padStart(2, "0");
 const timeOf = (dt: Date) => `${two(dt.getHours())}:${two(dt.getMinutes())}`;
 
-/** "today 13:02" / "yesterday 09:40" / "11.08.2026" — the full date is the tooltip. */
+/** "today 13:02" / "yesterday 09:40" / a date — the full date and time is the
+ * tooltip. The date itself is the window's one format (`i18n.fmtDate`): this
+ * column used to print `dd.mm.yyyy` by hand while the details card printed the
+ * same commit's date the American way. */
 function relative(unixSeconds: number): string {
   const dt = new Date(unixSeconds * 1000);
   const now = new Date();
@@ -704,7 +707,7 @@ function relative(unixSeconds: number): string {
   const diffDays = Math.round((day(now) - day(dt)) / 86_400_000);
   if (diffDays === 0) return d().todayAt(timeOf(dt));
   if (diffDays === 1) return d().yesterdayAt(timeOf(dt));
-  return `${two(dt.getDate())}.${two(dt.getMonth() + 1)}.${dt.getFullYear()}`;
+  return fmtDate(unixSeconds);
 }
 
-const absolute = (unixSeconds: number) => new Date(unixSeconds * 1000).toLocaleString();
+const absolute = (unixSeconds: number) => fmtDateTime(unixSeconds);

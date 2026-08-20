@@ -86,7 +86,15 @@ export default function BranchTree() {
   // delete, a rename or a checkout does not move `repoPath`, so a source keyed
   // on the path alone would keep a deleted branch on screen until the reader
   // pressed Refresh.
-  const treeKey = () => `${state()?.repoPath ?? ""}#${repoRevision()}`;
+  //
+  // `null` while no repository is open, and that is the whole of it: a source
+  // that is merely an empty path is still truthy, so the resource would fire on
+  // the very first render — before `openInitial()` has answered — and the
+  // backend's "repository not open" would be *thrown* out of the resource read,
+  // straight into the window's error boundary ("Unknown error"). The Log mode is
+  // the only mode this tree mounts in, which is why closing the app in Log mode
+  // used to mean opening it on the crash screen.
+  const treeKey = () => (state() ? `${state()!.repoPath}#${repoRevision()}` : null);
   const [branches, { refetch: refetchBranches }] = createResource(treeKey, () => branchTree());
   const [ui, { mutate: mutateUi, refetch: refetchUi }] = createResource(treeKey, () =>
     uiStateGet(),

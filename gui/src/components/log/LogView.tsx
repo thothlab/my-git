@@ -2,6 +2,7 @@ import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import Resizer, { RowResizer } from "../Resizer";
 import DiffPanel from "../diff/DiffPanel";
 import type { DiffSource } from "../diff/model";
+import { focusPanel } from "../../hotkeys";
 import { commits } from "../../logStore";
 import CommitDetailsPane from "./CommitDetailsPane";
 import { compareTarget } from "./actions/compareSelection";
@@ -64,6 +65,13 @@ export default function LogView() {
   const setRatio = (r: number) => setRatioSig(clamp01(r));
 
   onMount(() => {
+    // The commit list starts with the keyboard, or the mode has no keyboard at
+    // all: the key layer routes Arrow / Home / End / Enter to the *focused*
+    // panel, and nothing focused one on entry. Every key then fell through to
+    // the window, the cursor never left the newest commit, and the panel read
+    // as "the keyboard does not work here" — which is how it was reported.
+    // Queued so it runs after the panels below have registered themselves.
+    queueMicrotask(() => focusPanel("commits"));
     setDetailsWSig((w) => clampDetails(w));
     const onResize = () => setDetailsWSig((w) => clampDetails(w));
     window.addEventListener("resize", onResize);

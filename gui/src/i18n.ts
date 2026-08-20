@@ -732,3 +732,24 @@ const ru: Dict = {
 
 /** Current locale's dictionary. Reactive: reads the `locale` signal. */
 export const d = () => (locale() === "ru" ? ru : en);
+
+/**
+ * The one date format of the window, and the language decides it.
+ *
+ * Two rules were in the code at once: the log table wrote `15.09.2020` by hand
+ * while the details card asked `toLocaleString(locale())` and got `9/15/2020,
+ * 10:39:28 AM` — two formats for one commit, side by side on one screen. Dates
+ * are a visible string like any other, so they follow `locale()` and nothing
+ * else: not the machine's regional settings, not a per-call choice at the call
+ * site. Reading `locale()` here also makes every date re-render on a language
+ * switch.
+ */
+export const dateLocale = (): string => (locale() === "ru" ? "ru-RU" : "en-US");
+
+/** Unix seconds from git (`%at` / `%ct`) as a date. */
+export const fmtDate = (unixSeconds: number): string =>
+  new Date(unixSeconds * 1000).toLocaleDateString(dateLocale());
+
+/** Unix seconds from git as a date with the time of day. */
+export const fmtDateTime = (unixSeconds: number): string =>
+  new Date(unixSeconds * 1000).toLocaleString(dateLocale());

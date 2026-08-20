@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { createMemo, createRoot, createSignal } from "solid-js";
 import { compilePattern, matchesCommit } from "./components/log/searchPattern";
 import {
   emptyLogFilter,
@@ -162,14 +162,21 @@ export const selected = (): string | null => commits()[cursorIndex()]?.hash ?? n
  * the page having no edges **and** lane 0. One row cannot show it — a lone root
  * commit looks the same — so the whole loaded set is asked at once.
  */
-export const graphSuppressed = (): boolean => {
-  // A pinned row is not part of the page the claim is made about: its edges are
-  // empty because it came from another request, and counting it would let one
-  // hash search look like "the filter broke the history".
-  const rows = commits().filter((c) => !offGraph().has(c.hash));
-  if (rows.length === 0) return false;
-  return rows.every((c) => c.edges.length === 0 && c.lane === 0);
-};
+export const graphSuppressed = createRoot(() =>
+  // A memo, not a plain derivation: every rendered row asks this question, and
+  // the answer walks the whole loaded history. Recomputed per row per scroll
+  // tick it allocated a copy of the list tens of times a keystroke — the deeper
+  // the log, the more garbage per key, which is exactly how "scrolling the log
+  // eats memory" happened.
+  createMemo((): boolean => {
+    // A pinned row is not part of the page the claim is made about: its edges
+    // are empty because it came from another request, and counting it would let
+    // one hash search look like "the filter broke the history".
+    const rows = commits().filter((c) => !offGraph().has(c.hash));
+    if (rows.length === 0) return false;
+    return rows.every((c) => c.edges.length === 0 && c.lane === 0);
+  }),
+);
 
 // ── Request guard ────────────────────────────────────────────────────────────
 
