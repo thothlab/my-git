@@ -20,7 +20,31 @@ impl CliEngine {
     }
 
     /// Resolve the repository top-level for an arbitrary path inside a working tree.
+    ///
+    /// A pre-flight `metadata` call runs first, so the two cases that are not about
+    /// git are not reported as git failures: a path that is gone (a remembered repo
+    /// whose folder was deleted or lives on an unmounted volume), and a path macOS
+    /// refuses to let this application read at all — on a first launch, or on every
+    /// launch of a build with no stable signing identity, folders like Documents and
+    /// Desktop are behind a TCC prompt, and a denial arrives as `PermissionDenied`.
+    /// `git rev-parse --show-toplevel failed: not a git repository` is a true
+    /// sentence about the wrong thing in both cases.
+    ///
+    /// This wraps failures git never saw; git's own stderr is still passed through
+    /// verbatim below (докблок `error.rs`).
     pub fn resolve_root(path: &Path) -> Result<PathBuf> {
+        if let Err(e) = std::fs::metadata(path) {
+            let shown = path.display();
+            return Err(match e.kind() {
+                std::io::ErrorKind::NotFound => {
+                    Error::Rule(format!("no such folder: {shown}"))
+                }
+                std::io::ErrorKind::PermissionDenied => Error::Rule(format!(
+                    "{shown} cannot be read: macOS has not granted this application access to that folder"
+                )),
+                _ => Error::Io(format!("{shown}: {e}")),
+            });
+        }
         let out = Command::new("git")
             .arg("-C")
             .arg(path)
@@ -933,6 +957,19 @@ pub(crate) mod tests {
         assert!(CliEngine::new(p)
             .commit_paths(&["a.txt".to_string()], "   ", false)
             .is_err());
+    }
+
+    /// A path that is not there is not a git failure: the pre-flight names the
+    /// folder instead of reporting `rev-parse --show-toplevel` over it. The same
+    /// door catches a folder macOS refuses to let the application read.
+    #[test]
+    fn resolving_a_missing_folder_says_so_instead_of_blaming_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("not-here");
+        match CliEngine::resolve_root(&gone) {
+            Err(Error::Rule(m)) => assert!(m.contains("no such folder"), "{m}"),
+            other => panic!("expected a domain refusal: {other:?}"),
+        }
     }
 
     #[test]

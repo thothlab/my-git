@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::engine::{branches, commit as commit_engine, log as log_engine, ops};
 use crate::model::{
     BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, FileDiff, FileState,
-    FileStatus, LogCursor, LogFilter, LogPage, RepoState, UiState,
+    FileStatus, LogCursor, LogFilter, LogPage, RepoState, StashEntry, UiState,
 };
 use crate::uistate;
 
@@ -501,6 +501,76 @@ pub async fn stash_list_app(state: State<'_, AppState>) -> Result<Vec<String>> {
 #[tauri::command]
 pub async fn stash_restore(state: State<'_, AppState>, name: String) -> Result<RepoState> {
     ops::stash_restore(&state.repo_path()?, &name)?;
+    build_state(&state)
+}
+
+/// Every stash in the repository — the stash manager's list (`stash_list_app` is
+/// the older, narrower view kept for the branch-switch dialog).
+#[tauri::command]
+pub async fn stash_list(state: State<'_, AppState>) -> Result<Vec<StashEntry>> {
+    ops::stash_list(&state.repo_path()?)
+}
+
+/// Restore a stash and keep the entry. `hash` is the stash commit as it was listed:
+/// `stash@{N}` renumbers after any pop or drop, and a stale index would otherwise
+/// act on the neighbouring stash.
+#[tauri::command]
+pub async fn stash_apply(
+    state: State<'_, AppState>,
+    name: String,
+    hash: Option<String>,
+) -> Result<RepoState> {
+    ops::stash_apply(&state.repo_path()?, &name, hash.as_deref())?;
+    build_state(&state)
+}
+
+/// Restore a stash and drop the entry.
+#[tauri::command]
+pub async fn stash_pop(
+    state: State<'_, AppState>,
+    name: String,
+    hash: Option<String>,
+) -> Result<RepoState> {
+    ops::stash_pop(&state.repo_path()?, &name, hash.as_deref())?;
+    build_state(&state)
+}
+
+/// Discard a stash without applying it.
+#[tauri::command]
+pub async fn stash_drop(
+    state: State<'_, AppState>,
+    name: String,
+    hash: Option<String>,
+) -> Result<RepoState> {
+    ops::stash_drop(&state.repo_path()?, &name, hash.as_deref())?;
+    build_state(&state)
+}
+
+/// Read-only: what a stash changes, in the shape of a commit's file list.
+#[tauri::command]
+pub async fn stash_files(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<Vec<CommitFileEntry>> {
+    ops::stash_files(&state.repo_path()?, &name)
+}
+
+/// Stash the current changes (untracked included) under a message.
+#[tauri::command]
+pub async fn stash_push(
+    state: State<'_, AppState>,
+    message: Option<String>,
+) -> Result<RepoState> {
+    ops::stash_push(&state.repo_path()?, message.as_deref())?;
+    build_state(&state)
+}
+
+/// Bring a branch up to date with its upstream: `pull` for the current branch, a
+/// fast-forward in place for any other. Divergence and a missing upstream are
+/// domain refusals stating the reason.
+#[tauri::command]
+pub async fn branch_update(state: State<'_, AppState>, name: String) -> Result<RepoState> {
+    branches::update_from_upstream(&state.repo_path()?, &name)?;
     build_state(&state)
 }
 

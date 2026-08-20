@@ -21,6 +21,7 @@ import { d, fmtDateTime } from "../../i18n";
 import { setSelectedPath, setViewMode, state, statusMeta } from "../../store";
 import type { CompareTarget } from "./actions/compareSelection";
 import { PanelBtn, PanelChrome, PanelNote } from "./PanelChrome";
+import { IconCollapseAll, IconExpandAll } from "../IconButton";
 import { setSelectedCommitFile, selectedCommitFile } from "./commitFileSelection";
 import {
   baseName,
@@ -287,14 +288,14 @@ export default function CommitDetailsPane(props: {
             onClick={() => setGrouped((g) => !g)}
           />
           <PanelBtn
-            label="+"
+            label={<IconExpandAll />}
             tip={d().expandAllTip()}
             disabled={!grouped()}
             disabledTip={d().treeOnlyTip()}
             onClick={() => setCollapsed(new Set<string>())}
           />
           <PanelBtn
-            label="−"
+            label={<IconCollapseAll />}
             tip={d().collapseAllTip()}
             disabled={!grouped()}
             disabledTip={d().treeOnlyTip()}

@@ -51,6 +51,7 @@ import ContextMenu, { createMenuController, type MenuAnchor } from "./actions/Co
 import { ActionDialogHost } from "./actions/dialogs";
 import LogGraph, { LANE_W, lanesBelow } from "./LogGraph";
 import { PanelBtn, PanelChrome, PanelNote } from "./PanelChrome";
+import { IconRefresh } from "../IconButton";
 
 /**
  * Commit list: graph column, subject with reference labels, author, relative
@@ -268,7 +269,7 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
               {d().newCommitsBtn(pendingNew())}
             </button>
           </Show>
-          <PanelBtn label="⟳" tip={d().refreshTip()} onClick={() => void refreshLog()} />
+          <PanelBtn label={<IconRefresh />} tip={d().refreshTip()} onClick={() => void refreshLog()} />
           <PanelBtn
             label={filter().order === "date" ? "⇅" : "⑂"}
             tip={`${d().orderTip()}: ${filter().order === "date" ? d().orderDate() : d().orderTopo()}`}

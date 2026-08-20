@@ -304,6 +304,71 @@ pub fn merge(repo: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Is `ancestor` reachable from `descendant`? git answers by exit code — 0 yes,
+/// 1 no — and anything else is a failed question, not a "no" (as in [`ref_exists`]).
+fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let args = ["merge-base", "--is-ancestor", ancestor, descendant];
+    let out = Command::new("git").arg("-C").arg(repo).args(args).output()?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(Error::Git {
+            command: args.join(" "),
+            stderr: both_streams(&out.stdout, &out.stderr),
+        }),
+    }
+}
+
+/// История 21b: bring a branch up to date with its upstream.
+///
+/// Two paths, because "update" means two different things:
+///
+/// * the **current** branch is updated by `git pull`, the ordinary thing — it may
+///   merge or rebase according to the user's own git config, and a conflict comes
+///   back as a git failure carrying both streams, leaving the unfinished operation
+///   `ops::detect_state` reports;
+/// * any **other** branch is fast-forwarded in place (`branch -f`) without being
+///   checked out, so the working tree is not disturbed. That is only correct while
+///   the branch is an ancestor of its upstream; a branch that has diverged carries
+///   commits of its own, and moving the ref would abandon them, so it is refused
+///   with a reason instead. Merging it silently is not an option either: the merge
+///   would have to happen in a tree the user is not looking at.
+///
+/// The non-current path fetches first (`fetch --prune`): the remote-tracking ref is
+/// otherwise as old as the last fetch, and "already up to date" would be a
+/// statement about stale data. This costs a network round trip, deliberately.
+///
+/// A branch with no upstream, and a remote-tracking branch (which has no local ref
+/// to move), are domain refusals — nothing is run and nothing is changed.
+pub fn update_from_upstream(repo: &Path, name: &str) -> Result<()> {
+    if !ref_exists(repo, name, true)? {
+        if ref_exists(repo, name, false)? {
+            return Err(Error::Rule(format!(
+                "{name} is a remote branch; it has no local ref to update"
+            )));
+        }
+        return Err(Error::Rule(format!("no such local branch: {name}")));
+    }
+    let Some(upstream) = upstream_of(repo, name)? else {
+        return Err(Error::Rule(format!(
+            "{name} tracks no upstream; push it with --set-upstream first"
+        )));
+    };
+
+    if current_branch(repo)?.as_deref() == Some(name) {
+        return crate::engine::cli::CliEngine::new(repo).pull();
+    }
+
+    crate::engine::cli::CliEngine::new(repo).fetch()?;
+    if !is_ancestor(repo, name, &upstream)? {
+        return Err(Error::Rule(format!(
+            "{name} has commits {upstream} does not; check it out and merge or rebase"
+        )));
+    }
+    git(repo, &["branch", "-f", name, &upstream])?;
+    Ok(())
+}
+
 /// Replay the current branch on top of `name`. Conflicts behave as in [`merge`].
 pub fn rebase_onto(repo: &Path, name: &str) -> Result<()> {
     git(repo, &["rebase", name])?;
@@ -711,5 +776,110 @@ mod tests {
             crate::model::OperationKind::Rebase,
             "the repository is left in an unfinished rebase"
         );
+    }
+
+    // ── update a branch from its upstream (История 21b) ──────────────────────
+
+    /// Add a commit to origin/main from a throwaway clone.
+    fn advance_origin(bare: &Path, file: &str) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        run(tmp.path(), &["clone", bare.to_str().unwrap(), "c"]);
+        let c = tmp.path().join("c");
+        run(&c, &["config", "user.email", "t@example.com"]);
+        run(&c, &["config", "user.name", "Test"]);
+        run(&c, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(c.join(file), "remote\n").unwrap();
+        run(&c, &["add", file]);
+        run(&c, &["commit", "-m", "remote commit"]);
+        run(&c, &["push", "origin", "main"]);
+        tmp
+    }
+
+    fn count(repo: &Path, rev: &str) -> u32 {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-list", "--count", rev])
+            .output()
+            .expect("spawn git");
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    }
+
+    /// The current branch is updated the ordinary way — it ends up carrying the
+    /// commit that was pushed to origin behind its back.
+    #[test]
+    fn updating_the_current_branch_pulls_it() {
+        let (work, bare) = repo_with_origin();
+        let p = work.path();
+        let _clone = advance_origin(bare.path(), "r.txt");
+
+        assert_eq!(count(p, "main"), 1);
+        update_from_upstream(p, "main").unwrap();
+        assert_eq!(count(p, "main"), 2, "the remote commit arrived");
+        assert!(p.join("r.txt").exists(), "and the working tree has it");
+    }
+
+    /// A branch that is not checked out fast-forwards without a checkout: the
+    /// branch moves, HEAD and the working tree do not.
+    #[test]
+    fn a_branch_that_is_not_current_fast_forwards_in_place() {
+        let (work, bare) = repo_with_origin();
+        let p = work.path();
+        run(p, &["checkout", "-b", "side"]);
+        let _clone = advance_origin(bare.path(), "r.txt");
+
+        update_from_upstream(p, "main").unwrap();
+        assert_eq!(count(p, "main"), 2, "main was fast-forwarded");
+        assert_eq!(count(p, "side"), 1, "the checked-out branch did not move");
+        assert!(!p.join("r.txt").exists(), "the working tree was not touched");
+        assert_eq!(
+            current_branch(p).unwrap().as_deref(),
+            Some("side"),
+            "no branch switch happened"
+        );
+    }
+
+    /// A branch with commits of its own cannot be fast-forwarded; moving the ref
+    /// would abandon them, so it is refused and left exactly where it was.
+    #[test]
+    fn a_diverged_branch_is_refused_with_a_reason() {
+        let (work, bare) = repo_with_origin();
+        let p = work.path();
+        std::fs::write(p.join("local.txt"), "local\n").unwrap();
+        run(p, &["add", "local.txt"]);
+        run(p, &["commit", "-m", "local only"]);
+        run(p, &["checkout", "-b", "side"]);
+        let _clone = advance_origin(bare.path(), "r.txt");
+
+        match update_from_upstream(p, "main") {
+            Err(Error::Rule(m)) => {
+                assert!(m.contains("main"), "{m}");
+                assert!(m.contains("origin/main"), "{m}");
+            }
+            other => panic!("expected a domain refusal: {other:?}"),
+        }
+        assert_eq!(count(p, "main"), 2, "main is untouched");
+    }
+
+    /// No upstream — the refusal names the reason instead of running git.
+    #[test]
+    fn a_branch_without_an_upstream_is_refused() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        run(p, &["branch", "orphan"]);
+        match update_from_upstream(p, "orphan") {
+            Err(Error::Rule(m)) => assert!(m.contains("tracks no upstream"), "{m}"),
+            other => panic!("expected a domain refusal: {other:?}"),
+        }
+    }
+
+    /// A remote-tracking branch has no local ref to move.
+    #[test]
+    fn a_remote_branch_cannot_be_updated() {
+        let (work, _bare) = repo_with_origin();
+        match update_from_upstream(work.path(), "origin/main") {
+            Err(Error::Rule(m)) => assert!(m.contains("remote branch"), "{m}"),
+            other => panic!("expected a domain refusal: {other:?}"),
+        }
     }
 }

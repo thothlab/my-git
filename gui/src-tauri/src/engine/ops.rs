@@ -10,7 +10,7 @@ use std::process::Command;
 
 use crate::engine::cli::CliEngine;
 use crate::error::{Error, Result};
-use crate::model::{OperationKind, OperationState};
+use crate::model::{CommitFileEntry, OperationKind, OperationState, StashEntry};
 
 /// Run `git -C <repo> <args>`; on failure carry **both** streams.
 ///
@@ -383,9 +383,162 @@ pub fn stash_restore(repo: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Split a stash entry's reflog text into branch and message.
+///
+/// git writes three shapes: `On <branch>: <message>` for a stash made with `-m`,
+/// `WIP on <branch>: <sha> <subject>` for one made without, and — in detached HEAD
+/// — the same with the literal `(no branch)` in place of a name. Splitting on the
+/// **first colon**, not on whitespace: `(no branch)` carries a space, so a
+/// space-based split would invent a branch named `(no`. A prefix this function does
+/// not recognise leaves `branch: None` and the whole text as the message, which is
+/// honest about not knowing rather than guessing.
+fn split_stash_text(gs: &str) -> (Option<String>, String) {
+    let rest = gs
+        .strip_prefix("WIP on ")
+        .or_else(|| gs.strip_prefix("On "))
+        .or_else(|| gs.strip_prefix("wip on "))
+        .or_else(|| gs.strip_prefix("on "));
+    let Some(rest) = rest else {
+        return (None, gs.trim().to_string());
+    };
+    let Some((branch, message)) = rest.split_once(':') else {
+        return (None, gs.trim().to_string());
+    };
+    let branch = branch.trim();
+    let branch = (!branch.is_empty() && branch != "(no branch)").then(|| branch.to_string());
+    (branch, message.trim().to_string())
+}
+
+/// Every stash in the repository, newest first — the stash manager's list.
+///
+/// Unlike [`stash_list_app`] this hides nothing: the user's own stashes are what the
+/// manager exists for, and `from_app` only lets the UI mark the ones the application
+/// made while switching branches.
+///
+/// Fields are NUL-separated and records terminated by `%x01`, because a stash
+/// message may contain spaces, colons and newlines. A record that does not parse is
+/// an error, not a skipped line: a short list is indistinguishable from a complete
+/// one and reads as "my stash is gone" (докблок CLAUDE.md). [`stash_list_app`]
+/// keeps its older, forgiving loop so its own contract does not move.
+pub fn stash_list(repo: &Path) -> Result<Vec<StashEntry>> {
+    let raw = git(repo, &["stash", "list", "--format=%gd%x00%H%x00%at%x00%gs%x01"])?;
+    let mut out = Vec::new();
+    for record in raw.split('\u{1}') {
+        let record = record.trim_start_matches('\n');
+        if record.trim().is_empty() {
+            continue;
+        }
+        let mut fields = record.split('\0');
+        let (Some(gd), Some(hash), Some(at), Some(gs)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(Error::Parse(format!("stash list record: {record:?}")));
+        };
+        let at: i64 = at
+            .trim()
+            .parse()
+            .map_err(|_| Error::Parse(format!("stash list timestamp: {at:?}")))?;
+        let (branch, message) = split_stash_text(gs);
+        out.push(StashEntry {
+            reference: gd.trim().to_string(),
+            hash: hash.trim().to_string(),
+            at,
+            branch,
+            message,
+            from_app: gs.contains(APP_STASH_TAG),
+        });
+    }
+    Ok(out)
+}
+
+/// Accept only a real `stash@{N}`, never an arbitrary revision: `git stash drop
+/// HEAD~1` and `git stash apply HEAD~1` are real commands with very different
+/// meanings, and one of them destroys.
+fn stash_entry_ref(name: &str) -> Result<&str> {
+    let entry = name.trim();
+    if !(entry.starts_with("stash@{") && entry.ends_with('}')) {
+        return Err(Error::Rule(format!("not a stash entry: {name}")));
+    }
+    Ok(entry)
+}
+
+/// Resolve `stash@{N}` and, when the caller says which stash commit it means, refuse
+/// if the two disagree.
+///
+/// `stash@{N}` is a position in a stack, and every pop or drop renumbers everything
+/// below it. A list the user is looking at goes stale the moment another window (or
+/// the branch-switch dialog) drops an entry, and a stale index makes `drop` destroy
+/// the *wrong* stash silently. Passing the hash from the listed entry turns that
+/// into a refusal.
+fn resolve_stash(repo: &Path, name: &str, expect: Option<&str>) -> Result<String> {
+    let entry = stash_entry_ref(name)?;
+    let hash = git(repo, &["rev-parse", entry])?.trim().to_string();
+    if let Some(expect) = expect.map(str::trim).filter(|s| !s.is_empty()) {
+        if !(hash.starts_with(expect) || expect.starts_with(&hash)) {
+            return Err(Error::Rule(format!(
+                "{entry} is no longer the stash {expect}; the list moved, reload it"
+            )));
+        }
+    }
+    Ok(entry.to_string())
+}
+
+/// Put a stash back into the working tree and **keep** the entry.
+pub fn stash_apply(repo: &Path, name: &str, expect: Option<&str>) -> Result<()> {
+    let entry = resolve_stash(repo, name, expect)?;
+    git(repo, &["stash", "apply", &entry])?;
+    Ok(())
+}
+
+/// Put a stash back and drop the entry. A failed `pop` leaves the entry in place —
+/// that is git's own behaviour, and the error carries its reason.
+pub fn stash_pop(repo: &Path, name: &str, expect: Option<&str>) -> Result<()> {
+    let entry = resolve_stash(repo, name, expect)?;
+    git(repo, &["stash", "pop", &entry])?;
+    Ok(())
+}
+
+/// Discard a stash without applying it.
+pub fn stash_drop(repo: &Path, name: &str, expect: Option<&str>) -> Result<()> {
+    let entry = resolve_stash(repo, name, expect)?;
+    git(repo, &["stash", "drop", &entry])?;
+    Ok(())
+}
+
+/// What a stash changes, in the same shape as the file list of a commit.
+///
+/// A stash *is* a commit, so this is `commit::files` against its first parent — the
+/// commit the stash was made on. Files stashed as untracked (`-u`) live in the
+/// stash's third parent and are not part of that diff; the manager therefore shows
+/// tracked changes only.
+pub fn stash_files(repo: &Path, name: &str) -> Result<Vec<CommitFileEntry>> {
+    let entry = stash_entry_ref(name)?;
+    crate::engine::commit::files(repo, entry)
+}
+
+/// Stash the current changes, untracked files included, under `message`.
+///
+/// A clean tree is refused before git runs: `git stash push` on nothing to save
+/// exits 0 and prints "No local changes to save", so without this the UI would
+/// report a stash that does not exist.
+pub fn stash_push(repo: &Path, message: Option<&str>) -> Result<()> {
+    if !has_local_changes(repo)? {
+        return Err(Error::Rule("nothing to stash: the working tree is clean".into()));
+    }
+    let mut args = vec!["stash", "push", "-u"];
+    let message = message.map(str::trim).filter(|m| !m.is_empty());
+    if let Some(m) = message {
+        args.push("-m");
+        args.push(m);
+    }
+    git(repo, &args)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::FileState;
     use crate::engine::cli::tests::scratch_repo;
     use std::process::Command;
 
@@ -1006,5 +1159,158 @@ mod tests {
 
         stash_restore(p, &listed[1]).unwrap();
         assert_eq!(worktree(p), "first local\n");
+    }
+
+    // ── stash manager (R05a) ────────────────────────────────────────────────
+
+    /// The manager lists **every** stash, the user's included, and marks only the
+    /// application's own — that is the whole difference from `stash_list_app`.
+    #[test]
+    fn stash_list_shows_the_users_stashes_too() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        git(p, &["branch", "dev"]);
+
+        std::fs::write(p.join("a.txt"), "mine\n").unwrap();
+        git(p, &["stash", "push", "-m", "my own work"]);
+
+        std::fs::write(p.join("a.txt"), "switching\n").unwrap();
+        CliEngine::new(p).checkout("dev", true).unwrap();
+
+        let all = stash_list(p).unwrap();
+        assert_eq!(all.len(), 2, "{all:?}");
+        assert_eq!(all[0].reference, "stash@{0}");
+        assert!(all[0].from_app, "newest is the one the app made: {:?}", all[0]);
+        assert_eq!(all[0].branch.as_deref(), Some("main"));
+        assert!(all[0].message.contains("mygit: switching to dev"), "{:?}", all[0]);
+
+        assert_eq!(all[1].reference, "stash@{1}");
+        assert!(!all[1].from_app, "the user's own stash: {:?}", all[1]);
+        assert_eq!(all[1].branch.as_deref(), Some("main"));
+        assert_eq!(all[1].message, "my own work");
+        assert_eq!(all[1].hash.len(), 40, "the stash commit: {:?}", all[1]);
+        assert!(all[1].at > 0, "creation time: {:?}", all[1]);
+
+        // stash_list_app still sees only the application's, unchanged.
+        assert_eq!(stash_list_app(p).unwrap().len(), 1);
+    }
+
+    /// A stash made in detached HEAD reads `WIP on (no branch): …`; the parser says
+    /// "no branch" instead of inventing one out of the literal.
+    #[test]
+    fn a_stash_without_a_branch_reports_none() {
+        let (branch, message) = split_stash_text("WIP on (no branch): 1a2b3c subject here");
+        assert_eq!(branch, None);
+        assert_eq!(message, "1a2b3c subject here");
+
+        let (branch, message) = split_stash_text("On feature/x: keep: the colon");
+        assert_eq!(branch.as_deref(), Some("feature/x"));
+        assert_eq!(message, "keep: the colon");
+    }
+
+    /// apply keeps the entry, pop takes it away.
+    #[test]
+    fn apply_keeps_the_entry_and_pop_removes_it() {
+        let dir = scratch_repo();
+        let p = dir.path();
+
+        std::fs::write(p.join("a.txt"), "work\n").unwrap();
+        stash_push(p, Some("work in progress")).unwrap();
+        assert_eq!(worktree(p), "one\n", "the stash took the change away");
+
+        let entry = stash_list(p).unwrap().remove(0);
+        assert_eq!(entry.message, "work in progress");
+
+        stash_apply(p, &entry.reference, Some(&entry.hash)).unwrap();
+        assert_eq!(worktree(p), "work\n");
+        assert_eq!(stash_list(p).unwrap().len(), 1, "apply keeps the entry");
+
+        git(p, &["checkout", "--", "a.txt"]);
+        stash_pop(p, &entry.reference, Some(&entry.hash)).unwrap();
+        assert_eq!(worktree(p), "work\n");
+        assert!(stash_list(p).unwrap().is_empty(), "pop removed the entry");
+    }
+
+    /// drop discards without applying, and a `stash@{N}` that no longer holds the
+    /// stash the caller named is refused instead of destroying its neighbour.
+    #[test]
+    fn drop_discards_and_a_moved_entry_is_refused() {
+        let dir = scratch_repo();
+        let p = dir.path();
+
+        for text in ["older\n", "middle\n", "newest\n"] {
+            std::fs::write(p.join("a.txt"), text).unwrap();
+            stash_push(p, Some(text.trim())).unwrap();
+        }
+
+        let middle = stash_list(p).unwrap().remove(1);
+        assert_eq!(middle.message, "middle");
+
+        // the newest stash is dropped elsewhere, so every index below it shifts up
+        // and stash@{1} now names "older", not the entry the caller looked at.
+        git(p, &["stash", "drop", "stash@{0}"]);
+        match stash_drop(p, "stash@{1}", Some(&middle.hash)) {
+            Err(Error::Rule(m)) => assert!(m.contains("the list moved"), "{m}"),
+            other => panic!("a stale index must be refused: {other:?}"),
+        }
+        assert_eq!(stash_list(p).unwrap().len(), 2, "nothing was destroyed");
+
+        stash_drop(p, "stash@{0}", Some(&middle.hash)).unwrap();
+        let left = stash_list(p).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].message, "older");
+        assert_eq!(worktree(p), "one\n", "drop applies nothing");
+    }
+
+    /// What is inside a stash, in the same shape as a commit's file list.
+    #[test]
+    fn stash_files_lists_what_the_stash_changes() {
+        let dir = scratch_repo();
+        let p = dir.path();
+
+        std::fs::write(p.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(p.join("b.txt"), "added\n").unwrap();
+        git(p, &["add", "b.txt"]);
+        stash_push(p, Some("two files")).unwrap();
+
+        let entry = stash_list(p).unwrap().remove(0);
+        let mut files = stash_files(p, &entry.reference).unwrap();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(files.len(), 2, "{files:?}");
+        assert_eq!(files[0].path, "a.txt");
+        assert_eq!(files[0].status, FileState::Modified);
+        assert_eq!(files[1].path, "b.txt");
+        assert_eq!(files[1].status, FileState::Added);
+    }
+
+    /// Stashing a clean tree is a domain refusal: git would exit 0 having made
+    /// nothing, and the UI would show an entry that does not exist.
+    #[test]
+    fn stashing_a_clean_tree_is_refused() {
+        let dir = scratch_repo();
+        match stash_push(dir.path(), Some("nothing here")) {
+            Err(Error::Rule(m)) => assert!(m.contains("nothing to stash"), "{m}"),
+            other => panic!("expected a domain refusal: {other:?}"),
+        }
+        assert!(stash_list(dir.path()).unwrap().is_empty());
+    }
+
+    /// Nothing but a `stash@{N}` reaches git: `git stash drop HEAD~1` is a real
+    /// command, and it destroys.
+    #[test]
+    fn stash_operations_reject_a_name_that_is_not_a_stash_entry() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        for r in [
+            stash_apply(p, "HEAD~1", None),
+            stash_pop(p, "HEAD~1", None),
+            stash_drop(p, "HEAD~1", None),
+            stash_files(p, "HEAD~1").map(|_| ()),
+        ] {
+            match r {
+                Err(Error::Rule(m)) => assert!(m.contains("not a stash entry"), "{m}"),
+                other => panic!("expected a domain refusal: {other:?}"),
+            }
+        }
     }
 }

@@ -2,6 +2,7 @@ import { Show } from "solid-js";
 import { fetchRemote, pull, push } from "../api";
 import { busy, confirmAction, run, setViewMode, state, viewMode } from "../store";
 import { d } from "../i18n";
+import { DISABLED_CLASS } from "./IconButton";
 import BranchMenu from "./BranchMenu";
 import RepoMenu from "./RepoMenu";
 
@@ -68,7 +69,7 @@ function ModeBtn(props: { mode: "changes" | "log"; label: string; tip: string })
 function TBtn(props: { label: string; accent?: boolean; onClick: () => void }) {
   return (
     <button
-      class="rounded border px-2 py-0.5 text-xs disabled:opacity-40"
+      class={`rounded border px-2 py-0.5 text-xs ${DISABLED_CLASS}`}
       classList={{
         "border-accent bg-accent text-white hover:opacity-90": props.accent,
         "border-border hover:bg-bg": !props.accent,

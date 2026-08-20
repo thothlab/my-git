@@ -89,9 +89,10 @@ Git вызывается только как внешний процесс. `gix
   `unreachable_from_head`. Всё
   сравнивается с первым родителем; корневой коммит читается через `diff-tree --root`.
 - `engine::branches` — `tree`, `rename`, `delete`, `merge`, `rebase_onto`, `unmerged_count`,
-  константа `DETACHED_REF = "HEAD"`.
+  `update_from_upstream`, константа `DETACHED_REF = "HEAD"`.
 - `engine::ops` — `detect_state`, `revert`, `reset`, `cherry_pick`, `checkout_rev`,
   `tag_create`, `op_continue`, `op_abort`, `op_skip`, `stash_list_app`, `stash_restore`,
+  `stash_list`, `stash_apply`, `stash_pop`, `stash_drop`, `stash_files`, `stash_push`,
   `contains_commit`, `commits_after`, `has_local_changes`, `reset_mode_flag`, константа
   `APP_STASH_TAG`.
 - `uistate` — `get`, `set`, `state_path`. Атомарная запись через уникальный tmp + rename.
@@ -249,6 +250,9 @@ Git вызывается только как внешний процесс. `gix
   своего upstream (`branch_unmerged_count`).
 - `stash_list_app` возвращает строки `stash@{N}: On <branch>: mygit: switching to <target>`;
   возврат сделан через `apply`, запись остаётся в списке после успешного восстановления.
+  Менеджер стешей — отдельная пара: `stash_list` отдаёт `StashEntry` по **всем** стешам с
+  меткой `fromApp`, а `stash@{N}` перенумеровывается после каждого pop/drop, поэтому
+  apply/pop/drop принимают ещё и `hash` записи и отказывают, если список уехал.
 - Даты фильтра строятся из локальных частей, не через `toISOString()`: форматирование через
   UTC сдвигает день для всех, кто не на Гринвиче, и окно фильтра уползает при каждом
   переоткрытии. Верхняя граница дня — его последняя секунда, иначе «по 20-е» теряет 20-е.

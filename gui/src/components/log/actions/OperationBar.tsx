@@ -3,6 +3,7 @@ import { opAbort, opContinue, opSkip, type OperationState } from "../../../api";
 import { d } from "../../../i18n";
 import { busy, confirmAction, run, state } from "../../../store";
 import { afterRepoChange } from "./repoRefresh";
+import { DISABLED_CLASS } from "../../IconButton";
 
 /**
  * The strip that shows an unfinished merge, rebase, cherry-pick or revert and
@@ -119,7 +120,7 @@ function BarBtn(props: {
 }) {
   return (
     <button
-      class="rounded border px-1.5 py-0.5 text-xs disabled:cursor-not-allowed disabled:opacity-40"
+      class={`rounded border px-1.5 py-0.5 text-xs ${DISABLED_CLASS}`}
       classList={{
         "border-danger text-danger hover:bg-danger/10": !!props.danger,
         "border-border text-fg hover:bg-bg-muted": !props.danger,

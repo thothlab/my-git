@@ -39,6 +39,7 @@ import {
   type Row,
   type SideLabel,
 } from "./diff/model";
+import { DISABLED_CLASS } from "./IconButton";
 
 export type { DiffSource, HighlightMode } from "./diff/model";
 
@@ -812,7 +813,7 @@ function HunkBtn(props: {
 }) {
   return (
     <button
-      class="rounded border px-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-40"
+      class={`rounded border px-1 text-[11px] ${DISABLED_CLASS}`}
       classList={{
         "border-danger/50 text-danger hover:bg-danger/10": props.danger,
         "border-border hover:bg-bg": !props.danger,

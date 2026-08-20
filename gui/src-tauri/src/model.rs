@@ -328,3 +328,25 @@ impl Default for UiState {
         }
     }
 }
+
+/// One entry of the repository's stash list — every stash, not only the ones the
+/// application made for itself.
+///
+/// `reference` is git's own `stash@{N}`, which **renumbers** after any pop or drop;
+/// `hash` is the stash commit and does not move, which is what lets a destructive
+/// operation confirm it is about to touch the entry the user picked. `branch` is
+/// `None` when the message carries no recognisable branch (a stash made in detached
+/// HEAD reads `WIP on (no branch): …`), never a name invented from the text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StashEntry {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub hash: String,
+    pub at: i64,
+    pub branch: Option<String>,
+    pub message: String,
+    /// Made by the application itself while switching branches (`APP_STASH_TAG`).
+    /// The panel shows every stash; this only lets it tell them apart.
+    pub from_app: bool,
+}

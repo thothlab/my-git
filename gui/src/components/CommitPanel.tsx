@@ -10,6 +10,7 @@ import {
   setChecked,
   state,
 } from "../store";
+import { DISABLED_CLASS } from "./IconButton";
 
 export default function CommitPanel() {
   const [message, setMessage] = createSignal("");
@@ -88,7 +89,7 @@ export default function CommitPanel() {
 
         <div class="ml-auto flex overflow-hidden rounded">
           <button
-            class="bg-accent px-3 py-1 text-sm font-medium text-white disabled:opacity-40"
+            class={`bg-accent px-3 py-1 text-sm font-medium text-white ${DISABLED_CLASS}`}
             disabled={disabled()}
             onClick={() => void doCommit()}
             title={list()?.isUnversioned && !subset() ? d().untrackedSelectTip() : ""}
@@ -96,7 +97,7 @@ export default function CommitPanel() {
             Commit
           </button>
           <button
-            class="border-l border-white/20 bg-accent px-2 py-1 text-sm text-white disabled:opacity-40"
+            class={`border-l border-white/20 bg-accent px-2 py-1 text-sm text-white ${DISABLED_CLASS}`}
             disabled={disabled()}
             onClick={() => void doCommitAndPush()}
             title={d().commitAndPushTip()}
