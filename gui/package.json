@@ -1,6 +1,6 @@
 {
   "name": "graft",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Graft — нативный десктоп git-менеджер (Tauri + SolidJS) с именованными changelist'ами",
@@ -11,6 +11,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@tanstack/solid-virtual": "^3.13.37",
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-dialog": "^2.0.1",
     "@tauri-apps/plugin-opener": "^2.2.6",

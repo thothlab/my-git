@@ -3,6 +3,7 @@ mod commands;
 mod engine;
 mod error;
 mod model;
+mod uistate;
 
 use commands::AppState;
 
@@ -35,6 +36,35 @@ pub fn run() {
             commands::push,
             commands::fetch,
             commands::pull,
+            commands::log_page,
+            commands::log_authors,
+            commands::commit_details,
+            commands::commit_files,
+            commands::commit_file_diff,
+            commands::commits_compare,
+            commands::commits_unreachable,
+            commands::commits_compare_diff,
+            commands::branch_tree,
+            commands::branch_rename,
+            commands::branch_delete,
+            commands::branch_unmerged_count,
+            commands::branch_merge,
+            commands::branch_rebase_onto,
+            commands::commit_revert,
+            commands::commit_reset,
+            commands::commit_cherry_pick,
+            commands::commit_checkout,
+            commands::commit_contains,
+            commands::commit_reset_lost_count,
+            commands::repo_local_changes,
+            commands::tag_create,
+            commands::op_continue,
+            commands::op_abort,
+            commands::op_skip,
+            commands::stash_list_app,
+            commands::stash_restore,
+            commands::ui_state_get,
+            commands::ui_state_set,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

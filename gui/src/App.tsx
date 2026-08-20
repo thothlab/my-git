@@ -1,6 +1,6 @@
 import { ErrorBoundary, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { busy, error, openInitial, refresh } from "./store";
+import { busy, busyLabel, error, openInitial, refresh, setViewMode, viewMode } from "./store";
 import { d } from "./i18n";
 import Toolbar from "./components/Toolbar";
 import ChangesView from "./components/ChangesView";
@@ -8,33 +8,58 @@ import DiffView from "./components/DiffView";
 import CommitPanel from "./components/CommitPanel";
 import StatusBar from "./components/StatusBar";
 import Resizer from "./components/Resizer";
+import BranchTree from "./components/log/BranchTree";
+import LogView from "./components/log/LogView";
+import OperationBar from "./components/log/actions/OperationBar";
+import { registerHotkey, startHotkeys } from "./hotkeys";
 import { ModalHost } from "./components/Modals";
 
 const LEFT_WIDTH_KEY = "leftPanelWidth";
+const TREE_WIDTH_KEY = "logTreeWidth";
 const MIN_LEFT = 220; // changes panel never narrower than this
 const MIN_DIFF = 360; // preferred minimum for the diff panel
+const MIN_TREE = 180; // branch tree in the Log mode
+const MIN_LOG_RIGHT = 540; // commit files 220 + diff 320 (PRD minimums)
 
-// Keep the left panel within [MIN_LEFT, innerWidth - MIN_DIFF] so a resized (or
-// stale persisted) width can never collapse the diff panel after the window shrinks.
-// Invariant: the window's minWidth (720, see tauri.conf.json) >= MIN_LEFT + MIN_DIFF
-// (580), so both minimums are always satisfiable. If the window is ever forced
-// narrower than that, MIN_LEFT wins (outer max) and the diff panel yields — the
-// changes panel stays usable rather than both collapsing.
-const clampLeft = (w: number) =>
-  Math.round(Math.min(Math.max(w, MIN_LEFT), Math.max(MIN_LEFT, window.innerWidth - MIN_DIFF)));
+// Keep the left panel within [min, innerWidth - minRight] so a resized (or stale
+// persisted) width can never collapse the right side after the window shrinks.
+// Invariant: the window's minWidth (720, see tauri.conf.json) >= both sums —
+// 220 + 360 in the Changes mode, 180 + 540 in the Log mode, where the Log sum is
+// exactly 720. Dividers take no layout width, so that equality holds. If the
+// window is ever forced narrower, the left minimum wins (outer max).
+const clampWidth = (w: number, min: number, minRight: number) =>
+  Math.round(Math.min(Math.max(w, min), Math.max(min, window.innerWidth - minRight)));
 
 export default function App() {
-  const [leftW, setLeftW] = createSignal(
-    clampLeft(Number(localStorage.getItem(LEFT_WIDTH_KEY)) || 288),
+  const isLog = () => viewMode() === "log";
+  // Each mode remembers its own left column: the branch tree and the changes
+  // list have different natural widths and different minimums.
+  const clampFor = (w: number, log: boolean) =>
+    log ? clampWidth(w, MIN_TREE, MIN_LOG_RIGHT) : clampWidth(w, MIN_LEFT, MIN_DIFF);
+  const [changesW, setChangesW] = createSignal(
+    clampFor(Number(localStorage.getItem(LEFT_WIDTH_KEY)) || 288, false),
   );
-  const setLeftWidth = (w: number) => setLeftW(clampLeft(w));
-  const persistLeftWidth = () => localStorage.setItem(LEFT_WIDTH_KEY, String(leftW()));
+  const [treeW, setTreeW] = createSignal(
+    clampFor(Number(localStorage.getItem(TREE_WIDTH_KEY)) || 240, true),
+  );
+  const leftW = () => (isLog() ? treeW() : changesW());
+  const setLeftWidth = (w: number) =>
+    isLog() ? setTreeW(clampFor(w, true)) : setChangesW(clampFor(w, false));
+  const persistLeftWidth = () =>
+    localStorage.setItem(isLog() ? TREE_WIDTH_KEY : LEFT_WIDTH_KEY, String(leftW()));
 
   onMount(async () => {
-    // re-clamp when the window is resized, so the diff panel keeps its minimum
-    const onResize = () => setLeftW((w) => clampLeft(w));
+    // re-clamp when the window is resized, so the right side keeps its minimum
+    const onResize = () => {
+      setChangesW((w) => clampFor(w, false));
+      setTreeW((w) => clampFor(w, true));
+    };
     window.addEventListener("resize", onResize);
     onCleanup(() => window.removeEventListener("resize", onResize));
+
+    onCleanup(startHotkeys());
+    registerHotkey("Digit1", () => setViewMode("changes"));
+    registerHotkey("Digit2", () => setViewMode("log"));
 
     await openInitial();
     // resync on window focus — external git activity between interactions
@@ -81,6 +106,19 @@ export default function App() {
             <div class="busybar" />
           </Show>
         </div>
+        {/* A long operation says which one it is, not just "something runs". */}
+        <Show when={busy() && busyLabel()}>
+          <div class="border-b border-border bg-bg-muted px-3 py-0.5 text-xs text-fg-muted">
+            {busyLabel()}
+          </div>
+        </Show>
+
+        {/* An unfinished merge / rebase / cherry-pick / revert is announced by
+            the window, not by one panel: a pull from the Changes toolbar can
+            create the state, and the reader would otherwise see only the red
+            error banner until they happened to open the Log
+            (`history/spec.md`, "State is announced on entry"). */}
+        <OperationBar />
 
         <Show when={error()}>
           <pre class="max-h-32 overflow-auto whitespace-pre-wrap border-b border-border bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
@@ -89,18 +127,29 @@ export default function App() {
         </Show>
 
         <div class="flex min-h-0 flex-1">
-          <aside class="shrink-0 overflow-hidden" style={{ width: `${leftW()}px` }}>
-            <ChangesView />
+          <aside
+            class="shrink-0 overflow-hidden border-r border-border"
+            style={{ width: `${leftW()}px` }}
+          >
+            <Show when={isLog()} fallback={<ChangesView />}>
+              <BranchTree />
+            </Show>
           </aside>
           <Resizer getWidth={leftW} setWidth={setLeftWidth} onCommit={persistLeftWidth} />
           <main class="min-w-0 flex-1 overflow-hidden">
-            <DiffView />
+            {/* Switching modes unmounts the panels; the Changes state (checked
+                files, selected changelist) lives in the store and survives. */}
+            <Show when={isLog()} fallback={<DiffView />}>
+              <LogView />
+            </Show>
           </main>
         </div>
 
-        <footer class="border-t border-border bg-bg-muted">
-          <CommitPanel />
-        </footer>
+        <Show when={!isLog()}>
+          <footer class="border-t border-border bg-bg-muted">
+            <CommitPanel />
+          </footer>
+        </Show>
         <StatusBar />
 
         <ModalHost />

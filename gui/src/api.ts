@@ -38,6 +38,10 @@ export interface RepoState {
   detached: boolean;
   activeChangelistId: string;
   changelists: ChangelistView[];
+  operation: OperationState;
+  /** `user.email` of this repository, or null when git has none configured.
+   * The log tells the reader's own commits apart by it (R45i). */
+  userEmail?: string | null;
 }
 
 // Error shape returned by Rust commands (see error.rs). Always carries a message;
@@ -109,11 +113,31 @@ export interface Hunk {
 export interface FileDiff {
   path: string;
   binary: boolean;
+  /** Bytes on each side of a **binary** file — the only honest thing to show when
+   * there is no text (prd_02 История 68). Absent on the side where the file does
+   * not exist (added / deleted) and absent entirely for a text diff. */
+  oldSize?: number;
+  newSize?: number;
+  /** The diff is a merge commit's comparison against its *first* parent — the panel
+   * has to say so, and the fact travels with the diff itself. */
+  mergeFirstParent: boolean;
   hunks: Hunk[];
 }
 
-export const diffFile = (path: string, against: DiffBase) =>
-  invoke<FileDiff>("diff_file", { path, against });
+/// `whitespace` defaults to "none" — showing every difference is the historical
+/// behaviour and the safe one. An unknown mode is rejected by the backend.
+/**
+ * `context` is how many unchanged lines to keep around each change. Omitted
+ * means "as before" — the backend then passes no `-U` at all and the patch is
+ * byte-for-byte the historical one. Raising it is how the panel reveals the
+ * lines git left out *between* hunks (R46i, D04).
+ */
+export const diffFile = (
+  path: string,
+  against: DiffBase,
+  whitespace: WhitespaceMode = "none",
+  context?: number,
+) => invoke<FileDiff>("diff_file", { path, against, whitespace, context });
 
 export const hunkStage = (patch: string) =>
   invoke<RepoState>("hunk_stage", { patch });
@@ -154,3 +178,233 @@ export type PushMode = "normal" | "upstream" | "force";
 export const push = (mode: PushMode) => invoke<RepoState>("push", { mode });
 export const fetchRemote = () => invoke<RepoState>("fetch");
 export const pull = () => invoke<RepoState>("pull");
+
+// ── Git panel: history (prd_02, task_01) ─────────────────────────────────────
+
+export type WhitespaceMode = "none" | "trailing" | "all";
+
+export type RefKind = "head" | "local" | "remote" | "tag";
+export interface RefLabel {
+  name: string;
+  kind: RefKind;
+}
+
+export type LaneEdgeKind = "straight" | "branch" | "merge";
+export interface LaneEdge {
+  fromLane: number;
+  toLane: number;
+  kind: LaneEdgeKind;
+  color: number;
+}
+
+export interface LogCommit {
+  hash: string;
+  shortHash: string;
+  parents: string[];
+  author: string;
+  authorEmail: string;
+  authorAt: number;
+  subject: string;
+  refs: RefLabel[];
+  lane: number;
+  edges: LaneEdge[];
+}
+
+export interface LogCursor {
+  skip: number;
+  /** hashes of parents whose graph lines cross the page boundary */
+  openLanes: string[];
+}
+
+export interface LogPage {
+  commits: LogCommit[];
+  nextCursor: LogCursor | null;
+  laneOverflow: boolean;
+}
+
+export type LogOrder = "date" | "topo";
+
+export interface LogFilter {
+  branch?: string | null;
+  text?: string | null;
+  regex: boolean;
+  matchCase: boolean;
+  author?: string | null;
+  since?: number | null;
+  until?: number | null;
+  paths: string[];
+  order: LogOrder;
+}
+
+export const emptyLogFilter = (): LogFilter => ({
+  branch: null,
+  text: null,
+  regex: false,
+  matchCase: false,
+  author: null,
+  since: null,
+  until: null,
+  paths: [],
+  order: "date",
+});
+
+export interface CommitDetails {
+  hash: string;
+  parents: string[];
+  author: string;
+  authorEmail: string;
+  authorAt: number;
+  committer: string;
+  committerEmail: string;
+  committerAt: number;
+  subject: string;
+  body: string;
+  refs: RefLabel[];
+  branches: string[];
+  branchesTruncated: boolean;
+}
+
+export interface CommitFileEntry {
+  status: FileState;
+  path: string;
+  oldPath: string | null;
+}
+
+export interface BranchNode {
+  name: string;
+  fullRef: string;
+  isRemote: boolean;
+  isCurrent: boolean;
+  upstream: string | null;
+  ahead: number | null;
+  behind: number | null;
+  isFavorite: boolean;
+  lastCommitAt: number;
+}
+
+export type OperationKind = "none" | "merge" | "rebase" | "cherryPick" | "revert";
+
+export interface OperationState {
+  kind: OperationKind;
+  current: number | null;
+  total: number | null;
+  conflicted: string[];
+}
+
+/** Panel UI state, persisted in `.git/graft-ui.json` (never in changelists.json). */
+export interface UiState {
+  favorites: string[];
+  collapsedFolders: string[];
+  columnWidths: Record<string, number>;
+  logHighlight: boolean;
+  version: number;
+}
+
+export const emptyUiState = (): UiState => ({
+  favorites: [],
+  collapsedFolders: [],
+  columnWidths: {},
+  logHighlight: false,
+  version: 1,
+});
+
+// log (task 03)
+export const logPage = (filter: LogFilter, cursor: LogCursor | null, limit: number) =>
+  invoke<LogPage>("log_page", { filter, cursor, limit });
+export const logAuthors = () => invoke<string[]>("log_authors");
+
+// one commit (task 04)
+export const commitDetails = (hash: string) =>
+  invoke<CommitDetails>("commit_details", { hash });
+export const commitFiles = (hash: string) =>
+  invoke<CommitFileEntry[]>("commit_files", { hash });
+export const commitFileDiff = (
+  hash: string,
+  path: string,
+  whitespace: WhitespaceMode = "none",
+  context?: number,
+) => invoke<FileDiff>("commit_file_diff", { hash, path, whitespace, context });
+/** The revision that means "the working tree" in `commitsCompare` /
+ * `commitsCompareDiff` (prd_02 История 77). A comparison against a real revision
+ * always names it, so passing this constant is a deliberate choice rather than an
+ * empty string that slipped through. */
+export const WORKING_TREE = "";
+
+/** Of the given commits, the ones the current revision cannot reach — the input
+ * behind the log's row emphasis (R45i, D05). */
+export const commitsUnreachable = (hashes: string[]) =>
+  invoke<string[]>("commits_unreachable", { hashes });
+
+export const commitsCompare = (from: string, to: string) =>
+  invoke<CommitFileEntry[]>("commits_compare", { from, to });
+export const commitsCompareDiff = (
+  from: string,
+  to: string,
+  path: string,
+  whitespace: WhitespaceMode = "none",
+  context?: number,
+) => invoke<FileDiff>("commits_compare_diff", { from, to, path, whitespace, context });
+
+// branch tree (task 05)
+export const branchTree = () => invoke<BranchNode[]>("branch_tree");
+export const branchRename = (from: string, to: string) =>
+  invoke<RepoState>("branch_rename", { from, to });
+export const branchDelete = (name: string, remote: boolean, force: boolean) =>
+  invoke<RepoState>("branch_delete", { name, remote, force });
+/// Commits that deleting the branch would lose — asked before the delete, so the
+/// confirmation can name the number instead of parsing a failed attempt.
+export const branchUnmergedCount = (name: string) =>
+  invoke<number>("branch_unmerged_count", { name });
+export const branchMerge = (name: string) =>
+  invoke<RepoState>("branch_merge", { name });
+export const branchRebaseOnto = (name: string) =>
+  invoke<RepoState>("branch_rebase_onto", { name });
+
+// operations on commits (task 06)
+/// Manifest G02 / История 57: four reset modes. An unknown value is rejected by
+/// the backend, not folded into a default.
+export type ResetMode = "soft" | "mixed" | "hard" | "keep";
+export const commitRevert = (hash: string) =>
+  invoke<RepoState>("commit_revert", { hash });
+export const commitReset = (hash: string, mode: ResetMode) =>
+  invoke<RepoState>("commit_reset", { hash, mode });
+export const commitCherryPick = (hash: string) =>
+  invoke<RepoState>("commit_cherry_pick", { hash });
+export const commitCheckout = (hash: string) =>
+  invoke<RepoState>("commit_checkout", { hash });
+/// Is the commit already on the current branch? Asked before the menu is drawn, so
+/// cherry-pick can be disabled with a reason instead of failing when clicked.
+export const commitContains = (hash: string) =>
+  invoke<boolean>("commit_contains", { hash });
+/// Commits a reset to this hash would discard — asked before the operation, so the
+/// hard-reset confirmation can name the number.
+export const commitResetLostCount = (hash: string) =>
+  invoke<number>("commit_reset_lost_count", { hash });
+/// Anything uncommitted in tree or index — the other half of the hard-reset warning.
+export const repoLocalChanges = () => invoke<boolean>("repo_local_changes");
+export const tagCreate = (hash: string, name: string, message?: string) =>
+  invoke<RepoState>("tag_create", { hash, name, message: message ?? null });
+
+export const opContinue = () => invoke<RepoState>("op_continue");
+export const opAbort = () => invoke<RepoState>("op_abort");
+export const opSkip = () => invoke<RepoState>("op_skip");
+
+export const stashListApp = () => invoke<string[]>("stash_list_app");
+/** One entry of {@link stashListApp}: NUL-separated ref, unix time, git's text. */
+export type AppStash = { ref: string; at: number; label: string };
+/**
+ * Split a `stash_list_app` entry. The engine packs three fields into the string
+ * because the command's contract is `string[]`; `at` is unix seconds and the
+ * formatting stays on this side, in the panel's locale.
+ */
+export function parseAppStash(entry: string): AppStash {
+  const [ref = entry, at = "0", label = ""] = entry.split("\u0000");
+  return { ref, at: Number(at) || 0, label };
+}
+export const stashRestore = (name: string) =>
+  invoke<RepoState>("stash_restore", { name });
+
+// panel UI state (task 01)
+export const uiStateGet = () => invoke<UiState>("ui_state_get");
+/** Rust parameter is named `ui`: `state` is taken by Tauri's managed state. */
+export const uiStateSet = (ui: UiState) => invoke<UiState>("ui_state_set", { ui });

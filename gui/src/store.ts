@@ -15,6 +15,26 @@ import {
 export const [state, setState] = createSignal<RepoState | null>(null);
 export const [error, setError] = createSignal("");
 export const [busy, setBusy] = createSignal(false);
+/** Name of the operation currently running, shown next to the busy bar. */
+export const [busyLabel, setBusyLabel] = createSignal("");
+
+// ── Window mode (Changes | Log) ──────────────────────────────────────────────
+// The Log mode is a second main area, not a second window. Switching does not
+// touch the Changes state: checked files and the selected changelist live in
+// module signals here, so they survive the panels being unmounted. History is
+// not read while the mode is "changes" — nothing in this store fetches it.
+
+export type ViewMode = "changes" | "log";
+const VIEW_MODE_KEY = "viewMode";
+const [viewMode, setViewModeSignal] = createSignal<ViewMode>(
+  localStorage.getItem(VIEW_MODE_KEY) === "log" ? "log" : "changes",
+);
+export { viewMode };
+export function setViewMode(m: ViewMode) {
+  setViewModeSignal(m);
+  localStorage.setItem(VIEW_MODE_KEY, m);
+}
+export const toggleViewMode = () => setViewMode(viewMode() === "log" ? "changes" : "log");
 
 /** path of the file whose diff is shown on the right */
 export const [selectedPath, setSelectedPath] = createSignal<string | null>(null);
@@ -49,23 +69,49 @@ export function cycleTheme() {
 }
 applyTheme();
 
-export async function run(p: Promise<RepoState>): Promise<void> {
+/** Install a fresh RepoState and re-validate everything that pointed into the old one. */
+function applyState(s: RepoState): void {
+  setState(s);
+  // keep selection valid after the tree changes
+  const paths = new Set(s.changelists.flatMap((c) => c.files.map((f) => f.path)));
+  if (selectedPath() && !paths.has(selectedPath()!)) setSelectedPath(null);
+  setChecked((prev) => new Set([...prev].filter((x) => paths.has(x))));
+  if (!s.changelists.some((c) => c.id === selectedListId())) {
+    setSelectedListId(s.activeChangelistId);
+  }
+}
+
+/**
+ * `label` names the operation for the busy indicator: an unlabelled bar during
+ * a long fetch or rebase says only "something is happening".
+ */
+export async function run(p: Promise<RepoState>, label = ""): Promise<void> {
   setBusy(true);
+  setBusyLabel(label);
   try {
-    const s = await p;
-    setState(s);
+    applyState(await p);
     setError("");
-    // keep selection valid after the tree changes
-    const paths = new Set(s.changelists.flatMap((c) => c.files.map((f) => f.path)));
-    if (selectedPath() && !paths.has(selectedPath()!)) setSelectedPath(null);
-    setChecked((prev) => new Set([...prev].filter((x) => paths.has(x))));
-    if (!s.changelists.some((c) => c.id === selectedListId())) {
-      setSelectedListId(s.activeChangelistId);
-    }
   } catch (e) {
     setError(errText(e));
+    // A refused command is not the same as an unchanged repository. A revert,
+    // merge, rebase or cherry-pick that ends in a conflict *fails* — git returns
+    // non-zero and prints CONFLICT — and yet leaves the repository mid-operation,
+    // with conflicted files in the tree. Keeping the pre-command state here would
+    // leave the red banner as the only sign of it: the Continue / Skip / Abort
+    // strip reads `RepoState.operation`, and the changes panel reads the same
+    // state, so both would keep showing the world as it was before the failure
+    // until some later command happened to refresh it. Re-read instead, so the
+    // state is announced on entry, in whichever mode the window is in.
+    // The error stays: this only replaces the state, never the message.
+    try {
+      applyState(await apiRepoState());
+    } catch {
+      // The repository itself is unreadable (none open, deleted). The original
+      // error is the one worth showing — this second failure adds nothing.
+    }
   } finally {
     setBusy(false);
+    setBusyLabel("");
   }
 }
 
@@ -199,6 +245,28 @@ export function chooseOption(
 ): Promise<string | null> {
   return new Promise((resolve) => setChooseState({ message, options, resolve }));
 }
+
+/**
+ * Modals that live outside this store — the Log panel's own form dialogs.
+ *
+ * "Is a modal up" has to be one question with one answer: the keyboard layer
+ * stands down on it, and a second, private flag somewhere else means arrows keep
+ * moving a list behind a dialog nobody can see them move. Sources register
+ * themselves here; the list is a signal so `modalOpen()` stays reactive.
+ */
+const [modalSources, setModalSources] = createSignal<Array<() => boolean>>([]);
+
+export function registerModalSource(isOpen: () => boolean): () => void {
+  setModalSources((l) => [...l, isOpen]);
+  return () => setModalSources((l) => l.filter((f) => f !== isOpen));
+}
+
+/** True while any modal is up — the keyboard layer stands down meanwhile. */
+export const modalOpen = () =>
+  confirmState() !== null ||
+  promptState() !== null ||
+  chooseState() !== null ||
+  modalSources().some((f) => f());
 
 /** Status → { letter, colour class }. Mirrors the TUI palette mapping. */
 export function statusMeta(s: FileState): { letter: string; cls: string } {

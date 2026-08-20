@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -5,7 +6,7 @@ use std::process::{Command, Stdio};
 use super::GitEngine;
 use crate::error::{Error, Result};
 use crate::model::{
-    BranchInfo, DiffLine, FileDiff, FileState, FileStatus, Hunk, RepoSnapshot,
+    BranchInfo, DiffLine, FileDiff, FileState, FileStatus, Hunk, RefKind, RefLabel, RepoSnapshot,
 };
 
 /// git backend implemented by shelling out to the system `git`.
@@ -130,16 +131,102 @@ impl CliEngine {
             .unwrap_or_default()
     }
 
+    /// Resolve paths **inside the git directory** by asking git, never by joining
+    /// `.git` onto the worktree root: in a linked worktree and in a submodule `.git`
+    /// is a file, and the real markers live under `.git/worktrees/<name>/`. One
+    /// `rev-parse` answers for all names at once. A path git returns relative is
+    /// relative to the worktree root it was run in.
+    pub(crate) fn git_paths(&self, names: &[&str]) -> Result<Vec<PathBuf>> {
+        let mut args = vec!["rev-parse"];
+        for n in names {
+            args.push("--git-path");
+            args.push(n);
+        }
+        let out = self.git(&args)?;
+        let paths: Vec<PathBuf> = out
+            .lines()
+            .map(|l| {
+                let p = PathBuf::from(l.trim());
+                if p.is_absolute() {
+                    p
+                } else {
+                    self.repo.join(p)
+                }
+            })
+            .collect();
+        if paths.len() != names.len() {
+            return Err(Error::Parse(format!(
+                "rev-parse --git-path returned {} paths for {} names",
+                paths.len(),
+                names.len()
+            )));
+        }
+        Ok(paths)
+    }
+
+    /// Whether git has the path in the index (i.e. it is not an untracked file).
+    fn is_tracked(&self, path: &str) -> bool {
+        !self
+            .git_allow_fail(&["ls-files", "--", path])
+            .trim()
+            .is_empty()
+    }
+
     /// Diff a file against a base: `worktree` (unstaged), `index` (staged) or `head`.
-    pub fn diff_file(&self, path: &str, against: &str) -> Result<FileDiff> {
+    ///
+    /// `whitespace` is one of `none` (do not ignore — the historical behaviour),
+    /// `trailing` (`--ignore-space-at-eol`) or `all` (`--ignore-all-space`). Any
+    /// other value is rejected with `Error::Rule`: a mode folded into a default
+    /// would show a diff nobody asked for and report nothing.
+    ///
+    /// `context` is how many unchanged lines to keep around each change; `None`
+    /// leaves the command line without `-U` and reproduces the historical patch
+    /// exactly (see [`context_arg`]).
+    pub fn diff_file(
+        &self,
+        path: &str,
+        against: &str,
+        whitespace: &str,
+        context: Option<u32>,
+    ) -> Result<FileDiff> {
+        let ws = whitespace_args(whitespace)?;
+        let ctx = context_arg(context);
+        let ctx: Vec<&str> = ctx.iter().map(String::as_str).collect();
         let raw = match against {
-            "index" => self.git(&["diff", "--cached", "--", path])?,
-            "head" => self.git(&["diff", "HEAD", "--", path])?,
+            "index" => {
+                let mut a = vec!["diff", "--cached"];
+                a.extend_from_slice(&ws);
+                a.extend_from_slice(&ctx);
+                a.extend_from_slice(&["--", path]);
+                self.git(&a)?
+            }
+            "head" => {
+                let mut a = vec!["diff", "HEAD"];
+                a.extend_from_slice(&ws);
+                a.extend_from_slice(&ctx);
+                a.extend_from_slice(&["--", path]);
+                self.git(&a)?
+            }
             _ => {
-                let d = self.git(&["diff", "--", path])?;
-                if d.trim().is_empty() {
+                let mut a = vec!["diff"];
+                a.extend_from_slice(&ws);
+                a.extend_from_slice(&ctx);
+                a.extend_from_slice(&["--", path]);
+                let d = self.git(&a)?;
+                // "Empty diff ⇒ untracked file" is exactly right while nothing is
+                // ignored, and that is the behaviour `none` must keep. Only when a
+                // whitespace mode is active can an empty diff also mean "the change
+                // is whitespace-only" — there, and only there, ask git whether it
+                // knows the path, so a whitespace-only change is not re-rendered as
+                // an all-add diff of the whole file.
+                let empty_means_untracked = ws.is_empty() || !self.is_tracked(path);
+                if d.trim().is_empty() && empty_means_untracked {
                     // untracked/new file: synthesize an all-add diff (view only)
-                    self.git_allow_fail(&["diff", "--no-index", "--", "/dev/null", path])
+                    let mut a = vec!["diff", "--no-index"];
+                    a.extend_from_slice(&ws);
+                    a.extend_from_slice(&ctx);
+                    a.extend_from_slice(&["--", "/dev/null", path]);
+                    self.git_allow_fail(&a)
                 } else {
                     d
                 }
@@ -304,12 +391,16 @@ fn parse_hunk_header(h: &str) -> (u32, u32) {
 
 /// Parse `git diff` output for a single file into hunks, keeping each hunk's exact
 /// applicable patch text (file header + hunk) so stage/revert is byte-exact.
-fn parse_diff(path: &str, raw: &str) -> FileDiff {
+///
+/// Visible to the whole engine: a commit's diff has the same shape as a worktree
+/// diff, and a second parser would be a second set of edge cases (binary files,
+/// renames, "\ No newline") drifting away from this one.
+pub(crate) fn parse_diff(path: &str, raw: &str) -> FileDiff {
     if raw.contains("Binary files ") || raw.contains("GIT binary patch") {
         return FileDiff {
             path: path.into(),
             binary: true,
-            hunks: Vec::new(),
+            ..FileDiff::default()
         };
     }
     let lines: Vec<&str> = raw.split('\n').collect();
@@ -317,7 +408,7 @@ fn parse_diff(path: &str, raw: &str) -> FileDiff {
         return FileDiff {
             path: path.into(),
             binary: false,
-            hunks: Vec::new(),
+            ..FileDiff::default()
         };
     };
     let header = lines[..first].join("\n");
@@ -395,6 +486,7 @@ fn parse_diff(path: &str, raw: &str) -> FileDiff {
         path: path.into(),
         binary: false,
         hunks,
+        ..FileDiff::default()
     }
 }
 
@@ -419,6 +511,115 @@ fn make_status(xy: &str, path: String, old_path: Option<String>, renamed: bool) 
         old_path,
         staged: x != '.',
         unstaged: y != '.',
+    }
+}
+
+/// Parse the `%D` decoration of a commit — "HEAD -> main, origin/main, tag: v1" —
+/// into typed labels.
+///
+/// Lives here, next to the other parsers of git output, because the log rows and the
+/// commit card decorate the same commits and two copies of this parse drift apart:
+/// the first thing lost is the distinction between a remote branch and a local one
+/// whose name merely contains a slash. `remotes` is the repo's remote list — the
+/// only way to tell `origin/main` from a local `origin/main`-shaped branch.
+pub(crate) fn parse_refs(deco: &str, remotes: &[String]) -> Vec<RefLabel> {
+    let mut out = Vec::new();
+    for raw in deco.split(", ") {
+        let t = raw.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let (name, kind) = if let Some(tag) = t.strip_prefix("tag: ") {
+            (tag.trim(), RefKind::Tag)
+        } else if let Some(branch) = t.strip_prefix("HEAD -> ") {
+            // the branch HEAD currently points at
+            (branch.trim(), RefKind::Head)
+        } else if t == "HEAD" {
+            // detached: HEAD decorates the commit on its own
+            (t, RefKind::Head)
+        } else if remotes.iter().any(|r| t.starts_with(&format!("{r}/"))) {
+            (t, RefKind::Remote)
+        } else {
+            (t, RefKind::Local)
+        };
+        out.push(RefLabel {
+            name: name.to_string(),
+            kind,
+        });
+    }
+    out
+}
+
+/// `user.email` as the repository resolves it (local, global or system), or
+/// `None` when git has none configured.
+///
+/// A missing value is not an error: a repository without an identity is a
+/// repository whose reader simply has no "my commits" to emphasise, and failing
+/// the whole state read over it would be worse than saying nothing.
+///
+/// Read once per repository and kept for the session: every mutation rebuilds
+/// `RepoState`, so an uncached read would spawn a `git config` process on each
+/// stage, commit and checkout to learn a value that does not change while the
+/// application is open. Keyed by path rather than memoised once, so switching
+/// repositories still gets that repository's own identity.
+pub fn user_email(repo: &Path) -> Option<String> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Option<String>>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Ok(map) = cache.lock() {
+        if let Some(hit) = map.get(repo) {
+            return hit.clone();
+        }
+    }
+    let value = read_user_email(repo);
+    if let Ok(mut map) = cache.lock() {
+        map.insert(repo.to_path_buf(), value.clone());
+    }
+    value
+}
+
+fn read_user_email(repo: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["config", "--get", "user.email"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+/// git flags for a whitespace mode: `none` | `trailing` | `all`.
+///
+/// A closed dictionary crossing the Tauri boundary as a string is checked, not
+/// folded into a default: a typo that silently means "none" shows a diff the user
+/// did not ask for and reports nothing.
+
+/// `-U<n>` for a requested amount of context around each change, or nothing.
+///
+/// `None` is not "zero" and not "three": it means the caller did not ask, and the
+/// command line then carries no `-U` at all — byte for byte the command this
+/// project has always run, so the historical output is reproduced rather than
+/// re-derived from git's current default (R46i, D04).
+pub fn context_arg(context: Option<u32>) -> Option<String> {
+    context.map(|n| format!("-U{n}"))
+}
+
+pub fn whitespace_args(mode: &str) -> Result<Vec<&'static str>> {
+    match mode {
+        "none" => Ok(vec![]),
+        "trailing" => Ok(vec!["--ignore-space-at-eol"]),
+        "all" => Ok(vec!["--ignore-all-space"]),
+        other => Err(Error::Rule(format!(
+            "unknown whitespace mode: {other} (expected none, trailing or all)"
+        ))),
     }
 }
 
@@ -526,7 +727,7 @@ impl GitEngine for CliEngine {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn run(dir: &Path, args: &[&str]) {
@@ -556,6 +757,28 @@ mod tests {
         run(p, &["add", "a.txt"]);
         run(p, &["commit", "-m", "init"]);
         dir
+    }
+
+    #[test]
+    fn ref_labels_carry_their_kind() {
+        let remotes = vec!["origin".to_string()];
+        let refs = parse_refs("HEAD -> main, origin/main, tag: v1, later, feature/main", &remotes);
+        let kind = |name: &str| {
+            refs.iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("no ref {name} in {refs:?}"))
+                .kind
+        };
+        assert_eq!(refs.len(), 5, "every decoration becomes one label: {refs:?}");
+        assert_eq!(kind("main"), RefKind::Head, "HEAD -> main is the current branch head");
+        assert_eq!(kind("origin/main"), RefKind::Remote);
+        assert_eq!(kind("v1"), RefKind::Tag);
+        assert_eq!(kind("later"), RefKind::Local);
+        assert_eq!(kind("feature/main"), RefKind::Local, "a slash alone does not make a remote");
+
+        // detached HEAD decorates on its own, and an empty decoration is no labels
+        assert_eq!(parse_refs("HEAD", &remotes)[0].kind, RefKind::Head);
+        assert!(parse_refs("", &remotes).is_empty());
     }
 
     #[test]
@@ -610,7 +833,7 @@ mod tests {
         std::fs::write(p.join("f.txt"), lines.join("\n") + "\n").unwrap();
 
         let eng = CliEngine::new(p);
-        let diff = eng.diff_file("f.txt", "worktree").unwrap();
+        let diff = eng.diff_file("f.txt", "worktree", "none", None).unwrap();
         assert_eq!(diff.hunks.len(), 2, "two separated hunks");
 
         // stage only the first hunk
@@ -619,7 +842,7 @@ mod tests {
             .git(&["diff", "--cached", "--name-only"])
             .unwrap()
             .contains("f.txt"));
-        let remaining = eng.diff_file("f.txt", "worktree").unwrap();
+        let remaining = eng.diff_file("f.txt", "worktree", "none", None).unwrap();
         assert_eq!(remaining.hunks.len(), 1, "one hunk left unstaged");
 
         // revert the remaining (line 10) hunk in the worktree
@@ -786,5 +1009,115 @@ mod tests {
             p.join(".git").join("changelists.json").exists(),
             "store persisted into real .git/"
         );
+    }
+    /// R34i: three whitespace modes. `none` must keep the historical behaviour —
+    /// a whitespace-only change is still a difference.
+    #[test]
+    fn diff_file_whitespace_modes() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("f.txt"), "alpha\nbeta\n").unwrap();
+        run(p, &["add", "f.txt"]);
+        run(p, &["-c", "commit.gpgsign=false", "commit", "-m", "f"]);
+        // indent one line and add a trailing space on the other: whitespace only
+        std::fs::write(p.join("f.txt"), "    alpha\nbeta   \n").unwrap();
+
+        let eng = CliEngine::new(p);
+        assert_eq!(
+            eng.diff_file("f.txt", "worktree", "none", None).unwrap().hunks.len(),
+            1,
+            "do-not-ignore shows the whitespace-only change"
+        );
+        assert!(
+            eng.diff_file("f.txt", "worktree", "all", None).unwrap().hunks.is_empty(),
+            "ignore-all-whitespace hides it"
+        );
+        let trailing = eng.diff_file("f.txt", "worktree", "trailing", None).unwrap();
+        assert_eq!(
+            trailing.hunks.len(),
+            1,
+            "ignore-trailing still shows the leading indent"
+        );
+        assert!(
+            trailing.hunks[0]
+                .lines
+                .iter()
+                .filter(|l| l.origin != " ")
+                .all(|l| !l.content.contains("beta")),
+            "the trailing-space-only line is context, not a difference"
+        );
+    }
+
+    /// DoD: `none` gives the prior result. A tracked file with everything staged had
+    /// an empty worktree diff even before whitespace modes existed, and the fallback
+    /// synthesized an all-add diff for it — that stays.
+    #[test]
+    fn diff_file_none_mode_keeps_prior_empty_diff_fallback() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("f.txt"), "alpha\n").unwrap();
+        run(p, &["add", "f.txt"]);
+        run(p, &["-c", "commit.gpgsign=false", "commit", "-m", "f"]);
+        std::fs::write(p.join("f.txt"), "alpha\nbeta\n").unwrap();
+        run(p, &["add", "f.txt"]);
+
+        let eng = CliEngine::new(p);
+        let d = eng.diff_file("f.txt", "worktree", "none", None).unwrap();
+        assert_eq!(d.hunks.len(), 1, "prior behaviour: synthesized all-add diff");
+        assert!(d.hunks[0].lines.iter().all(|l| l.origin == "+"));
+        assert_eq!(
+            eng.diff_file("f.txt", "index", "none", None).unwrap().hunks.len(),
+            1,
+            "the staged change is visible against the index"
+        );
+    }
+
+    /// A closed dictionary is checked at the boundary, not folded into a default.
+    #[test]
+    fn diff_file_rejects_unknown_whitespace_mode() {
+        let dir = scratch_repo();
+        let err = CliEngine::new(dir.path())
+            .diff_file("a.txt", "worktree", "ignore-everything", None)
+            .unwrap_err();
+        match err {
+            Error::Rule(m) => assert!(m.contains("ignore-everything"), "{m}"),
+            other => panic!("expected a rule error, got {other:?}"),
+        }
+    }
+
+    /// An untracked file still gets the synthesized all-add diff.
+    #[test]
+    fn diff_file_untracked_file_is_all_add() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("new.txt"), "alpha\nbeta\n").unwrap();
+
+        let diff = CliEngine::new(p).diff_file("new.txt", "worktree", "none", None).unwrap();
+        assert_eq!(diff.hunks.len(), 1, "untracked file shows as one all-add hunk");
+        assert!(diff.hunks[0].lines.iter().all(|l| l.origin == "+"));
+    }
+
+    /// `user.email` is read once per repository: every mutation rebuilds
+    /// `RepoState`, and a `git config` process per stage is a cost paid for a
+    /// value that cannot change while the application is open. The identity is
+    /// rewritten between the two reads — the second answer is the first one.
+    #[test]
+    fn user_email_is_read_once_per_repo() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        assert_eq!(user_email(p).as_deref(), Some("t@example.com"));
+
+        run(p, &["config", "user.email", "other@example.com"]);
+        assert_eq!(
+            user_email(p).as_deref(),
+            Some("t@example.com"),
+            "the cached value is kept for the session"
+        );
+
+        // Another repository is another identity, not the cached one.
+        let other = tempfile::tempdir().unwrap();
+        run(other.path(), &["init", "-b", "main"]);
+        run(other.path(), &["config", "user.email", "second@example.com"]);
+        assert_eq!(user_email(other.path()).as_deref(), Some("second@example.com"));
     }
 }
