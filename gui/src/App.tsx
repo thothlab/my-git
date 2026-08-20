@@ -10,6 +10,7 @@ import StatusBar from "./components/StatusBar";
 import Resizer from "./components/Resizer";
 import BranchTree from "./components/log/BranchTree";
 import LogView from "./components/log/LogView";
+import OperationBar from "./components/log/actions/OperationBar";
 import { registerHotkey, startHotkeys } from "./hotkeys";
 import { ModalHost } from "./components/Modals";
 
@@ -111,6 +112,13 @@ export default function App() {
             {busyLabel()}
           </div>
         </Show>
+
+        {/* An unfinished merge / rebase / cherry-pick / revert is announced by
+            the window, not by one panel: a pull from the Changes toolbar can
+            create the state, and the reader would otherwise see only the red
+            error banner until they happened to open the Log
+            (`history/spec.md`, "State is announced on entry"). */}
+        <OperationBar />
 
         <Show when={error()}>
           <pre class="max-h-32 overflow-auto whitespace-pre-wrap border-b border-border bg-danger/10 px-3 py-2 font-mono text-xs text-danger">

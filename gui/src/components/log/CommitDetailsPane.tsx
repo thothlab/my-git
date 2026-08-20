@@ -11,13 +11,15 @@ import {
 import {
   commitDetails,
   commitFiles,
+  commitsCompare,
   errText,
   type CommitDetails,
   type CommitFileEntry,
 } from "../../api";
 import { focusPanel } from "../../hotkeys";
 import { d, locale } from "../../i18n";
-import { statusMeta } from "../../store";
+import { setSelectedPath, setViewMode, state, statusMeta } from "../../store";
+import type { CompareTarget } from "./actions/compareSelection";
 import { PanelBtn, PanelChrome, PanelNote } from "./PanelChrome";
 import { setSelectedCommitFile, selectedCommitFile } from "./commitFileSelection";
 import {
@@ -43,19 +45,38 @@ type Row =
   | { kind: "dir"; key: string; name: string; count: number; depth: number }
   | { kind: "file"; key: string; file: CommitFileEntry; name: string; depth: number };
 
-export default function CommitDetailsPane(props: { selected: () => string | null }) {
+export default function CommitDetailsPane(props: {
+  selected: () => string | null;
+  /** A comparison of two revisions replaces the selected commit as the subject
+   * of this panel: the card gives way to the pair of side labels and the file
+   * list is the one *between* the revisions (R39i). */
+  compare?: () => CompareTarget | null;
+}) {
   const [grouped, setGrouped] = createSignal(true);
   const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
   const [allBranches, setAllBranches] = createSignal(false);
   const [cursor, setCursor] = createSignal<string | null>(null);
 
-  const [data] = createResource(
-    () => props.selected(),
-    async (hash) => {
-      const [details, files] = await Promise.all([commitDetails(hash), commitFiles(hash)]);
-      return { hash, details, files };
-    },
-  );
+  /** What the panel is showing. One key for both modes: a comparison and a
+   * commit must never be in flight at once and settle in the wrong order. */
+  const subject = (): { cmp: CompareTarget } | { hash: string } | null => {
+    const cmp = props.compare?.() ?? null;
+    if (cmp) return { cmp };
+    const hash = props.selected();
+    return hash ? { hash } : null;
+  };
+
+  const [data] = createResource(subject, async (s) => {
+    if ("cmp" in s) {
+      const files = await commitsCompare(s.cmp.from, s.cmp.to);
+      // The right-hand revision is what a file of a comparison belongs to; the
+      // diff panel takes the pair from `compareTarget` and only the path from
+      // here, so this hash is the file's identity and not the diff's base.
+      return { hash: s.cmp.to || s.cmp.from, details: null, files, cmp: s.cmp };
+    }
+    const [details, files] = await Promise.all([commitDetails(s.hash), commitFiles(s.hash)]);
+    return { hash: s.hash, details, files, cmp: null };
+  });
 
   // A new commit resets everything that belonged to the old one. The condition
   // is spelled out rather than inferred from what the effect happens to read:
@@ -66,7 +87,8 @@ export default function CommitDetailsPane(props: { selected: () => string | null
   // asks for a diff, and no user asked for one yet.
   let shownHash: string | null = null;
   createEffect(() => {
-    const hash = props.selected();
+    const s = subject();
+    const hash = s === null ? null : "cmp" in s ? `${s.cmp.from}..${s.cmp.to}` : s.hash;
     if (hash === shownHash) return;
     shownHash = hash;
     setCollapsed(new Set<string>());
@@ -152,6 +174,31 @@ export default function CommitDetailsPane(props: { selected: () => string | null
 
   const currentRow = () => rows().find((r) => r.key === cursor());
 
+  /**
+   * A02 / История 78: from a file of a commit to that file as it is on disk.
+   *
+   * "Its current version" is the Changes panel's version, and that panel only
+   * has a row for a file with uncommitted changes — so the action is offered
+   * only for such a file and says why when it is not, instead of switching modes
+   * to an empty selection.
+   */
+  const uncommitted = () =>
+    new Set((state()?.changelists ?? []).flatMap((cl) => cl.files.map((f) => f.path)));
+  const pickedPath = () => {
+    const row = currentRow();
+    return row?.kind === "file" ? row.file.path : (selectedCommitFile()?.path ?? null);
+  };
+  const canOpenCurrent = () => {
+    const p = pickedPath();
+    return !!p && uncommitted().has(p);
+  };
+  const openCurrent = () => {
+    const p = pickedPath();
+    if (!p || !uncommitted().has(p)) return;
+    setSelectedPath(p);
+    setViewMode("changes");
+  };
+
   const onKey = (e: KeyboardEvent) => {
     const row = currentRow();
     if (!row || row.kind !== "dir") return false;
@@ -193,6 +240,15 @@ export default function CommitDetailsPane(props: { selected: () => string | null
       toolbar={
         <Show when={ready()}>
           <PanelBtn
+            label="⇱"
+            tip={d().openCurrentVersionTip()}
+            disabled={!canOpenCurrent()}
+            disabledTip={
+              pickedPath() ? d().openCurrentUnchanged() : d().openCurrentVersionTip()
+            }
+            onClick={openCurrent}
+          />
+          <PanelBtn
             label={grouped() ? "▤" : "⊞"}
             tip={d().groupByDirTip()}
             onClick={() => setGrouped((g) => !g)}
@@ -214,7 +270,7 @@ export default function CommitDetailsPane(props: { selected: () => string | null
         </Show>
       }
     >
-      <Show when={props.selected()} fallback={<PanelNote title={d().selectCommitHint()} />}>
+      <Show when={subject()} fallback={<PanelNote title={d().selectCommitHint()} />}>
         {/* Order matters: reading `data()` on a failed resource rethrows, so the
             error branch is taken before the accessor is ever touched. */}
         <Show when={!data.error} fallback={<PanelNote title={errText(data.error)} />}>
@@ -224,13 +280,18 @@ export default function CommitDetailsPane(props: { selected: () => string | null
           >
             {(loaded) => (
               <div class="flex min-h-0 flex-col">
-                <CommitCard
-                  details={loaded().details}
-                  allBranches={allBranches()}
-                  onToggleBranches={() => setAllBranches((v) => !v)}
-                />
+                <Show when={loaded().details} fallback={<CompareCard cmp={loaded().cmp!} />}>
+                  {(details) => (
+                    <CommitCard
+                      details={details()}
+                      allBranches={allBranches()}
+                      onToggleBranches={() => setAllBranches((v) => !v)}
+                    />
+                  )}
+                </Show>
                 <div class="border-t border-border px-2 py-1 text-[10px] uppercase tracking-wide text-fg-subtle">
-                  {d().changedFiles()} · {d().filesCount(loaded().files.length)}
+                  {loaded().cmp ? d().compareFilesTitle() : d().changedFiles()} ·{" "}
+                  {d().filesCount(loaded().files.length)}
                 </div>
                 <Show
                   when={loaded().files.length > 0}
@@ -271,6 +332,21 @@ export default function CommitDetailsPane(props: { selected: () => string | null
         </Show>
       </Show>
     </PanelChrome>
+  );
+}
+
+/**
+ * The header of a comparison: which two revisions it is between. It stands in
+ * the commit card's place because a comparison has no single commit to describe
+ * — naming the pair is the whole of what can honestly be said about it.
+ */
+function CompareCard(props: { cmp: CompareTarget }) {
+  return (
+    <div class="select-text px-2 py-2 text-xs" onPointerDown={(e) => e.stopPropagation()}>
+      <div class="font-mono">
+        {d().compareSides(props.cmp.fromLabel, props.cmp.toLabel)}
+      </div>
+    </div>
   );
 }
 

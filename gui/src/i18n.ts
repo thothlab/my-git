@@ -117,6 +117,8 @@ const en = {
   binaryFile: () => "Binary file.",
   noChangesForBase: () => "No changes for this base.",
   revertHunkConfirm: () => "Revert this hunk in the working tree? Changes will be lost.",
+  revertHunkWideConfirm: () =>
+    "The context is expanded, so this hunk is wider than the region shown before expanding. Revert all of it in the working tree? Changes will be lost.",
   // StatusBar
   changesCount: (n: number) => `${n} ${n === 1 ? "change" : "changes"}`,
   // Window modes
@@ -145,7 +147,6 @@ const en = {
   noBranchesYet: () => "No branches to show",
   loadingHistory: () => "Loading history…",
   selectCommitHint: () => "Select a commit to see its details.",
-  historyPending: () => "History is not wired up yet",
   // Log mode — commit details
   loadingCommitDetails: () => "Loading commit details…",
   authorLabel: () => "Author",
@@ -187,8 +188,6 @@ const en = {
   diffAtFirst: () => "That was the first difference.",
   diffNoDifferences: () => "No differences here.",
   foldedLines: (n: number) => `${n} unchanged lines hidden — click to show`,
-  gapLines: (n: number) => `${n} unchanged lines not in the patch`,
-  gapTip: () => "Git left this region out of the patch; it cannot be expanded here.",
   binarySizes: (a: string, b: string) => `Binary file, ${a} → ${b}`,
   sizeUnknown: () => "absent",
   bytes: (n: number) => `${n} B`,
@@ -202,6 +201,9 @@ const en = {
   showWholeDiff: () => "Show it whole",
   hunkWhitespaceTip: () =>
     "Unavailable while whitespace is ignored: such a patch does not apply.",
+  hunkWide: () => "wider",
+  hunkWideTip: () =>
+    "The context was expanded, so this hunk covers a wider region than it did before — staging or reverting it acts on all of it.",
   // Log mode — table, graph and selection (task 08)
   colSubject: () => "Commit",
   colAuthor: () => "Author",
@@ -214,8 +216,6 @@ const en = {
   orderTopo: () => "Topological order",
   highlightHeader: () => "Emphasis",
   highlightMine: () => "My commits and the current branch",
-  highlightPending: () =>
-    "Not available yet — needs the repository's configured user and whether a commit is reachable from HEAD",
   loadingMore: () => "Loading more commits…",
   logEnd: () => "End of history",
   logCapReached: () => "The first 20 000 commits are shown — narrow the filter",
@@ -231,6 +231,9 @@ const en = {
   selectedCommits: (n: number) => `${n} selected`,
   graphSuppressedTip: () =>
     "The filter breaks the history, so edges between commits are not drawn",
+  offGraphLabel: () => "found by hash",
+  offGraphTip: () =>
+    "Fetched by hash from outside the loaded history: it has no place in the graph, so no edges are drawn around it",
   // ── Log filter bar (task 11) ───────────────────────────────────────────────
   fltSearchPlaceholder: () => "Search commits or hash",
   fltSearchTip: () =>
@@ -241,8 +244,7 @@ const en = {
   fltPrevMatch: () => "Previous match (Cmd/Ctrl+Shift+G)",
   fltNextMatch: () => "Next match (Cmd/Ctrl+G) — loads further pages until it finds one",
   fltDimLabel: () => "Dim",
-  fltDimPending: () =>
-    "Not available yet — dimming non-matching rows is drawn by the commit list, which does not read the search yet",
+  fltDimTip: () => "Read rows that did not match the search muted",
   fltBranch: () => "Branch",
   fltAuthor: () => "User",
   fltDate: () => "Date",
@@ -373,6 +375,13 @@ const en = {
   copyFailed: () => "Could not copy to the clipboard.",
   compareSides: (a: string, b: string) => `${a} → ${b}`,
   contextMenuTip: () => "Actions (Cmd/Ctrl+Enter)",
+  compareFilesTitle: () => "Changed between the two revisions",
+  openCurrentVersion: () => "Open the current version",
+  openCurrentVersionTip: () =>
+    "Show this file in the Changes panel — only while it has uncommitted changes",
+  openCurrentUnchanged: () => "The file has no uncommitted changes.",
+  expandGap: (n: number) => `Show ${n} hidden lines`,
+  expandGapTip: () => "Ask git for the patch with more context around the changes",
 };
 
 type Dict = typeof en;
@@ -457,6 +466,8 @@ const ru: Dict = {
   noChangesForBase: () => "Нет изменений для этой базы.",
   revertHunkConfirm: () =>
     "Откатить этот hunk в рабочем дереве? Правки будут потеряны.",
+  revertHunkWideConfirm: () =>
+    "Контекст расширен, поэтому hunk шире участка, который был виден до разворота. Откатить его целиком в рабочем дереве? Правки будут потеряны.",
   changesCount: (n) => `${n} ${ruPlural(n, "изменение", "изменения", "изменений")}`,
   modeChanges: () => "Изменения",
   modeLog: () => "Лог",
@@ -480,7 +491,6 @@ const ru: Dict = {
   noBranchesYet: () => "Веток пока нет",
   loadingHistory: () => "Загружаем историю…",
   selectCommitHint: () => "Выберите коммит, чтобы увидеть детали.",
-  historyPending: () => "История ещё не подключена",
   loadingCommitDetails: () => "Загружаем детали коммита…",
   authorLabel: () => "Автор",
   committerLabel: () => "Коммиттер",
@@ -520,9 +530,6 @@ const ru: Dict = {
   diffNoDifferences: () => "Различий здесь нет.",
   foldedLines: (n) =>
     `скрыто ${n} ${ruPlural(n, "неизменённая строка", "неизменённые строки", "неизменённых строк")} — нажмите, чтобы показать`,
-  gapLines: (n) =>
-    `${n} ${ruPlural(n, "неизменённая строка", "неизменённые строки", "неизменённых строк")} вне патча`,
-  gapTip: () => "Git не включил этот участок в патч; развернуть его здесь нельзя.",
   binarySizes: (a, b) => `Бинарный файл, ${a} → ${b}`,
   sizeUnknown: () => "нет",
   bytes: (n) => `${n} Б`,
@@ -537,6 +544,9 @@ const ru: Dict = {
   showWholeDiff: () => "Показать целиком",
   hunkWhitespaceTip: () =>
     "Недоступно при игнорировании пробелов: такой патч не применяется.",
+  hunkWide: () => "шире",
+  hunkWideTip: () =>
+    "Контекст расширен, поэтому hunk охватывает более широкий участок, чем до разворота — постановка и откат подействуют на весь этот участок.",
   colSubject: () => "Коммит",
   colAuthor: () => "Автор",
   colDate: () => "Дата",
@@ -548,8 +558,6 @@ const ru: Dict = {
   orderTopo: () => "Топологический",
   highlightHeader: () => "Подсветка",
   highlightMine: () => "Мои коммиты и текущая ветка",
-  highlightPending: () =>
-    "Пока недоступно — нужны настроенный user.email репозитория и признак достижимости коммита от HEAD",
   loadingMore: () => "Загружаем ещё коммиты…",
   logEnd: () => "Конец истории",
   logCapReached: () => "Показаны первые 20 000 коммитов — уточните фильтр",
@@ -565,6 +573,9 @@ const ru: Dict = {
   selectedCommits: (n) => `выбрано ${n}`,
   graphSuppressedTip: () =>
     "Фильтр разрывает историю, поэтому связи между коммитами не рисуются",
+  offGraphLabel: () => "найден по хэшу",
+  offGraphTip: () =>
+    "Достан по хэшу за пределами загруженной истории: места в графе у него нет, поэтому связи вокруг него не рисуются",
   // ── Строка фильтров лога (задача 11) ───────────────────────────────────────
   fltSearchPlaceholder: () => "Поиск по коммитам и хэшу",
   fltSearchTip: () =>
@@ -575,8 +586,7 @@ const ru: Dict = {
   fltPrevMatch: () => "Предыдущее совпадение (Cmd/Ctrl+Shift+G)",
   fltNextMatch: () => "Следующее совпадение (Cmd/Ctrl+G) — догружает страницы, пока не найдёт",
   fltDimLabel: () => "Приглушить",
-  fltDimPending: () =>
-    "Пока недоступно — приглушение несовпавших строк рисует список коммитов, а он ещё не читает поиск",
+  fltDimTip: () => "Показывать несовпавшие строки приглушённо",
   fltBranch: () => "Ветка",
   fltAuthor: () => "Автор",
   fltDate: () => "Дата",
@@ -707,6 +717,13 @@ const ru: Dict = {
   copyFailed: () => "Не удалось скопировать в буфер обмена.",
   compareSides: (a, b) => `${a} → ${b}`,
   contextMenuTip: () => "Действия (Cmd/Ctrl+Enter)",
+  compareFilesTitle: () => "Изменено между двумя ревизиями",
+  openCurrentVersion: () => "Открыть текущую версию",
+  openCurrentVersionTip: () =>
+    "Показать файл в панели изменений - только пока он изменён и не закоммичен",
+  openCurrentUnchanged: () => "У файла нет незакоммиченных изменений.",
+  expandGap: (n) => `Показать ${n} скрытых строк`,
+  expandGapTip: () => "Запросить патч с большим контекстом вокруг изменений",
 };
 
 /** Current locale's dictionary. Reactive: reads the `locale` signal. */

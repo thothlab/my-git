@@ -42,6 +42,7 @@ pub fn run() {
             commands::commit_files,
             commands::commit_file_diff,
             commands::commits_compare,
+            commands::commits_unreachable,
             commands::commits_compare_diff,
             commands::branch_tree,
             commands::branch_rename,

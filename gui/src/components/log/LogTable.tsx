@@ -10,6 +10,7 @@ import {
   columnWidths,
   commits,
   cursorIndex,
+  dim,
   LANE_BUDGET,
   filter,
   graphSuppressed,
@@ -21,6 +22,8 @@ import {
   loadingMore,
   logError,
   note,
+  offBranch,
+  offGraph,
   orderKnown,
   pendingNew,
   refreshLog,
@@ -28,9 +31,11 @@ import {
   resetLog,
   saveColumnWidth,
   setBranchScope,
+  setHighlight,
   setColumnWidth,
   selectAll,
   selectAt,
+  search,
   selectedSet,
   setAtTop,
   setOrder,
@@ -38,11 +43,12 @@ import {
 } from "../../logStore";
 import { state } from "../../store";
 import { selectedBranch } from "./branchSelection";
+import FilterBar from "./FilterBar";
+import { commitMatches, matchRanges, type Span } from "./searchMatch";
 import { clearCompare } from "./actions/compareSelection";
 import { commitMenuItems } from "./actions/commitActions";
 import ContextMenu, { createMenuController, type MenuAnchor } from "./actions/ContextMenu";
 import { ActionDialogHost } from "./actions/dialogs";
-import OperationBar from "./actions/OperationBar";
 import LogGraph, { LANE_W, lanesBelow } from "./LogGraph";
 import { PanelBtn, PanelChrome, PanelNote } from "./PanelChrome";
 
@@ -268,15 +274,12 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
                 <div class="px-2 py-1 text-[11px] uppercase text-fg-muted">
                   {d().highlightHeader()}
                 </div>
-                {/* The panel's convention (PanelChrome): an action that does not
-                    exist yet is disabled and its tooltip says why. A live switch
-                    over an empty predicate is worse than a greyed one — it
-                    persists a setting that cannot change anything on screen. */}
-                <label
-                  class="flex cursor-not-allowed items-center gap-2 rounded px-2 py-1 text-xs opacity-40"
-                  title={d().highlightPending()}
-                >
-                  <input type="checkbox" checked={highlight()} disabled />
+                <label class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-bg-muted">
+                  <input
+                    type="checkbox"
+                    checked={highlight()}
+                    onChange={(e) => setHighlight(e.currentTarget.checked)}
+                  />
                   {d().highlightMine()}
                 </label>
               </div>
@@ -289,11 +292,11 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
           arrive in one order and are re-sorted under the reader. */}
       <Show when={orderKnown()}>
         <div class="flex h-full min-h-0 flex-col">
-          {/* Mounted here, not in the layout: the layout file belongs to another
-              task, and an operation strip that is not mounted would leave a
-              conflicted repository with no way out of the panel. Do not mount a
-              second one. */}
-          <OperationBar />
+          {/* The operation strip used to live here. It now hangs in the window
+              chassis (`App.tsx`): a pull from the Changes toolbar can leave a
+              conflicted merge, and the spec requires the state to be announced
+              on entry regardless of which mode is open. Do not mount a second
+              one here. */}
           <ActionDialogHost />
           <Show when={menu.anchor()}>
             {(a) => (
@@ -325,6 +328,13 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
               onReset={() => resetColumnWidth("date")}
             />
           </div>
+
+          {/* The filter row: mounted here, above the scrolling container and
+              inside it never — that placement is what keeps it in view while
+              the log is scrolled (task 11 states the requirement as a mounting
+              rule). Exactly one instance: it claims Cmd/Ctrl+F and Cmd/Ctrl+G,
+              and a second registration throws. */}
+          <FilterBar />
 
           {/* A reload over an existing list keeps the rows on screen, so the fact
               that it is happening has to be said somewhere. */}
@@ -433,9 +443,13 @@ function VirtualRows(props: {
           // Read through a memo by index: capturing the value here is what
           // freezes rows when the list updates.
           const row = createMemo(() => commits()[vi.index]);
+          const outside = createMemo(() => offGraph().has(row()?.hash ?? ""));
           const above = createMemo(() => {
             const prev = commits()[vi.index - 1];
-            return prev ? lanesBelow(prev) : [];
+            // A row pinned by a hash search carries no geometry: its lines are
+            // not this history's lines, so the row under it opens its own.
+            if (!prev || offGraph().has(prev.hash)) return [];
+            return lanesBelow(prev);
           });
           return (
             <Show when={row()}>
@@ -452,6 +466,8 @@ function VirtualRows(props: {
                 onClick={(e) => props.onRowClick(vi.index, e)}
                 onMenu={(e) => props.onRowMenu(vi.index, e)}
                 index={vi.index}
+                dimmed={dim() && !!search().text && !commitMatches(row()!)}
+                outside={outside()}
               />
             </Show>
           );
@@ -485,6 +501,9 @@ function Row(props: {
   onClick: (e: MouseEvent) => void;
   onMenu: (e: MouseEvent) => void;
   index: number;
+  dimmed: boolean;
+  /** Fetched by hash from outside the loaded pages: no graph is drawn for it. */
+  outside: boolean;
 }) {
   return (
     <div
@@ -493,8 +512,11 @@ function Row(props: {
       classList={{
         "bg-accent/25": props.selected,
         "ring-1 ring-inset ring-accent": props.current,
-        // Emphasis (R45i) is wired to the toggle but has no inputs yet, see below.
-        "text-fg-muted": emphasis(props.commit) === false && highlight(),
+        // Two independent readings of one row, and neither removes it:
+        // emphasis (R45i) subdues commits that are neither mine nor on the
+        // current branch; dim (R22i) subdues rows the search did not match.
+        "text-fg-muted":
+          (emphasis(props.commit) === false && highlight()) || props.dimmed,
       }}
       style={{
         top: `${props.top}px`,
@@ -507,24 +529,75 @@ function Row(props: {
         props.onMenu(e);
       }}
     >
-      <div class="h-full" title={props.suppressed ? d().graphSuppressedTip() : undefined}>
-        <LogGraph
-          commit={props.commit}
-          openAbove={props.openAbove}
-          height={ROW_H}
-          width={props.graphW}
-          capacity={props.capacity}
-        />
+      <div
+        class="h-full"
+        title={
+          props.outside
+            ? d().offGraphTip()
+            : props.suppressed
+              ? d().graphSuppressedTip()
+              : undefined
+        }
+      >
+        {/* The column keeps its width so the row does not step out of the grid;
+            what it does not keep is a graph that would be a lie. */}
+        <Show when={!props.outside}>
+          <LogGraph
+            commit={props.commit}
+            openAbove={props.openAbove}
+            height={ROW_H}
+            width={props.graphW}
+            capacity={props.capacity}
+          />
+        </Show>
       </div>
       <div class="flex min-w-0 items-center gap-1 px-1">
+        <Show when={props.outside}>
+          <span
+            class="shrink-0 rounded border border-border px-1 text-[10px] text-fg-subtle"
+            title={d().offGraphTip()}
+          >
+            {d().offGraphLabel()}
+          </span>
+        </Show>
         <Refs refs={props.commit.refs} />
-        <span class="truncate">{props.commit.subject}</span>
+        <span class="truncate">
+          <Marked text={props.commit.subject} />
+        </span>
       </div>
       <div class="truncate px-2 text-fg-subtle">{props.commit.author}</div>
       <div class="truncate px-2 text-fg-subtle" title={absolute(props.commit.authorAt)}>
         {relative(props.commit.authorAt)}
       </div>
     </div>
+  );
+}
+
+/**
+ * The subject with the search text marked inside it (R22i).
+ *
+ * The ranges come from `searchMatch` — the one rule about what counts as a
+ * match — so a marked row and a row the jump lands on are the same rows. Marking
+ * changes how the subject reads and never whether the row is in the list.
+ */
+function Marked(props: { text: string }) {
+  const parts = createMemo<{ text: string; hit: boolean }[]>(() => {
+    const spans: Span[] = matchRanges(props.text);
+    if (spans.length === 0) return [{ text: props.text, hit: false }];
+    const out: { text: string; hit: boolean }[] = [];
+    let at = 0;
+    for (const [from, to] of spans) {
+      if (from > at) out.push({ text: props.text.slice(at, from), hit: false });
+      out.push({ text: props.text.slice(from, to), hit: true });
+      at = to;
+    }
+    if (at < props.text.length) out.push({ text: props.text.slice(at), hit: false });
+    return out;
+  });
+  return (
+    <For each={parts()}>
+      {(p) => (p.hit ? <mark class="bg-warn/40 text-fg">{p.text}</mark> : <>{p.text}</>)}
+    </For>
   );
 }
 
@@ -604,15 +677,21 @@ function ColHeader(props: {
 }
 
 /**
- * R45i wants commits of the current branch and commits authored by the
- * repository's configured user emphasised. Neither input exists yet: RepoState
- * carries no `user.email` and LogCommit no reachability from HEAD, and both
- * live in `model.rs` / `api.ts`, outside this task's zone. `null` means "not
- * known", so nothing is subdued on a guess; the toggle and its persistence are
- * in place for when the field arrives.
+ * R45i: commits of the current branch and commits authored by the repository's
+ * configured user read normally, the rest are subdued.
+ *
+ * Both inputs arrive from the backend — `RepoState.userEmail` and, per loaded
+ * page, the set of commits `HEAD` cannot reach (`offBranch`). The predicate is
+ * built around the *negative* answer on purpose: while the reachability of the
+ * page is unknown the set is empty, every row reads normally, and the panel
+ * looks exactly as it did before the emphasis existed rather than subduing the
+ * whole log on a guess.
  */
-// TODO(prd): needs RepoState.userEmail and a per-commit "reachable from HEAD".
-const emphasis = (_c: LogCommit): boolean | null => null;
+const emphasis = (c: LogCommit): boolean | null => {
+  const email = state()?.userEmail ?? null;
+  if (email && c.authorEmail === email) return true;
+  return !offBranch().has(c.hash);
+};
 
 const two = (n: number) => String(n).padStart(2, "0");
 const timeOf = (dt: Date) => `${two(dt.getHours())}:${two(dt.getMinutes())}`;

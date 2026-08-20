@@ -27,6 +27,7 @@ import { beginDrag } from "./Resizer";
 import { registerHotkey } from "../hotkeys";
 import {
   BIG_DIFF_LINES,
+  FOLD_CONTEXT,
   buildView,
   pairChanged,
   sideLabels,
@@ -105,11 +106,42 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     return p ? { kind: "worktree", path: p, base: base() } : null;
   };
 
+  /**
+   * Unchanged lines asked for around each change (R46i, D04).
+   *
+   * `undefined` is the historical request — no `-U` at all. A gap *between*
+   * hunks holds lines git never put in the patch, so revealing them is not a
+   * fold to open but the same file asked for again with enough context to cover
+   * the widest gap the reader has opened. Per file: it is reset with the source
+   * below, like every other per-file reading state.
+   */
+  const [context, setContext] = createSignal<number | undefined>(undefined);
+  /**
+   * The gaps the reader asked to see, as line ranges rather than gap indexes.
+   *
+   * A wider payload re-cuts the file: two hunks that were separated by the gap
+   * arrive merged, and the index the reader clicked names a different gap — or
+   * none. Line numbers survive that; they are also what tells one gap from the
+   * rest, which is the whole point: opening a gap must open *that* gap and not
+   * every folded region in the file.
+   */
+  const [revealed, setRevealed] = createSignal<GapRange[]>([]);
+  const expandGap = (index: number) => {
+    const v = view();
+    if (!v || index <= 0) return;
+    const gap = v.gaps[index];
+    if (gap <= 0) return;
+    setRevealed((r) => [...r, gapRange(v.hunks[index - 1].hunk, v.hunks[index].hunk)]);
+    setContext((c) => Math.max(c ?? 3, gap + FOLD_CONTEXT));
+  };
+  /** The reader asked for more context than the file was first shown with. */
+  const widened = () => context() !== undefined;
+
   // Every signal the request depends on is read here, synchronously, before any
   // await: past the first await the tracking scope is gone.
   const request = () => {
     const s = source();
-    return s ? { src: s, ws: ws() } : null;
+    return s ? { src: s, ws: ws(), context: context() } : null;
   };
 
   // Guard against a stale answer (R32i.3): a slower request for the file the
@@ -117,7 +149,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
   let seq = 0;
   const [diff, { refetch }] = createResource(request, async (r) => {
     const mine = ++seq;
-    const got = await fetchDiff(r.src, r.ws);
+    const got = await fetchDiff(r.src, r.ws, r.context);
     // A newer request has started meanwhile: this answer belongs to a file the
     // user has already left, and publishing it would show a foreign diff. The
     // superseded fetch simply never settles.
@@ -169,15 +201,66 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
   const [note, setNote] = createSignal("");
   const [opened, setOpened] = createSignal<Set<string>>(new Set<string>());
   const [whole, setWhole] = createSignal(false);
+  const [baseLines, setBaseLines] = createSignal<number | null>(null);
   const anchors = new Map<number, HTMLElement>();
+  // Keyed on the file and the whitespace mode, not on the whole request: asking
+  // for more context is the reader *staying* in this file, and resetting here
+  // would throw away the position they widened the context to look at.
+  let shownKey: string | null = null;
   createEffect(() => {
-    const r = request();
-    void r?.src;
+    const s = source();
+    const key = s ? `${JSON.stringify(s)}|${ws()}` : null;
+    if (key === shownKey) return;
+    shownKey = key;
     setCurrent(-1);
     setNote("");
     setOpened(new Set<string>());
     setWhole(false);
+    setContext(undefined);
+    setRevealed([]);
+    setBaseLines(null);
     anchors.clear();
+  });
+
+  /**
+   * Asking for a gap is asking to *see* those lines. The wider payload arrives
+   * with its long unchanged runs folded again by the same rule that folds
+   * everything else, so without this a click on a gap would trade one collapsed
+   * row for another and the lines would still be hidden.
+   *
+   * Only the folds that cover a gap the reader opened, and only ever added to
+   * what is already open: opening every fold in the file would reveal regions
+   * nobody asked about, and replacing the set would undo it again on the next
+   * payload.
+   */
+  createEffect(() => {
+    const v = view();
+    const want = revealed();
+    if (!v || want.length === 0) return;
+    const ids: string[] = [];
+    for (const h of v.hunks)
+      for (const it of h.items)
+        if (it.kind === "fold" && it.rows.some((r) => inAnyGap(want, r))) ids.push(it.id);
+    if (ids.length === 0) return;
+    setOpened((prev) => {
+      const next = new Set(prev);
+      const before = next.size;
+      for (const id of ids) next.add(id);
+      return next.size === before ? prev : next;
+    });
+  });
+
+  /**
+   * How long the file was **as first asked for**.
+   *
+   * The "big diff" summary is a guard against a payload too large to render, and
+   * the reader's own request for more context must not trip it: revealing lines
+   * would then hide the diff behind a warning, and "show more" would show less.
+   * So the threshold is judged by the first, un-widened answer for this file.
+   */
+  createEffect(() => {
+    const v = view();
+    if (v && context() === undefined) setBaseLines(v.lines);
   });
 
   const goto = (i: number) => {
@@ -221,7 +304,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     registerHotkey("ArrowUp", () => api.prev());
   }
 
-  const bigDiff = () => !!view() && view()!.lines > BIG_DIFF_LINES && !whole();
+  const bigDiff = () => (baseLines() ?? 0) > BIG_DIFF_LINES && !whole();
   const hasSideBySide = () =>
     split() && !diff.loading && !diff.error && !!view() && view()!.hunks.length > 0 && !bigDiff();
 
@@ -409,12 +492,13 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
                       {(hv, i) => (
                         <>
                           <Show when={view()!.gaps[i()] > 0}>
-                            <div
-                              class="bg-bg-muted px-2 py-0.5 text-center text-fg-subtle"
-                              title={d().gapTip()}
+                            <button
+                              class="w-full bg-bg-muted px-2 py-0.5 text-center text-fg-subtle hover:bg-accent/10 hover:text-accent"
+                              title={d().expandGapTip()}
+                              onClick={() => expandGap(i())}
                             >
-                              ⋯ {d().gapLines(view()!.gaps[i()])}
-                            </div>
+                              ⋯ {d().expandGap(view()!.gaps[i()])}
+                            </button>
                           </Show>
                           <HunkBody
                             hunk={hv.hunk}
@@ -433,11 +517,15 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
                               })
                             }
                             stageable={stageable()}
+                            widened={widened()}
                             base={source()!.kind === "worktree" ? (source() as { base: DiffBase }).base : null}
                             onStage={() => act(() => hunkStage(hv.hunk.patch))}
                             onUnstage={() => act(() => hunkUnstage(hv.hunk.patch))}
                             onRevert={async () => {
-                              if (await confirmAction(d().revertHunkConfirm()))
+                              const ask = widened()
+                                ? d().revertHunkWideConfirm()
+                                : d().revertHunkConfirm();
+                              if (await confirmAction(ask))
                                 await act(() => hunkRevert(hv.hunk.patch));
                             }}
                           />
@@ -470,10 +558,58 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
   );
 }
 
-function fetchDiff(src: DiffSource, ws: WhitespaceMode): Promise<FileDiff> {
-  if (src.kind === "commit") return commitFileDiff(src.hash, src.path, ws);
-  if (src.kind === "compare") return commitsCompareDiff(src.from, src.to, src.path, ws);
-  return diffFile(src.path, src.base, ws);
+/** Lines a gap hides, in both numberings; an empty range on a side the file
+ * does not have (an added or a deleted file numbers only one of them). */
+type GapRange = { oldFrom: number; oldTo: number; newFrom: number; newTo: number };
+
+const firstNo = (h: Hunk, side: "old" | "new") => {
+  for (const l of h.lines) {
+    const n = side === "old" ? l.oldNo : l.newNo;
+    if (n != null) return n;
+  }
+  return null;
+};
+const lastNo = (h: Hunk, side: "old" | "new") => {
+  for (let i = h.lines.length - 1; i >= 0; i--) {
+    const n = side === "old" ? h.lines[i].oldNo : h.lines[i].newNo;
+    if (n != null) return n;
+  }
+  return null;
+};
+
+/** The lines git left out between two hunks, named by number so the request can
+ * be recognised again in a payload cut differently. */
+function gapRange(prev: Hunk, next: Hunk): GapRange {
+  const side = (s: "old" | "new"): [number, number] => {
+    const a = lastNo(prev, s);
+    const b = firstNo(next, s);
+    return a != null && b != null ? [a + 1, b - 1] : [1, 0]; // [1, 0] matches nothing
+  };
+  const [oldFrom, oldTo] = side("old");
+  const [newFrom, newTo] = side("new");
+  return { oldFrom, oldTo, newFrom, newTo };
+}
+
+/** Does this row lie inside one of the gaps the reader opened? */
+function inAnyGap(ranges: GapRange[], row: Row): boolean {
+  const o = row.left?.oldNo;
+  const n = row.right?.newNo;
+  return ranges.some(
+    (r) =>
+      (o != null && o >= r.oldFrom && o <= r.oldTo) ||
+      (n != null && n >= r.newFrom && n <= r.newTo),
+  );
+}
+
+function fetchDiff(
+  src: DiffSource,
+  ws: WhitespaceMode,
+  context?: number,
+): Promise<FileDiff> {
+  if (src.kind === "commit") return commitFileDiff(src.hash, src.path, ws, context);
+  if (src.kind === "compare")
+    return commitsCompareDiff(src.from, src.to, src.path, ws, context);
+  return diffFile(src.path, src.base, ws, context);
 }
 
 function SideTag(props: { label: SideLabel }) {
@@ -500,11 +636,20 @@ function HunkBody(props: {
   anchor: (idx: number, el: HTMLElement) => void;
   onOpen: (id: string) => void;
   stageable: boolean;
+  /** The payload was asked for with more context than the file was first shown
+   * with, so a hunk here can cover what used to be two. */
+  widened: boolean;
   base: DiffBase | null;
   onStage: () => void;
   onUnstage: () => void;
   onRevert: () => void;
 }) {
+  // Expanding the context merges neighbouring changes into one hunk, so Stage,
+  // Unstage and Revert act on a wider region than the one the reader saw before
+  // expanding. The buttons say so rather than quietly doing more (R46i).
+  const label = (base: string) => (props.widened ? `${base} · ${d().hunkWide()}` : base);
+  const tip = () =>
+    !props.stageable ? d().hunkWhitespaceTip() : props.widened ? d().hunkWideTip() : undefined;
   return (
     <div class="border-b border-border">
       <div class="flex items-center gap-2 bg-bg-muted px-2 py-0.5 text-accent">
@@ -512,21 +657,25 @@ function HunkBody(props: {
         <div class="ml-auto flex gap-1">
           <Show when={props.base === "worktree"}>
             <HunkBtn
-              label="Stage"
+              label={label("Stage")}
               disabled={!props.stageable}
-              tip={props.stageable ? undefined : d().hunkWhitespaceTip()}
+              tip={tip()}
               onClick={props.onStage}
             />
             <HunkBtn
-              label="Revert"
+              label={label("Revert")}
               danger
               disabled={!props.stageable}
-              tip={props.stageable ? undefined : d().hunkWhitespaceTip()}
+              tip={tip()}
               onClick={props.onRevert}
             />
           </Show>
           <Show when={props.base === "index"}>
-            <HunkBtn label="Unstage" onClick={props.onUnstage} />
+            <HunkBtn
+              label={label("Unstage")}
+              tip={props.widened ? d().hunkWideTip() : undefined}
+              onClick={props.onUnstage}
+            />
           </Show>
         </div>
       </div>

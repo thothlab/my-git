@@ -39,6 +39,9 @@ export interface RepoState {
   activeChangelistId: string;
   changelists: ChangelistView[];
   operation: OperationState;
+  /** `user.email` of this repository, or null when git has none configured.
+   * The log tells the reader's own commits apart by it (R45i). */
+  userEmail?: string | null;
 }
 
 // Error shape returned by Rust commands (see error.rs). Always carries a message;
@@ -123,11 +126,18 @@ export interface FileDiff {
 
 /// `whitespace` defaults to "none" — showing every difference is the historical
 /// behaviour and the safe one. An unknown mode is rejected by the backend.
+/**
+ * `context` is how many unchanged lines to keep around each change. Omitted
+ * means "as before" — the backend then passes no `-U` at all and the patch is
+ * byte-for-byte the historical one. Raising it is how the panel reveals the
+ * lines git left out *between* hunks (R46i, D04).
+ */
 export const diffFile = (
   path: string,
   against: DiffBase,
   whitespace: WhitespaceMode = "none",
-) => invoke<FileDiff>("diff_file", { path, against, whitespace });
+  context?: number,
+) => invoke<FileDiff>("diff_file", { path, against, whitespace, context });
 
 export const hunkStage = (patch: string) =>
   invoke<RepoState>("hunk_stage", { patch });
@@ -312,12 +322,18 @@ export const commitFileDiff = (
   hash: string,
   path: string,
   whitespace: WhitespaceMode = "none",
-) => invoke<FileDiff>("commit_file_diff", { hash, path, whitespace });
+  context?: number,
+) => invoke<FileDiff>("commit_file_diff", { hash, path, whitespace, context });
 /** The revision that means "the working tree" in `commitsCompare` /
  * `commitsCompareDiff` (prd_02 История 77). A comparison against a real revision
  * always names it, so passing this constant is a deliberate choice rather than an
  * empty string that slipped through. */
 export const WORKING_TREE = "";
+
+/** Of the given commits, the ones the current revision cannot reach — the input
+ * behind the log's row emphasis (R45i, D05). */
+export const commitsUnreachable = (hashes: string[]) =>
+  invoke<string[]>("commits_unreachable", { hashes });
 
 export const commitsCompare = (from: string, to: string) =>
   invoke<CommitFileEntry[]>("commits_compare", { from, to });
@@ -326,7 +342,8 @@ export const commitsCompareDiff = (
   to: string,
   path: string,
   whitespace: WhitespaceMode = "none",
-) => invoke<FileDiff>("commits_compare_diff", { from, to, path, whitespace });
+  context?: number,
+) => invoke<FileDiff>("commits_compare_diff", { from, to, path, whitespace, context });
 
 // branch tree (task 05)
 export const branchTree = () => invoke<BranchNode[]>("branch_tree");

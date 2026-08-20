@@ -121,6 +121,11 @@ pub struct RepoState {
     pub detached: bool,
     pub active_changelist_id: String,
     pub changelists: Vec<ChangelistView>,
+    /// `user.email` as this repository resolves it, or `None` when git has none
+    /// configured. The log needs it to tell the reader's own commits apart
+    /// (R45i, D05); it is not derived from the last commit, which would name
+    /// whoever committed last rather than whoever is sitting here.
+    pub user_email: Option<String>,
     /// Unfinished merge / rebase / cherry-pick / revert, if any. Travels with the
     /// state rather than a separate command — see prd_02 §Контракты и API.
     pub operation: OperationState,

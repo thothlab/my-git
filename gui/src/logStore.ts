@@ -1,8 +1,10 @@
 import { createSignal } from "solid-js";
+import { compilePattern, matchesCommit } from "./components/log/searchPattern";
 import {
   emptyLogFilter,
   emptyUiState,
   errText,
+  commitsUnreachable,
   logPage,
   uiStateGet,
   uiStateSet,
@@ -49,6 +51,7 @@ export const ROW_CAP = 20_000;
 export const LANE_BUDGET = 12;
 
 const ORDER_KEY = "logOrder";
+const DIM_KEY = "logDimNonMatching";
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -66,7 +69,42 @@ const [loading, setLoading] = createSignal(false);
 const [loadingMore, setLoadingMore] = createSignal(false);
 const [laneOverflow, setLaneOverflow] = createSignal(false);
 const [logError, setLogError] = createSignal("");
-const [note, setNote] = createSignal("");
+const [noteText, setNote] = createSignal("");
+/**
+ * A jump between matches is running.
+ *
+ * A flag of its own, not a value of `note`: the note strip is the channel of
+ * the reader's own messages and is cleared by a click on it, so a stray click
+ * during a jump used to re-enable the buttons that guard the loop. The two are
+ * merged for *reading* — `note()` still answers "searching" while a jump runs,
+ * which is the contract the filter bar was written against — but nothing the
+ * reader does can lower the flag, and only {@link jumpToMatch}'s `finally`
+ * does.
+ */
+const [searching, setSearching] = createSignal(false);
+/**
+ * Hashes of loaded commits the current revision cannot reach (R45i, D05).
+ *
+ * The negative is what travels: everything the log shows belongs to the current
+ * branch until git says otherwise, so an answer that has not arrived — or one
+ * that failed — subdues nothing instead of subduing every row.
+ */
+const [offBranch, setOffBranch] = createSignal<Set<string>>(new Set());
+/**
+ * Rows that stand outside the graph: a commit fetched by hash (D06) and pinned
+ * to the top of the list.
+ *
+ * The order of `commits()` *is* the geometry of the graph — the upper halves of
+ * a row's lines are computed from the row above it — so a commit spliced in from
+ * a differently filtered page has no place in that geometry: its own edges were
+ * computed for another page and are empty here, and drawing the next row's lines
+ * against it would be drawing a history that does not exist. Such a row is
+ * therefore marked, drawn without a graph, and the row below it starts its lines
+ * afresh. The mark is dropped the moment paging reaches the commit for real.
+ */
+const [offGraph, setOffGraph] = createSignal<Set<string>>(new Set());
+/** Non-matching rows drawn muted (the search's third mode, R22i). */
+const [dim, setDimSignal] = createSignal(localStorage.getItem(DIM_KEY) === "1");
 const [pendingNew, setPendingNew] = createSignal(0);
 const [atTop, setAtTop] = createSignal(true);
 const [highlight, setHighlightSignal] = createSignal(emptyUiState().logHighlight);
@@ -87,11 +125,27 @@ export {
   loading,
   loadingMore,
   logError,
-  note,
   pendingNew,
   search,
+  searching,
   selectedSet,
+  dim,
+  offBranch,
+  offGraph,
 };
+
+/**
+ * The note strip's text. `searching` wins while a jump is in flight so the busy
+ * state cannot be dismissed by a click; every other note is the reader's and is
+ * dismissable.
+ */
+export const note = (): string => (searching() ? "searching" : noteText());
+
+/** Turn dimming of non-matching rows on or off (view menu of the log). */
+export function setDim(on: boolean): void {
+  setDimSignal(on);
+  localStorage.setItem(DIM_KEY, on ? "1" : "");
+}
 
 /** True once the ordering preference is known: the list must not render before
  * it is, or the rows arrive in one order and are re-sorted under the reader. */
@@ -109,7 +163,10 @@ export const selected = (): string | null => commits()[cursorIndex()]?.hash ?? n
  * commit looks the same — so the whole loaded set is asked at once.
  */
 export const graphSuppressed = (): boolean => {
-  const rows = commits();
+  // A pinned row is not part of the page the claim is made about: its edges are
+  // empty because it came from another request, and counting it would let one
+  // hash search look like "the filter broke the history".
+  const rows = commits().filter((c) => !offGraph().has(c.hash));
   if (rows.length === 0) return false;
   return rows.every((c) => c.edges.length === 0 && c.lane === 0);
 };
@@ -152,6 +209,8 @@ export function resetLog(): void {
   setSelectedSet(new Set<string>());
   setCursorIndex(-1);
   anchorIndex = -1;
+  clearOffBranch();
+  setOffGraph(new Set<string>());
   setLaneOverflow(false);
   setLoadingMore(false);
   setPendingNew(0);
@@ -174,6 +233,8 @@ export async function reload(opts: { keepSelection?: boolean } = {}): Promise<vo
 
   reloadsInFlight++;
   setLoading(true);
+  clearOffBranch();
+  setOffGraph(new Set<string>());
   setLogError("");
   setNote("");
   setPendingNew(0);
@@ -244,16 +305,80 @@ export async function loadMore(): Promise<void> {
 /** Join a page onto what is loaded. Deduplicates by hash: a hash-like search
  * term puts the found commit into the first page, and it can come back again. */
 function applyPage(page: LogPage, before: LogCommit[]): void {
-  const seen = new Set(before.map((c) => c.hash));
-  const next = before.slice();
+  // A row pinned by a hash search is a stand-in for a commit paging had not
+  // reached. Once a page delivers it in its own place, with its own edges, the
+  // stand-in goes: keeping it would let dedupe drop the real row and leave the
+  // history with a hole where the row below it expected a line from above.
+  const pinned = offGraph();
+  let kept = before;
+  // The keyboard cursor is an index, and dropping a row above it moves every row
+  // under it; the hash is what the reader actually stands on.
+  const under = selected();
+  let dropped = false;
+  if (pinned.size > 0) {
+    const arriving = new Set(page.commits.map((c) => c.hash).filter((h) => pinned.has(h)));
+    if (arriving.size > 0) {
+      kept = before.filter((c) => !arriving.has(c.hash));
+      dropped = kept.length !== before.length;
+      setOffGraph(new Set([...pinned].filter((h) => !arriving.has(h))));
+    }
+  }
+  const seen = new Set(kept.map((c) => c.hash));
+  const next = kept.slice();
   for (const c of page.commits) {
     if (seen.has(c.hash)) continue;
     seen.add(c.hash);
     next.push(c);
   }
   setCommits(next.length > ROW_CAP ? next.slice(0, ROW_CAP) : next);
+  if (dropped && under) {
+    const i = commits().findIndex((c) => c.hash === under);
+    if (i >= 0) setCursorIndex(i);
+  }
   setCursor(page.nextCursor);
   setLaneOverflow(laneOverflow() || page.laneOverflow);
+  void askReachability(page.commits);
+}
+
+/**
+ * Ask which rows of *one page* are off the current branch, and add them to what
+ * is already known.
+ *
+ * The page, never the whole loaded list: the hashes travel on the command line,
+ * and twenty thousand of them are past the argument limit — the request would
+ * fail exactly on the histories deep enough to need it. Unioning is sound
+ * because the answer for a commit does not change while the log stands: a
+ * reload clears the set outright.
+ *
+ * The guard is an **epoch**, not a per-request number: two pages asked at once
+ * are not rivals — their answers are unioned — so a shared counter would let the
+ * second page cancel the first, and those rows would stay unmarked for good,
+ * nobody asking again. What must be dropped is an answer issued before the set
+ * was emptied: it would refill a cleared set with the previous history's hashes.
+ * So the epoch moves exactly where the set is cleared, and nowhere else.
+ */
+let reachEpoch = 0;
+/** Empty the set and invalidate every request that is filling it. */
+function clearOffBranch(): void {
+  reachEpoch++;
+  setOffBranch(new Set<string>());
+}
+
+async function askReachability(rows: LogCommit[]): Promise<void> {
+  if (rows.length === 0) return;
+  const my = reachEpoch;
+  try {
+    const off = await commitsUnreachable(rows.map((c) => c.hash));
+    if (my !== reachEpoch) return;
+    setOffBranch((prev) => {
+      const next = new Set(prev);
+      for (const h of off) next.add(h);
+      return next;
+    });
+  } catch {
+    // Emphasis is a reading aid: without an answer nothing is subdued, which is
+    // the same screen the panel showed before the aid existed.
+  }
 }
 
 // ── Filter and order ─────────────────────────────────────────────────────────
@@ -367,9 +492,14 @@ export function selectAt(index: number, mode: SelectMode = "single"): void {
   setCursorIndex(i);
 }
 
-/** Select a commit by hash if it is loaded; returns whether it was found. */
+/**
+ * Select a commit by hash if it is loaded; returns whether it was found.
+ * A prefix counts: a hash pasted by a reader is usually the short one, and the
+ * rows carry the full form.
+ */
 export function selectHash(hash: string): boolean {
-  const i = commits().findIndex((c) => c.hash === hash);
+  const p = hash.toLowerCase();
+  const i = commits().findIndex((c) => c.hash.toLowerCase().startsWith(p));
   if (i < 0) return false;
   selectAt(i, "single");
   return true;
@@ -382,69 +512,109 @@ export function selectAll(): void {
 
 // ── Jumping to search matches ────────────────────────────────────────────────
 
-function matcher(): ((subject: string, hash: string) => boolean) | null {
-  const s = search();
-  if (!s.text) return null;
-  if (s.regex) {
-    try {
-      const re = new RegExp(s.text, s.matchCase ? "" : "i");
-      return (subject, hash) => re.test(subject) || re.test(hash);
-    } catch {
-      return null; // an invalid pattern is reported by the field, not here
-    }
+/**
+ * The one search rule, asked here rather than restated: `searchPattern.ts` owns
+ * what counts as a match, and the highlighting in the row, the dim predicate
+ * and this jump must agree — a second copy is exactly what makes a jump land on
+ * a row the highlighting does not consider matched.
+ */
+const pattern = () => compilePattern(search());
+const hits = (subject: string, hash: string) => matchesCommit(pattern(), subject, hash);
+
+/** A full or near-full hash the reader pasted. The backend can fetch such a
+ * commit directly, which is the only way to reach one past the row cap. */
+const HASH_RE = /^[0-9a-f]{7,40}$/i;
+
+/**
+ * Fetch a commit named by hash straight from the backend and put it into the
+ * loaded rows (D06).
+ *
+ * Client-side search cannot see past the loaded pages, and `git` can: a
+ * hash-like `LogFilter.text` makes `log_page` splice the commit it names into
+ * the first page. The probe is a *separate* request built here — the store's own
+ * filter is left alone, so the search toggles still never reach
+ * `LogFilter.regex` / `LogFilter.matchCase`, which govern how git matches
+ * `--author`.
+ *
+ * Returns whether the commit was found and selected.
+ */
+export async function findCommitByHash(text: string): Promise<boolean> {
+  const hash = text.trim().toLowerCase();
+  if (!HASH_RE.test(hash)) return false;
+  if (selectHash(hash)) return true;
+  const my = ++seq;
+  try {
+    const page = await logPage({ ...filter(), text: hash }, null, PAGE_LIMIT);
+    if (my !== seq) return false;
+    const found = page.commits.find((c) => c.hash.toLowerCase().startsWith(hash));
+    if (!found) return false;
+    // In front, where the backend itself puts it: the commit is the answer to
+    // the question that was asked, not the next row of the history. It is marked
+    // as standing outside the graph — the page it came from was computed under
+    // another filter, so its lane and edges say nothing about the rows around it.
+    setCommits([found, ...commits().filter((c) => c.hash !== found.hash)].slice(0, ROW_CAP));
+    setOffGraph(new Set([...offGraph(), found.hash]));
+    void askReachability([found]);
+    return selectHash(found.hash);
+  } catch {
+    return false;
   }
-  const needle = s.matchCase ? s.text : s.text.toLowerCase();
-  return (subject, hash) =>
-    (s.matchCase ? subject : subject.toLowerCase()).includes(needle) ||
-    hash.startsWith(needle.toLowerCase());
 }
 
 /**
  * Move to the next (`1`) or previous (`-1`) match of the search text, loading
  * further pages when the match lies beyond what is loaded. Ends by saying what
  * happened: found, no more matches, or stopped at the row cap.
+ *
+ * The busy flag goes down on **every** exit, including a throw: the filter bar
+ * gates its buttons on it, and a flag left up disables them for the rest of the
+ * session.
  */
 export async function jumpToMatch(dir: 1 | -1): Promise<void> {
-  const hit = matcher();
-  if (!hit) return;
+  if (pattern().kind !== "ok") return;
+  if (searching()) return;
   setNote("");
-  let from = cursorIndex();
-  for (;;) {
-    const rows = commits();
-    if (dir === 1) {
-      for (let i = from + 1; i < rows.length; i++) {
-        if (hit(rows[i].subject, rows[i].hash)) {
-          selectAt(i, "single");
-          return;
+  setSearching(true);
+  try {
+    let from = cursorIndex();
+    for (;;) {
+      const rows = commits();
+      if (dir === 1) {
+        for (let i = from + 1; i < rows.length; i++) {
+          if (hits(rows[i].subject, rows[i].hash)) {
+            selectAt(i, "single");
+            return;
+          }
         }
-      }
-      from = rows.length - 1;
-    } else {
-      for (let i = from - 1; i >= 0; i--) {
-        if (hit(rows[i].subject, rows[i].hash)) {
-          selectAt(i, "single");
-          return;
+        from = rows.length - 1;
+      } else {
+        for (let i = from - 1; i >= 0; i--) {
+          if (hits(rows[i].subject, rows[i].hash)) {
+            selectAt(i, "single");
+            return;
+          }
         }
+        setNote("no-more-matches");
+        return;
       }
-      setNote("no-more-matches");
-      return;
+      if (capped() || atEnd()) {
+        // Nothing more to walk through — but a pasted hash still has the direct
+        // route, which is the whole point of D06: the commit is older than the
+        // cap, and the backend can name it without loading everything between.
+        if (await findCommitByHash(search().text)) return;
+        setNote(capped() ? "search-capped" : "no-more-matches");
+        return;
+      }
+      const had = commits().length;
+      await loadMore();
+      if (commits().length === had) {
+        if (await findCommitByHash(search().text)) return;
+        setNote(capped() ? "search-capped" : "no-more-matches");
+        return;
+      }
     }
-    if (capped()) {
-      setNote("search-capped");
-      return;
-    }
-    if (atEnd()) {
-      setNote("no-more-matches");
-      return;
-    }
-    setNote("searching");
-    const had = commits().length;
-    await loadMore();
-    if (commits().length === had) {
-      setNote(capped() ? "search-capped" : "no-more-matches");
-      return;
-    }
-    setNote("");
+  } finally {
+    setSearching(false);
   }
 }
 

@@ -14,9 +14,11 @@ import { d, locale } from "../../i18n";
 import { registerHotkey } from "../../hotkeys";
 import {
   applyFilter,
+  dim,
   filter,
   jumpToMatch,
   note,
+  setDim,
   search,
   setBranchScope,
   setSearch,
@@ -221,11 +223,15 @@ export default function FilterBar() {
           </span>
         </Show>
 
-        {/* The third mode of the search, kept visible and honest: dimming is
-            drawn by the commit list, which does not read the search yet. A live
-            switch over an empty predicate is worse than a greyed one — it is
-            the convention this panel already follows for such controls. */}
-        <BarBtn label={d().fltDimLabel()} tip={d().fltDimPending()} disabled onClick={() => {}} />
+        {/* The third mode of the search: non-matching rows read muted. Still not
+            a filter — nothing leaves the list — which is why it sits here beside
+            the pattern toggles and not among the four narrowing menus. */}
+        <ToggleBtn
+          label={d().fltDimLabel()}
+          tip={d().fltDimTip()}
+          on={dim()}
+          onClick={() => setDim(!dim())}
+        />
 
         <span class="mx-1 h-4 w-px bg-border" />
 

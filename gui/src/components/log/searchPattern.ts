@@ -12,10 +12,9 @@
  * pattern; a hash matches by the same pattern in regular-expression mode and by
  * prefix in plain mode, which is how a reader pastes one.
  *
- * `logStore.matcher()` still restates this rule — the store belongs to another
- * task's zone and cannot be edited from here. The two are kept equal on purpose;
- * when the store is in scope it must call `matchesCommit` instead of repeating
- * it (TODO(prd): один компилятор шаблона, задача вне зоны 11).
+ * There is no second copy left: `logStore` compiles its pattern with
+ * `compilePattern` and asks `matchesCommit` for the jump between matches, so a
+ * change to the rule is a change in this file only.
  */
 
 /** Half-open `[start, end)` range inside a subject. */

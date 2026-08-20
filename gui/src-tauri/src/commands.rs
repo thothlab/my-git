@@ -87,6 +87,7 @@ pub fn build_state(state: &State<AppState>) -> Result<RepoState> {
         // every mutation already returns RepoState — so this travels with the state
         // instead of a second `op_state` command that would be a rival source of truth.
         operation: ops::detect_state(&repo)?,
+        user_email: crate::engine::cli::user_email(&repo),
     })
 }
 
@@ -185,14 +186,17 @@ pub async fn list_rollback(state: State<'_, AppState>, id: String) -> Result<Rep
 
 // ── diff & hunk-level staging (task_04) ──────────────────────────────────────
 
+/// `context` is how many unchanged lines to keep around each change; absent
+/// means "as before" — no `-U` on the command line at all (R46i, D04).
 #[tauri::command]
 pub async fn diff_file(
     state: State<'_, AppState>,
     path: String,
     against: String,
     whitespace: String,
+    context: Option<u32>,
 ) -> Result<FileDiff> {
-    CliEngine::new(state.repo_path()?).diff_file(&path, &against, &whitespace)
+    CliEngine::new(state.repo_path()?).diff_file(&path, &against, &whitespace, context)
 }
 
 #[tauri::command]
@@ -324,8 +328,19 @@ pub async fn commit_file_diff(
     hash: String,
     path: String,
     whitespace: String,
+    context: Option<u32>,
 ) -> Result<FileDiff> {
-    commit_engine::file_diff(&state.repo_path()?, &hash, &path, &whitespace)
+    commit_engine::file_diff(&state.repo_path()?, &hash, &path, &whitespace, context)
+}
+
+/// Which of these commits the current revision cannot reach — the input behind
+/// the log's row emphasis (R45i, D05). Read-only, asked per loaded page.
+#[tauri::command]
+pub async fn commits_unreachable(
+    state: State<'_, AppState>,
+    hashes: Vec<String>,
+) -> Result<Vec<String>> {
+    commit_engine::unreachable_from_head(&state.repo_path()?, &hashes)
 }
 
 #[tauri::command]
@@ -344,8 +359,9 @@ pub async fn commits_compare_diff(
     to: String,
     path: String,
     whitespace: String,
+    context: Option<u32>,
 ) -> Result<FileDiff> {
-    commit_engine::compare_diff(&state.repo_path()?, &from, &to, &path, &whitespace)
+    commit_engine::compare_diff(&state.repo_path()?, &from, &to, &path, &whitespace, context)
 }
 
 // ── history panel: branch tree (prd_02, task 05) ─────────────────────────────

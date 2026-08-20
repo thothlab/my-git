@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::engine::cli::{parse_diff, parse_refs, whitespace_args};
+use crate::engine::cli::{context_arg, parse_diff, parse_refs, whitespace_args};
 use crate::error::{Error, Result};
 use crate::model::{CommitDetails, CommitFileEntry, FileDiff, FileState};
 
@@ -253,14 +253,23 @@ fn rename_source(entries: &[CommitFileEntry], path: &str) -> Option<String> {
 ///
 /// The raw patch is parsed by the one diff parser in the project, so a commit diff
 /// and a working-tree diff reach the panel in exactly the same shape.
-pub fn file_diff(repo: &Path, hash: &str, path: &str, ws: &str) -> Result<FileDiff> {
+pub fn file_diff(
+    repo: &Path,
+    hash: &str,
+    path: &str,
+    ws: &str,
+    context: Option<u32>,
+) -> Result<FileDiff> {
     let wsa = whitespace_args(ws)?;
+    let ctx = context_arg(context);
+    let ctx: Vec<&str> = ctx.iter().map(String::as_str).collect();
     let parents = parents_of(repo, hash)?;
     let mut d = match parents.first() {
         Some(base) => {
             let old = rename_source(&files(repo, hash)?, path);
             let mut a = vec!["diff", "-M"];
             a.extend_from_slice(&wsa);
+            a.extend_from_slice(&ctx);
             a.extend_from_slice(&[base.as_str(), hash, "--"]);
             if let Some(o) = old.as_deref() {
                 a.push(o);
@@ -278,6 +287,7 @@ pub fn file_diff(repo: &Path, hash: &str, path: &str, ws: &str) -> Result<FileDi
         None => {
             let mut a = vec!["diff-tree", "-p", "-r", "-M", "--root", "--no-commit-id"];
             a.extend_from_slice(&wsa);
+            a.extend_from_slice(&ctx);
             a.extend_from_slice(&[hash, "--", path]);
             let mut d = parse_diff(path, &git_text(repo, &a)?);
             if d.binary {
@@ -288,6 +298,34 @@ pub fn file_diff(repo: &Path, hash: &str, path: &str, ws: &str) -> Result<FileDi
     };
     d.merge_first_parent = parents.len() > 1;
     Ok(d)
+}
+
+/// Which of the given commits are **not** reachable from `HEAD` (R45i, D05).
+///
+/// The answer is the negative on purpose: the reader's eye is drawn by what is
+/// emphasised, and everything the log shows is on the current branch until it is
+/// not — so a failed or empty answer subdues nothing rather than subduing
+/// everything.
+///
+/// One `git` call for the whole page. `--no-walk` says "consider exactly these
+/// commits, do not traverse from them", and `--not HEAD` removes those the
+/// current revision can reach; what is left over is the answer. Asking
+/// `merge-base --is-ancestor` per row would be one process per commit.
+///
+/// A hash git does not know is an error, not a silently shorter list: a page
+/// whose rows quietly lost their answer is indistinguishable from a page whose
+/// rows are all reachable.
+pub fn unreachable_from_head(repo: &Path, hashes: &[String]) -> Result<Vec<String>> {
+    if hashes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args: Vec<&str> = vec!["rev-list", "--no-walk"];
+    args.extend(hashes.iter().map(String::as_str));
+    args.extend_from_slice(&["--not", "HEAD"]);
+    Ok(git_text(repo, &args)?
+        .split_whitespace()
+        .map(str::to_string)
+        .collect())
 }
 
 /// Files differing between two revisions.
@@ -306,11 +344,21 @@ pub fn compare(repo: &Path, from: &str, to: &str) -> Result<Vec<CommitFileEntry>
 
 /// Diff of one file between two revisions. An empty `to` means the working tree,
 /// exactly as in [`compare`].
-pub fn compare_diff(repo: &Path, from: &str, to: &str, path: &str, ws: &str) -> Result<FileDiff> {
+pub fn compare_diff(
+    repo: &Path,
+    from: &str,
+    to: &str,
+    path: &str,
+    ws: &str,
+    context: Option<u32>,
+) -> Result<FileDiff> {
     let wsa = whitespace_args(ws)?;
+    let ctx = context_arg(context);
+    let ctx: Vec<&str> = ctx.iter().map(String::as_str).collect();
     let old = rename_source(&compare(repo, from, to)?, path);
     let mut a = vec!["diff", "-M"];
     a.extend_from_slice(&wsa);
+    a.extend_from_slice(&ctx);
     a.push(from);
     if !to.is_empty() {
         a.push(to);
@@ -362,6 +410,89 @@ mod tests {
             .output()
             .expect("spawn git");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// R46i / D04: how much unchanged text travels around each change.
+    ///
+    /// The file has two edits twenty unchanged lines apart. git's own default is
+    /// three lines of context, which leaves the two edits in two hunks with a
+    /// gap between them; asking for enough context merges them into one hunk and
+    /// the previously hidden lines are in the payload. Expected values are
+    /// counted by hand from the fixture, not from the code under test.
+    #[test]
+    fn file_diff_context_says_how_much_unchanged_text_travels() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let base: String = (1..=30).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(p.join("f.txt"), &base).unwrap();
+        run(p, &["add", "f.txt"]);
+        run(p, &["commit", "-m", "base"]);
+        // Two edits, lines 5 and 25 — twenty unchanged lines apart.
+        let edited: String = (1..=30)
+            .map(|i| match i {
+                5 => "line 5 edited\n".to_string(),
+                25 => "line 25 edited\n".to_string(),
+                _ => format!("line {i}\n"),
+            })
+            .collect();
+        std::fs::write(p.join("f.txt"), &edited).unwrap();
+        run(p, &["commit", "-am", "two edits"]);
+        let h = head(p);
+
+        // No context asked for: git's default of three, two hunks.
+        let d = file_diff(p, &h, "f.txt", "none", None).expect("default");
+        assert_eq!(d.hunks.len(), 2, "the default keeps the two edits apart");
+        let default_lines: usize = d.hunks.iter().map(|x| x.lines.len()).sum();
+        assert_eq!(default_lines, 16, "3 context above and below each of two edits, plus the pairs");
+
+        // Explicit 3 is the same command as no context at all.
+        let three = file_diff(p, &h, "f.txt", "none", Some(3)).expect("three");
+        assert_eq!(three.hunks.len(), 2);
+        assert_eq!(
+            three.hunks.iter().map(|x| x.lines.len()).sum::<usize>(),
+            default_lines,
+            "an explicit 3 reproduces the default exactly"
+        );
+
+        // Ten lines of context bridge the twenty-line gap: one hunk, whole file.
+        let wide = file_diff(p, &h, "f.txt", "none", Some(10)).expect("wide");
+        assert_eq!(wide.hunks.len(), 1, "the gap is covered, so the edits share a hunk");
+        assert_eq!(
+            wide.hunks[0].lines.len(),
+            32,
+            "30 lines of the file plus the deleted halves of the two edits"
+        );
+    }
+
+    /// R45i / D05: the log needs to know which rows are off the current branch.
+    #[test]
+    fn unreachable_from_head_names_only_the_commits_head_cannot_reach() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        // `scratch_repo` already carries one commit — that is the base here.
+        let base = head(p);
+        run(p, &["checkout", "-b", "side"]);
+        std::fs::write(p.join("a.txt"), "side\n").unwrap();
+        run(p, &["commit", "-am", "on side"]);
+        let side = head(p);
+        run(p, &["checkout", "-"]);
+        std::fs::write(p.join("b.txt"), "main\n").unwrap();
+        run(p, &["add", "b.txt"]);
+        run(p, &["commit", "-m", "on main"]);
+        let tip = head(p);
+
+        let all = vec![tip.clone(), side.clone(), base.clone()];
+        assert_eq!(
+            unreachable_from_head(p, &all).expect("rev-list"),
+            vec![side.clone()],
+            "only the side branch commit is off the current history"
+        );
+        assert!(unreachable_from_head(p, &[]).expect("empty").is_empty());
+        assert!(
+            unreachable_from_head(p, &["deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into()])
+                .is_err(),
+            "an unknown hash is an error, not a silently shorter list"
+        );
     }
 
     #[test]
@@ -561,12 +692,12 @@ mod tests {
         run(p, &["commit", "-m", "drop b"]);
         let removed = head(p);
 
-        let d = file_diff(p, &added, "b.txt", "none").expect("added diff");
+        let d = file_diff(p, &added, "b.txt", "none", None).expect("added diff");
         assert!(!d.binary);
         assert_eq!(origins(&d), "++");
         assert_eq!(d.hunks[0].lines[1].content, "two");
 
-        let d = file_diff(p, &removed, "b.txt", "none").expect("deleted diff");
+        let d = file_diff(p, &removed, "b.txt", "none", None).expect("deleted diff");
         assert_eq!(origins(&d), "--");
     }
 
@@ -578,7 +709,7 @@ mod tests {
         // a.txt is "one" on the first parent and "one\ntwo" on the merge, so the
         // first-parent diff adds exactly one line. Against the second parent the
         // file is identical and the diff would have been empty.
-        let d = file_diff(p, &merge, "a.txt", "none").expect("merge diff");
+        let d = file_diff(p, &merge, "a.txt", "none", None).expect("merge diff");
         assert_eq!(origins(&d), " +");
         assert_eq!(d.hunks[0].lines[1].content, "two");
     }
@@ -601,7 +732,7 @@ mod tests {
         .trim()
         .to_string();
 
-        let d = file_diff(p, &root, "a.txt", "none").expect("root diff");
+        let d = file_diff(p, &root, "a.txt", "none", None).expect("root diff");
         assert_eq!(origins(&d), "+");
         assert_eq!(d.hunks[0].lines[0].content, "one");
     }
@@ -613,7 +744,7 @@ mod tests {
         std::fs::write(p.join("bin.dat"), [0u8, 1, 2, 3]).unwrap();
         run(p, &["add", "bin.dat"]);
         run(p, &["commit", "-m", "bin"]);
-        let d = file_diff(p, &head(p), "bin.dat", "none").expect("binary diff");
+        let d = file_diff(p, &head(p), "bin.dat", "none", None).expect("binary diff");
         assert!(d.binary, "binary file must be flagged");
         assert!(d.hunks.is_empty());
     }
@@ -633,27 +764,27 @@ mod tests {
         run(p, &["commit", "-am", "reindent"]);
         let h = head(p);
 
-        assert_eq!(origins(&file_diff(p, &h, "ws.txt", "none").unwrap()), "-+ ");
+        assert_eq!(origins(&file_diff(p, &h, "ws.txt", "none", None).unwrap()), "-+ ");
         assert!(
-            file_diff(p, &h, "ws.txt", "all").unwrap().hunks.is_empty(),
+            file_diff(p, &h, "ws.txt", "all", None).unwrap().hunks.is_empty(),
             "ignoring all whitespace must leave no difference"
         );
         // leading indentation is not at the end of the line
         assert_eq!(
-            origins(&file_diff(p, &h, "ws.txt", "trailing").unwrap()),
+            origins(&file_diff(p, &h, "ws.txt", "trailing", None).unwrap()),
             "-+ "
         );
 
-        assert_eq!(origins(&file_diff(p, &h, "eol.txt", "none").unwrap()), "-+");
+        assert_eq!(origins(&file_diff(p, &h, "eol.txt", "none", None).unwrap()), "-+");
         assert!(
-            file_diff(p, &h, "eol.txt", "trailing")
+            file_diff(p, &h, "eol.txt", "trailing", None)
                 .unwrap()
                 .hunks
                 .is_empty(),
             "ignoring trailing whitespace must leave no difference"
         );
 
-        let e = file_diff(p, &h, "ws.txt", "sideways").unwrap_err();
+        let e = file_diff(p, &h, "ws.txt", "sideways", None).unwrap_err();
         assert!(
             format!("{e:?}").contains("whitespace"),
             "unknown mode must be rejected, got {e:?}"
@@ -669,14 +800,14 @@ mod tests {
         run(p, &["commit", "-am", "grow"]);
         let tip = head(p);
 
-        let d = compare_diff(p, &base, &tip, "a.txt", "none").expect("compare_diff");
+        let d = compare_diff(p, &base, &tip, "a.txt", "none", None).expect("compare_diff");
         assert_eq!(origins(&d), " +");
 
         std::fs::write(p.join("a.txt"), "one\ntwo\nthree\n").unwrap();
-        let d = compare_diff(p, &base, "", "a.txt", "none").expect("against the working tree");
+        let d = compare_diff(p, &base, "", "a.txt", "none", None).expect("against the working tree");
         assert_eq!(origins(&d), " ++");
         assert_eq!(
-            compare_diff(p, &base, "", "a.txt", "nope").is_err(),
+            compare_diff(p, &base, "", "a.txt", "nope", None).is_err(),
             true,
             "unknown whitespace mode must be rejected here too"
         );
@@ -699,11 +830,11 @@ mod tests {
         assert_eq!(f[0].status, FileState::Renamed);
         // … and the diff must agree: two kept lines and one replaced, not a whole
         // file of additions.
-        let d = file_diff(p, &h, "renamed.txt", "none").expect("rename diff");
+        let d = file_diff(p, &h, "renamed.txt", "none", None).expect("rename diff");
         assert_eq!(origins(&d), "  -+");
 
         // the same for a comparison of two revisions
-        let d = compare_diff(p, &base, &h, "renamed.txt", "none").expect("compare rename");
+        let d = compare_diff(p, &base, &h, "renamed.txt", "none", None).expect("compare rename");
         assert_eq!(origins(&d), "  -+");
     }
 
@@ -712,7 +843,7 @@ mod tests {
         let dir = scratch_repo();
         let p = dir.path();
         let (_main_tip, merge) = merge_repo(p);
-        let d = file_diff(p, &merge, "a.txt", "none").expect("merge diff");
+        let d = file_diff(p, &merge, "a.txt", "none", None).expect("merge diff");
         assert!(
             d.merge_first_parent,
             "a merge diff must carry the fact that it is against the first parent"
@@ -720,7 +851,7 @@ mod tests {
         // an ordinary commit on top of the merge must not claim it
         std::fs::write(p.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         run(p, &["commit", "-am", "plain"]);
-        let plain = file_diff(p, &head(p), "a.txt", "none").expect("plain diff");
+        let plain = file_diff(p, &head(p), "a.txt", "none", None).expect("plain diff");
         assert!(!plain.merge_first_parent);
     }
 
@@ -736,21 +867,21 @@ mod tests {
         run(p, &["commit", "-am", "bin two"]);
         let grown = head(p);
 
-        let d = file_diff(p, &added, "bin.dat", "none").expect("added binary");
+        let d = file_diff(p, &added, "bin.dat", "none", None).expect("added binary");
         assert!(d.binary);
         assert_eq!(d.old_size, None, "the file did not exist before");
         assert_eq!(d.new_size, Some(4));
 
-        let d = file_diff(p, &grown, "bin.dat", "none").expect("grown binary");
+        let d = file_diff(p, &grown, "bin.dat", "none", None).expect("grown binary");
         assert_eq!((d.old_size, d.new_size), (Some(4), Some(7)));
 
         // against the working tree the new side is the file on disk
         std::fs::write(p.join("bin.dat"), [0u8; 9]).unwrap();
-        let d = compare_diff(p, &added, "", "bin.dat", "none").expect("binary vs worktree");
+        let d = compare_diff(p, &added, "", "bin.dat", "none", None).expect("binary vs worktree");
         assert_eq!((d.old_size, d.new_size), (Some(4), Some(9)));
 
         // a text diff claims no sizes at all
-        let d = file_diff(p, &head(p), "a.txt", "none").unwrap_or_else(|_| unreachable!());
+        let d = file_diff(p, &head(p), "a.txt", "none", None).unwrap_or_else(|_| unreachable!());
         assert_eq!((d.old_size, d.new_size), (None, None));
     }
 

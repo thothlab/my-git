@@ -1,9 +1,12 @@
-import { createSignal, onCleanup, onMount } from "solid-js";
-import { d } from "../../i18n";
+import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import Resizer, { RowResizer } from "../Resizer";
+import DiffPanel from "../diff/DiffPanel";
+import type { DiffSource } from "../diff/model";
+import { commits } from "../../logStore";
 import CommitDetailsPane from "./CommitDetailsPane";
+import { compareTarget } from "./actions/compareSelection";
+import { selectedCommitFile } from "./commitFileSelection";
 import LogTable from "./LogTable";
-import { PanelChrome, PanelNote } from "./PanelChrome";
 
 /**
  * Right-hand area of the Log mode: the commit list on top, below it a
@@ -26,6 +29,32 @@ export default function LogView() {
   const [ratio, setRatioSig] = createSignal(clamp01(Number(localStorage.getItem(SPLIT_KEY)) || 0.55));
   const [detailsW, setDetailsWSig] = createSignal(Number(localStorage.getItem(DETAILS_W_KEY)) || 360);
   const [selected, setSelected] = createSignal<string | null>(null);
+
+  /**
+   * What the diff panel shows — the last link of the cascade
+   * branch → commit → file → diff.
+   *
+   * Two sources, one selection: a comparison of two revisions replaces the
+   * selected commit as the subject of the details panel, so the file picked
+   * there belongs to the comparison and the diff must be the one between its
+   * two sides. Outside a comparison the file belongs to a commit and is shown
+   * against that commit's first parent.
+   *
+   * `parent` is looked up in the loaded rows rather than derived: `DiffSource`
+   * asks for the parent's hash, and `null` there means "root commit" — a value
+   * that must be established, not guessed. A commit whose row is not loaded
+   * (nothing selects one today) yields no source at all rather than a diff
+   * claiming a root commit.
+   */
+  const diffSource = createMemo<DiffSource | null>(() => {
+    const file = selectedCommitFile();
+    if (!file) return null;
+    const cmp = compareTarget();
+    if (cmp) return { kind: "compare", path: file.path, from: cmp.from, to: cmp.to };
+    const row = commits().find((c) => c.hash === file.hash);
+    if (!row) return null;
+    return { kind: "commit", path: file.path, hash: file.hash, parent: row.parents[0] ?? null };
+  });
 
   const clampDetails = (w: number) => {
     const total = bottomEl?.clientWidth ?? window.innerWidth;
@@ -55,7 +84,7 @@ export default function LogView() {
 
       <div ref={bottomEl} class="flex min-h-0 flex-1 border-t border-border">
         <div class="min-w-0 shrink-0 overflow-hidden" style={{ width: `${detailsW()}px` }}>
-          <CommitDetailsPane selected={selected} />
+          <CommitDetailsPane selected={selected} compare={compareTarget} />
         </div>
         <Resizer
           getWidth={detailsW}
@@ -63,10 +92,7 @@ export default function LogView() {
           onCommit={() => localStorage.setItem(DETAILS_W_KEY, String(detailsW()))}
         />
         <div class="min-w-0 flex-1 overflow-hidden border-l border-border">
-          {/* TODO(prd): task 10 wires DiffView into this frame as the diff source. */}
-          <PanelChrome id="diff" title={d().diffTitle()} handlers={{}}>
-            <PanelNote title={d().historyPending()} hint={d().selectCommitHint()} />
-          </PanelChrome>
+          <DiffPanel source={diffSource()} />
         </div>
       </div>
     </div>
