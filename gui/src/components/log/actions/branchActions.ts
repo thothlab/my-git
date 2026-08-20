@@ -6,18 +6,15 @@ import {
   branchRebaseOnto,
   branchRename,
   branchUnmergedCount,
+  branchUpdate,
   errText,
   fetchRemote,
-  parseAppStash,
   push,
-  stashListApp,
-  uiStateGet,
-  uiStateSet,
-  stashRestore,
   type BranchNode,
 } from "../../../api";
-import { d, fmtDateTime } from "../../../i18n";
+import { d } from "../../../i18n";
 import { chooseOption, confirmAction, run, setError, state } from "../../../store";
+import { openStashPanel } from "../../StashPanel";
 import { selectedBranch, setSelectedBranch } from "../branchSelection";
 import { copyText } from "./clipboard";
 import type { MenuEntry } from "./ContextMenu";
@@ -59,8 +56,8 @@ const currentRemote = (): string | null => {
 /**
  * Check out a branch. A remote branch is checked out by its local name, which is
  * what makes git create the tracking branch (`branches/spec.md`, "Remote branch
- * checkout"); a dirty tree asks first, and the stash it may create is the one
- * "Restore stashed changes" later offers back.
+ * checkout"); a dirty tree asks first, and the stash it may create shows up in
+ * the stash panel marked as the application's own.
  */
 export async function checkoutBranch(node: BranchNode): Promise<void> {
   const target = node.isRemote ? localNameOf(node.name) : node.name;
@@ -191,79 +188,17 @@ export async function fetchAll(): Promise<void> {
 }
 
 /**
- * Which of those entries have already been put back.
+ * Bring a branch up to date with its upstream (История 21c).
  *
- * The engine restores with `apply`, so a restored entry stays in the list and is
- * indistinguishable from one still waiting — the mark is the half of that
- * condition that can be met without a `stash drop` command. It belongs to the
- * repository, not to this machine, so it lives in `.git/graft-ui.json` beside
- * the panel's other state rather than in localStorage.
- *
- * TODO(prd): the file has no field of its own for this yet, so the marks share
- * `collapsedFolders` under a `stash:` prefix. Folder keys are always
- * `local:` / `remote:`-prefixed, so the two never collide, and the branch tree
- * ignores anything it does not recognise — but a `restoredStashes` field in
- * `UiState` (model.rs + api.ts, outside this task's zone) is where they belong.
+ * The engine decides what "update" means: a pull for the current branch, a
+ * fast-forward in place for any other. A branch that has commits its upstream
+ * does not is refused there, verbatim — this side only offers the action for a
+ * branch that has an upstream at all, so the common "nothing to update from"
+ * case is a disabled item with a reason rather than a refusal after the click.
  */
-const STASH_MARK = "stash:";
-const stashMark = (e: { at: number; label: string }) => `${STASH_MARK}${e.at}:${e.label}`;
-
-async function markRestored(mark: string): Promise<void> {
-  try {
-    const ui = await uiStateGet();
-    if (ui.collapsedFolders.includes(mark)) return;
-    await uiStateSet({ ...ui, collapsedFolders: [...ui.collapsedFolders, mark] });
-  } catch (e) {
-    // The restore itself succeeded; this is the mark failing to persist, and
-    // saying so is better than leaving the entry silently unmarked.
-    setError(errText(e));
-  }
-}
-
-/**
- * Restore what the application shelved while switching branches (История 21a).
- *
- * The list is the stashes the application itself made; an entry already put back
- * is labelled as such from the marks above, because `apply` leaves it in place.
- * A restore that git refuses leaves both the stash and the mark untouched.
- */
-export async function restoreStashed(): Promise<void> {
-  let entries: string[];
-  // The marks are a decoration: read separately, so an unreadable settings file
-  // costs the label "already restored" and not the ability to restore.
-  let marks = new Set<string>();
-  try {
-    marks = new Set((await uiStateGet()).collapsedFolders.filter((k) => k.startsWith(STASH_MARK)));
-  } catch {
-    /* no marks, still restorable */
-  }
-  try {
-    entries = await stashListApp();
-  } catch (e) {
-    // errText, not the message alone: git's whole output is the half that names
-    // the file or the ref, and dropping it is what "операция не удалась" is.
-    setError(errText(e));
-    return;
-  }
-  if (entries.length === 0) {
-    await chooseOption(d().stashNone(), [{ key: "ok", label: d().close() }]);
-    return;
-  }
-  const key = await chooseOption(
-    d().stashRestoreTitle(),
-    entries.map((raw) => {
-      const e = parseAppStash(raw);
-      const when = fmtDateTime(e.at);
-      const mark = marks.has(stashMark(e)) ? ` — ${d().stashRestoredMark()}` : "";
-      return { key: raw, label: `${when} · ${e.label}${mark}` };
-    }),
-  );
-  if (!key) return;
-  // A failed restore leaves the stash untouched and must not be marked as
-  // returned — git's own message is already on screen either way.
-  const err = await runResult(stashRestore(key), d().phaseStashRestore());
-  if (!err) await markRestored(stashMark(parseAppStash(key)));
-  afterRepoChange({ log: false });
+export async function updateBranch(node: BranchNode): Promise<void> {
+  await run(branchUpdate(node.name), d().phaseBranchUpdate());
+  afterRepoChange();
 }
 
 // ── Menu ─────────────────────────────────────────────────────────────────────
@@ -341,6 +276,19 @@ export function branchMenuItems(node: BranchNode | null, refreshTree: () => void
       reason: mergeReason,
       run: () => after(rebaseOntoBranch(node)),
     });
+    const updateReason = busyOp
+      ? opReason
+      : node.isRemote
+        ? d().whyRemoteBranch()
+        : node.upstream
+          ? undefined
+          : d().whyNoUpstreamUpdate();
+    items.push({
+      label: d().menuUpdateBranch(node.name),
+      disabled: !!updateReason,
+      reason: updateReason,
+      run: () => after(updateBranch(node)),
+    });
     items.push({ kind: "sep" });
     items.push({
       label: d().menuCopyBranchName(),
@@ -371,10 +319,8 @@ export function branchMenuItems(node: BranchNode | null, refreshTree: () => void
     run: () => after(fetchAll()),
   });
   items.push({
-    label: d().menuRestoreStash(),
-    disabled: busyOp,
-    reason: opReason,
-    run: () => after(restoreStashed()),
+    label: d().menuStashes(),
+    run: () => openStashPanel(),
   });
 
   return items;

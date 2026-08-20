@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import {
   changelistCreate,
   changelistDelete,
@@ -16,6 +16,14 @@ import {
   treeDirPaths,
   type FileTreeNode,
 } from "./pathTree";
+import {
+  IconButton,
+  IconCollapseAll,
+  IconExpandAll,
+  IconRefresh,
+  IconRollback,
+  IconStash,
+} from "./IconButton";
 import {
   busy,
   checked,
@@ -39,6 +47,7 @@ import {
 } from "../store";
 import { d } from "../i18n";
 import SidebarFooter from "./SidebarFooter";
+import { openStashPanel, reloadStashes, stashCount } from "./StashPanel";
 
 // Which paths a drag carries: the checked set if the dragged row is part of it,
 // otherwise just that one file.
@@ -72,6 +81,13 @@ export default function ChangesView() {
     const close = () => setMenu(null);
     window.addEventListener("click", close);
     onCleanup(() => window.removeEventListener("click", close));
+  });
+
+  // Keep the stash counter honest: `run()` installs a fresh RepoState after every
+  // mutation and every focus refresh, and a stash made outside the application
+  // is only ever noticed by asking git again.
+  createEffect(() => {
+    if (state()) void reloadStashes(false);
   });
 
   const lists = () => state()?.changelists ?? [];
@@ -110,14 +126,14 @@ export default function ChangesView() {
     <div class="flex h-full flex-col">
       <div class="flex items-center gap-0.5 border-b border-border px-1 py-1 text-fg-muted">
         <TbBtn title={d().refreshTip()} onClick={() => void refresh()} disabled={busy()}>
-          ↻
+          <IconRefresh />
         </TbBtn>
         <TbBtn
           title={d().rollbackTip()}
           onClick={() => void rollbackChecked()}
           disabled={checked().size === 0}
         >
-          ↺
+          <IconRollback />
         </TbBtn>
         <TbBtn title={d().expandAll()} onClick={expandAll}>
           <IconExpandAll />
@@ -126,10 +142,26 @@ export default function ChangesView() {
           <IconCollapseAll />
         </TbBtn>
         <ViewOptionsMenu />
+        <TbBtn title={d().stashesTip()} onClick={openStashPanel}>
+          <IconStash />
+        </TbBtn>
         <TbBtn title={d().newChangelist()} onClick={() => void newList()} class="ml-auto">
           ＋
         </TbBtn>
       </div>
+
+      {/* Stashed changes are invisible in this panel by nature — the tree they
+          were taken out of looks clean. The row is the only thing that says they
+          exist, so it sits above the list rather than behind a menu. */}
+      <Show when={stashCount() > 0}>
+        <button
+          class="flex w-full items-center gap-2 border-b border-border bg-accent/10 px-2 py-1 text-left text-xs text-accent hover:bg-accent/20"
+          onClick={openStashPanel}
+        >
+          <IconStash />
+          <span class="truncate">{d().stashesBanner(stashCount())}</span>
+        </button>
+      </Show>
 
       <div class="flex-1 overflow-auto py-1">
         <Show
@@ -475,7 +507,9 @@ function Divider() {
   return <div class="my-1 border-t border-border" />;
 }
 
-// A compact icon button for the CHANGES toolbar.
+// The CHANGES toolbar button. Naming layer only — the look lives in
+// `IconButton`, shared with the Log panel headers so the two toolbars in one
+// window are not two different kinds of control.
 function TbBtn(props: {
   title: string;
   onClick: () => void;
@@ -485,15 +519,15 @@ function TbBtn(props: {
   children: any;
 }) {
   return (
-    <button
-      class={`flex h-6 w-6 items-center justify-center rounded text-sm hover:bg-bg-muted hover:text-fg disabled:opacity-30 disabled:hover:bg-transparent ${props.class ?? ""}`}
-      classList={{ "bg-accent/15 text-accent": props.active }}
-      title={props.title}
-      disabled={props.disabled}
+    <IconButton
+      tip={props.title}
       onClick={props.onClick}
+      disabled={props.disabled}
+      active={props.active}
+      class={props.class}
     >
       {props.children}
-    </button>
+    </IconButton>
   );
 }
 
@@ -529,44 +563,6 @@ function Disclosure(props: { show: boolean; collapsed: boolean; onToggle: () => 
         </svg>
       </Show>
     </span>
-  );
-}
-
-// Android-Studio-style toolbar glyphs: two chevrons pointing down = expand all,
-// two chevrons converging = collapse all.
-function IconExpandAll() {
-  // chevrons pointing apart (up over down) — Android Studio's expand-all glyph
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.6"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-    >
-      <path d="M4 6l4-3 4 3" />
-      <path d="M4 10l4 3 4-3" />
-    </svg>
-  );
-}
-function IconCollapseAll() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.6"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-    >
-      <path d="M4 3l4 3 4-3" />
-      <path d="M4 13l4-3 4 3" />
-    </svg>
   );
 }
 

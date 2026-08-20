@@ -14,6 +14,7 @@ import OperationBar from "./components/log/actions/OperationBar";
 import { registerHotkey, startHotkeys } from "./hotkeys";
 import { checkForUpdatesNow, checkForUpdatesOnStartup } from "./updater";
 import { ModalHost } from "./components/Modals";
+import StashPanel from "./components/StashPanel";
 
 const LEFT_WIDTH_KEY = "leftPanelWidth";
 const TREE_WIDTH_KEY = "logTreeWidth";
@@ -165,6 +166,9 @@ export default function App() {
         </Show>
         <StatusBar />
 
+        {/* Stashes belong to neither mode: the panel is mounted by the window, so
+            the Changes toolbar and the branch menu open the same one. */}
+        <StashPanel />
         <ModalHost />
       </div>
     </ErrorBoundary>
