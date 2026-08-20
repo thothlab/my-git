@@ -11,6 +11,12 @@ import {
   type FileStatus,
 } from "../api";
 import {
+  baseName,
+  buildFileTree,
+  treeDirPaths,
+  type FileTreeNode,
+} from "./pathTree";
+import {
   busy,
   checked,
   confirmAction,
@@ -54,63 +60,12 @@ const toggleCollapsed = (key: string) =>
   });
 
 // ── Directory-tree grouping ──────────────────────────────────────────────────
+//
+// The rule itself (split on `/`, collapse single-child chains) lives in
+// `pathTree.ts` and is shared with the commit's file list. Only the alias below
+// belongs to this panel.
 
-type TreeNode = { name: string; path: string; dirs: TreeNode[]; files: FileStatus[] };
-
-const baseName = (p: string) => p.split("/").pop() || p;
-
-/** Build a directory tree from flat file paths. */
-function buildTree(files: FileStatus[]): TreeNode {
-  const root: TreeNode = { name: "", path: "", dirs: [], files: [] };
-  for (const f of files) {
-    const parts = f.path.split("/");
-    parts.pop(); // drop the file name
-    let node = root;
-    let acc = "";
-    for (const seg of parts) {
-      acc = acc ? `${acc}/${seg}` : seg;
-      let child = node.dirs.find((d) => d.name === seg);
-      if (!child) {
-        child = { name: seg, path: acc, dirs: [], files: [] };
-        node.dirs.push(child);
-      }
-      node = child;
-    }
-    node.files.push(f);
-  }
-  root.dirs = root.dirs.map(compactDir);
-  return root;
-}
-
-/** Merge single-child directory chains (a/b/c) into one node, like Android Studio. */
-function compactDir(node: TreeNode): TreeNode {
-  let merged: TreeNode = { ...node, dirs: node.dirs.map(compactDir) };
-  while (merged.files.length === 0 && merged.dirs.length === 1) {
-    const child = merged.dirs[0];
-    merged = {
-      name: `${merged.name}/${child.name}`,
-      path: child.path,
-      dirs: child.dirs,
-      files: child.files,
-    };
-  }
-  return merged;
-}
-
-/** Every intermediate directory path in the file set (for collapse-all). */
-function allDirPaths(files: FileStatus[]): string[] {
-  const set = new Set<string>();
-  for (const f of files) {
-    const parts = f.path.split("/");
-    parts.pop();
-    let acc = "";
-    for (const seg of parts) {
-      acc = acc ? `${acc}/${seg}` : seg;
-      set.add(acc);
-    }
-  }
-  return [...set];
-}
+type TreeNode = FileTreeNode<FileStatus>;
 
 export default function ChangesView() {
   onMount(() => {
@@ -144,7 +99,7 @@ export default function ChangesView() {
     for (const cl of lists()) {
       keys.add(cl.id);
       if (groupByDir() && !cl.isIgnored) {
-        for (const p of allDirPaths(cl.files)) keys.add(`dir:${cl.id}:${p}`);
+        for (const p of treeDirPaths(buildFileTree(cl.files))) keys.add(`dir:${cl.id}:${p}`);
       }
     }
     setCollapsed(keys);
@@ -200,7 +155,7 @@ function ListNode(props: { cl: ChangelistView }) {
   const isActive = () => state()?.activeChangelistId === cl().id;
   const isSelected = () => selectedListId() === cl().id;
   const listCollapsed = () => isCollapsed(cl().id);
-  const tree = createMemo(() => buildTree(cl().files));
+  const tree = createMemo(() => buildFileTree(cl().files));
   const treeMode = () => groupByDir() && !cl().isIgnored;
 
   const allChecked = () =>

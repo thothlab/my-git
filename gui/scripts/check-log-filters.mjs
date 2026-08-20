@@ -6,7 +6,10 @@
  *     highlighting, the predicate the dim mode and the jump between matches
  *     both ask, and the compiled-pattern cache;
  *   - `src/components/log/filterValues.ts` - day boundaries for the date
- *     filter and repository-relative paths for the path filter.
+ *     filter and repository-relative paths for the path filter;
+ *   - `src/components/pathTree.ts` - the shared path layout behind both file
+ *     trees (Changes panel and commit details), which used to be two copies
+ *     that had already drifted apart.
  *
  * Run it:  node scripts/check-log-filters.mjs      (from `gui/`)
  * Another time zone:  TZ=America/Los_Angeles node scripts/check-log-filters.mjs
@@ -34,10 +37,18 @@ await build({
   logLevel: "warning",
 });
 
+await build({
+  entryPoints: [join(here, "..", "src", "components", "pathTree.ts")],
+  outdir: out,
+  format: "esm",
+  logLevel: "warning",
+});
+
 const load = (name) => import(pathToFileURL(join(out, name)).href);
 const { compilePattern, spansIn, matchesCommit } = await load("searchPattern.js");
 const { asInputDate, dayStart, dayEnd, startOfToday, relativeToRepo, toSlash } =
   await load("filterValues.js");
+const { baseName, buildFileTree, countFiles, treeDirPaths } = await load("pathTree.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -104,6 +115,30 @@ eq(relativeToRepo("C:\\p\\repo", "C:\\p\\other\\a.ts"), null, "windows path outs
 eq(relativeToRepo("/home/u/Repo", "/home/u/repo/a.ts"), null, "case still matters on a case-sensitive path");
 eq(relativeToRepo("/vol/Repo", "/vol/repo/a.ts", { ignoreCase: true }), "a.ts", "caller may declare the volume case-insensitive");
 eq(relativeToRepo("", "/home/u/repo/a.ts"), null, "no repository, no path");
+
+// -- Path layout (shared by both file trees) ----------------------------------
+// Expectations written out by hand from the rule, not from the code: a chain of
+// single-child directories is one row, and the collapse keys are the paths of
+// the rows that exist - the deepest segment of a merged chain, not every
+// intermediate one. The Changes panel used to name all three of `src`,
+// `src/components`, `src/components/log` and draw only the last.
+const files = (...paths) => paths.map((path) => ({ path }));
+const chain = buildFileTree(files("src/components/log/a.ts", "src/components/log/b.ts", "README.md"));
+eq(chain.dirs.map((d) => d.name), ["src/components/log"], "a single-child chain is one row");
+eq(chain.dirs.map((d) => d.path), ["src/components/log"], "...whose path is the deepest segment");
+eq(treeDirPaths(chain), ["src/components/log"], "one row, one collapse key");
+eq(chain.files.map((f) => f.path), ["README.md"], "the root keeps its own files");
+eq(countFiles(chain), 3, "files are counted through the whole subtree");
+
+const forked = buildFileTree(files("a/b/c.ts", "a/d/e.ts"));
+eq(forked.dirs.map((d) => d.name), ["a"], "a directory with two children does not merge");
+eq(treeDirPaths(forked), ["a", "a/b", "a/d"], "every drawn row gets a key");
+eq(treeDirPaths(buildFileTree(files("top.ts"))), [], "a flat list has no directory rows");
+// A directory holding a file *and* one subdirectory stays its own row.
+const held = buildFileTree(files("a/keep.ts", "a/b/c.ts"));
+eq(treeDirPaths(held), ["a", "a/b"], "a directory with a file of its own does not merge away");
+eq(baseName("a/b/c.ts"), "c.ts", "base name of a nested path");
+eq(baseName("top.ts"), "top.ts", "base name of a bare name");
 
 await rm(out, { recursive: true, force: true });
 console.log(failed === 0 ? `\nall green (${process.env.TZ ?? "local"} time zone)` : `\n${failed} FAILED`);

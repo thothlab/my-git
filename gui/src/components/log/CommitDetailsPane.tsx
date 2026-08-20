@@ -28,7 +28,7 @@ import {
   countFiles,
   treeDirPaths,
   type FileTreeNode,
-} from "./fileTree";
+} from "../pathTree";
 
 /**
  * Commit card + the files the commit changed.

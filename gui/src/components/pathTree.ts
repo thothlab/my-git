@@ -1,12 +1,20 @@
 /**
- * Directory grouping for a flat list of paths.
+ * Path layout: the one place that splits a `/`-separated path into folders and
+ * collapses a chain of single-child directories into one row.
  *
- * Same rules as the Changes panel (`ChangesView.tsx`: `buildTree` / `compactDir`):
- * chains of single-child directories collapse into one row, so a module that
- * lives under `a/b/c/d` shows up as one node instead of four. The only
- * difference is that this copy is generic over the item type — the Changes panel
- * carries `FileStatus`, the commit panel carries `CommitFileEntry` — so the two
- * stay compatible in behaviour without one importing the other's model.
+ * Both file trees in the app go through here — the Changes panel
+ * (`ChangesView.tsx`, `FileStatus`) and the commit's file list
+ * (`log/CommitDetailsPane.tsx`, `CommitFileEntry`) — so the module is generic
+ * over the item and knows nothing but `path`.
+ *
+ * The branch tree (`log/BranchTree.tsx`) deliberately stays outside; its
+ * docblock says why.
+ *
+ * One rule worth naming, because the two former copies disagreed on it:
+ * **directory paths are the paths of the rows that exist**, i.e. of the
+ * compacted nodes — see `treeDirPaths`. A chain `a/b/c` merged into one row has
+ * one key (`a/b/c`), not three. Collapse-all names rows; the intermediate
+ * segments `a` and `a/b` are never drawn and never carry collapse state.
  */
 export interface FileTreeNode<T> {
   name: string;

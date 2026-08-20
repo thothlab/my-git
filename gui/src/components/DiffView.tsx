@@ -6,6 +6,7 @@ import {
   createSignal,
   createEffect,
   onCleanup,
+  untrack,
 } from "solid-js";
 import {
   commitFileDiff,
@@ -66,6 +67,28 @@ const LINE_PX = 16;
  */
 const MAX_EXPAND_GAP = 1000;
 const MAX_CONTEXT = MAX_EXPAND_GAP + FOLD_CONTEXT;
+/**
+ * Ceiling on the payload that comes *back*, as opposed to the one asked for.
+ *
+ * `MAX_EXPAND_GAP` bounds the request, and that is not the same thing: `-U`
+ * widens every hunk of the file at once, so a file with twenty changes and
+ * nine-hundred-line gaps answers a single click with tens of thousands of
+ * lines — several times over the number at which the panel refuses to render a
+ * file at all. The "big diff" summary cannot catch it, because it is judged by
+ * the first, un-widened answer on purpose (asking to see more must not show
+ * less). So the widened answer is measured on arrival.
+ *
+ * The floor is what is already drawn: a payload no larger than the one on
+ * screen is never refused, or a reader who chose "show it whole" on a file
+ * above the threshold could not open a single gap in it.
+ */
+const expandedLinesCeiling = (drawn: number) => Math.max(BIG_DIFF_LINES, drawn);
+/**
+ * Diff lines in a payload, counted without building its view — the same number
+ * `buildView` reports as `lines`, which is the budget the "big diff" summary is
+ * judged by. A payload refused for its size must not be walked row by row first.
+ */
+const payloadLines = (f: FileDiff) => f.hunks.reduce((n, h) => n + h.lines.length, 0);
 const clampRatio = (r: number) => Math.min(0.8, Math.max(0.2, r));
 
 const readWs = (): WhitespaceMode => {
@@ -143,11 +166,9 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     if (!v || index <= 0) return;
     const gap = v.gaps[index];
     if (gap <= 0) return;
-    // The ceiling is the whole protection against volume the panel cannot draw:
-    // the "big diff" summary is judged by the first answer on purpose (asking to
-    // see more must not show less), so nothing downstream would stop a widened
-    // payload. `-U` applies around *every* change in the file, so one click on a
-    // gap of a hundred thousand lines is the file itself, rendered whole.
+    // First of two ceilings, and the cheap one: a gap this wide is the file
+    // itself and there is no point asking git for it. The size that actually
+    // arrives is checked separately, on arrival — see `expandedLinesCeiling`.
     if (gap > MAX_EXPAND_GAP) {
       setNote(d().gapTooLarge(gap, MAX_EXPAND_GAP));
       return;
@@ -213,8 +234,25 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     );
   };
 
+  /**
+   * The payload the panel has agreed to draw, which is not always the last one
+   * that arrived.
+   *
+   * A widened answer over `expandedLinesCeiling` is dropped rather than
+   * summarised: what the reader was already looking at stays on screen, so
+   * "show more" never turns into "shown less". The request is then rolled back
+   * to the last accepted context, so the file does not stay pinned to a width
+   * the panel refuses to draw — every later refetch (staging, rollback) would
+   * otherwise pay for it again.
+   */
+  const [shown, setShown] = createSignal<FileDiff | null>(null);
+  /** Request identity of the accepted payload, and what it cost to draw. */
+  let acceptedKey: string | null = null;
+  let acceptedContext: number | undefined = undefined;
+  let acceptedRevealed: GapRange[] = [];
+  let drawnLines = 0;
   const view = createMemo(() => {
-    const f = diff();
+    const f = shown();
     return f && !f.binary ? buildView(f) : null;
   });
 
@@ -241,8 +279,40 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     setContext(undefined);
     setRevealed([]);
     setBaseLines(null);
+    acceptedKey = null;
+    acceptedContext = undefined;
+    acceptedRevealed = [];
+    drawnLines = 0;
     anchors.clear();
   });
+
+  createEffect(() => {
+    const f = diff();
+    if (!f) return;
+    const ctx = untrack(context);
+    const ceiling = expandedLinesCeiling(drawnLines);
+    const got = payloadLines(f);
+    // Only a *widening* is refused. The same request coming back larger (the
+    // file itself grew under a stage or a rollback) is the truth about the file
+    // and has to be drawn, or the panel would sit on a stale patch; volume there
+    // is the "big diff" summary's business.
+    if (ctx !== undefined && ctx !== acceptedContext && got > ceiling && untrack(shown)) {
+      setNote(d().expandTooLarge(got, ceiling));
+      setRevealed(acceptedRevealed);
+      setContext(acceptedContext);
+      return;
+    }
+    const key = `${shownKey}|${ctx ?? ""}`;
+    // The rolled-back request lands here again with the very payload already on
+    // screen; re-publishing it would rebuild every row for nothing.
+    if (key === acceptedKey && untrack(shown)) return;
+    acceptedKey = key;
+    acceptedContext = ctx;
+    acceptedRevealed = untrack(revealed);
+    drawnLines = got;
+    setShown(f);
+  });
+
 
   /**
    * Asking for a gap is asking to *see* those lines. The wider payload arrives
@@ -462,7 +532,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
           </div>
         </Show>
 
-        <Show when={note() || diff()?.mergeFirstParent}>
+        <Show when={note() || shown()?.mergeFirstParent}>
           <div class="border-b border-border px-2 py-0.5 text-[11px] text-warn">
             {note() || d().mergeFirstParentNote()}
           </div>
@@ -482,11 +552,11 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
               }
             >
               <Show
-                when={diff() && !diff()!.binary}
+                when={shown() && !shown()!.binary}
                 fallback={
                   <div class="p-3 text-fg-muted">
-                    {diff()?.binary
-                      ? d().binarySizes(sizeText(diff()!.oldSize), sizeText(diff()!.newSize))
+                    {shown()?.binary
+                      ? d().binarySizes(sizeText(shown()!.oldSize), sizeText(shown()!.newSize))
                       : d().noChangesForBase()}
                   </div>
                 }

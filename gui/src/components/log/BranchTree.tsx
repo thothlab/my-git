@@ -586,7 +586,30 @@ function Note(props: { text: string }) {
   return <div class="px-2 py-0.5 text-fg-subtle">{props.text}</div>;
 }
 
-/** Branch names split on `/` into folders; a single-child chain is one row. */
+/**
+ * Branch names split on `/` into folders; a single-child chain is one row.
+ *
+ * Deliberately **not** `pathTree.ts`, which carries the same rule for files.
+ * Three differences, none of them cosmetic:
+ *
+ * - The leaf is a branch, not a file: it is a full row with its own actions,
+ *   favourite flag and context menu, and it is *interleaved* with folders in one
+ *   `children` array — `sortTree` orders folders and branches against each other
+ *   (current branch, then favourites, then alphabetically). `pathTree` keeps
+ *   `dirs` and `files` in separate buckets and always draws folders first, which
+ *   would hoist every folder above a favourite branch.
+ * - A folder merges only when its single child is a *folder*; a folder holding
+ *   one branch stays a folder. The file version merges while `files.length === 0`
+ *   — the same thing said in the file world, but not expressible on a single
+ *   `children` array without knowing what a leaf is.
+ * - Collapse keys are namespaced by group (`local:` / `remote:`), because
+ *   `p2p` under Local and `p2p` under Remote collapse apart. File trees key on
+ *   the bare path.
+ *
+ * The path *paths* rule is shared in spirit and matched by hand: `allFolderKeys`
+ * walks the compacted tree, so a merged chain has one key, exactly like
+ * `treeDirPaths`. Change one, look at the other.
+ */
 function buildTree(list: BranchNode[], favs: Set<string>): TreeNode[] {
   const root: FolderNode = { kind: "folder", name: "", path: "", children: [] };
   for (const b of list) {
