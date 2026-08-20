@@ -1,6 +1,6 @@
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
-import type { LogCommit, RefLabel } from "../../api";
+import { commitContains, type LogCommit, type RefLabel } from "../../api";
 import { d } from "../../i18n";
 import {
   atEnd,
@@ -38,6 +38,11 @@ import {
 } from "../../logStore";
 import { state } from "../../store";
 import { selectedBranch } from "./branchSelection";
+import { clearCompare } from "./actions/compareSelection";
+import { commitMenuItems } from "./actions/commitActions";
+import ContextMenu, { createMenuController, type MenuAnchor } from "./actions/ContextMenu";
+import { ActionDialogHost } from "./actions/dialogs";
+import OperationBar from "./actions/OperationBar";
 import LogGraph, { LANE_W, lanesBelow } from "./LogGraph";
 import { PanelBtn, PanelChrome, PanelNote } from "./PanelChrome";
 
@@ -76,6 +81,45 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
   // during setup, before the element exists, and has to be told when it appears.
   const [scrollEl, setScrollEl] = createSignal<HTMLDivElement | null>(null);
   const [menuOpen, setMenuOpen] = createSignal(false);
+
+  // Context menu. Its targets are resolved once, when it opens: a right-click
+  // inside the selection acts on the whole selection (and the items say how
+  // many), a right-click outside it acts on that row alone and leaves the
+  // selection untouched (PRD История 51).
+  const menu = createMenuController();
+  const [menuTargets, setMenuTargets] = createSignal<LogCommit[]>([]);
+  const [menuContains, setMenuContains] = createSignal<boolean | null>(null);
+
+  /**
+   * The element of a row, for the keyboard path of the menu. Asked of the DOM
+   * rather than kept in a map: rows are virtualised, so a map keyed on the row
+   * index outlives the rows it describes — twenty thousand detached nodes held
+   * for the session, and an anchor rectangle of all zeros for the ones already
+   * recycled.
+   */
+  const rowElement = (index: number): HTMLElement | null =>
+    scrollEl()?.querySelector<HTMLElement>(`[data-row="${index}"]`) ?? null;
+
+  const openMenuAt = (index: number, at: MenuAnchor) => {
+    const rows = commits();
+    const row = rows[index];
+    if (!row) return;
+    const sel = selectedSet();
+    const targets = sel.has(row.hash) ? rows.filter((c) => sel.has(c.hash)) : [row];
+    setMenuTargets(targets);
+    setMenuContains(null);
+    if (targets.length === 1) {
+      const hash = targets[0].hash;
+      // Asked before the item is offered, so cherry-pick is disabled with its
+      // reason rather than failing on the click. A failed question is answered
+      // "not contained": git then refuses the pick itself, verbatim, which is
+      // better than an item stuck on "checking…" forever.
+      void commitContains(hash)
+        .then((v) => menuTargets()[0]?.hash === hash && setMenuContains(v))
+        .catch(() => setMenuContains(false));
+    }
+    menu.open(at);
+  };
 
   // History is asked for only once the repository is actually open: `state()` is
   // null until `repo_open` has answered, and a `log_page` sent before that comes
@@ -140,6 +184,10 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
 
   const onRowClick = (index: number, e: MouseEvent) => {
     selectAt(index, e.shiftKey ? "range" : e.metaKey || e.ctrlKey ? "toggle" : "single");
+    // A deliberate new selection leaves comparison mode. Tied to the click, not
+    // to the cursor: a reload moves the cursor on its own and would throw away
+    // a comparison the reader had just asked for.
+    clearCompare();
   };
 
   const noteText = () => {
@@ -169,6 +217,15 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
       handlers={{
         moveSelection: (delta) => move(delta),
         moveToEdge: (edge) => move(edge === -1 ? -rowCount() : rowCount()),
+        contextMenu: () => {
+          const i = cursorIndex();
+          if (i < 0) return;
+          // Rows are virtualised: an element scrolled out of the list is still
+          // in the map but no longer in the document, and its rectangle is all
+          // zeros — which would pin the menu to the window corner.
+          const r = rowElement(i)?.getBoundingClientRect();
+          openMenuAt(i, r ? { x: Math.round(r.left + 40), y: Math.round(r.bottom) } : { x: 160, y: 160 });
+        },
         onKey: (e) => {
           if ((e.metaKey || e.ctrlKey) && e.code === "KeyA") {
             selectAll();
@@ -232,6 +289,21 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
           arrive in one order and are re-sorted under the reader. */}
       <Show when={orderKnown()}>
         <div class="flex h-full min-h-0 flex-col">
+          {/* Mounted here, not in the layout: the layout file belongs to another
+              task, and an operation strip that is not mounted would leave a
+              conflicted repository with no way out of the panel. Do not mount a
+              second one. */}
+          <OperationBar />
+          <ActionDialogHost />
+          <Show when={menu.anchor()}>
+            {(a) => (
+              <ContextMenu
+                anchor={a()}
+                items={() => commitMenuItems(menuTargets(), menuContains())}
+                onClose={menu.close}
+              />
+            )}
+          </Show>
           <div
             class="grid shrink-0 select-none items-center border-b border-border bg-bg-subtle text-[11px] text-fg-muted"
             style={{ "grid-template-columns": grid(), height: "20px" }}
@@ -296,6 +368,7 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
                   capacity={LANE_BUDGET}
                   suppressed={graphSuppressed()}
                   onRowClick={onRowClick}
+                  onRowMenu={(index, e) => openMenuAt(index, { x: e.clientX, y: e.clientY })}
                   register={(fn) => setScrollToRow(() => fn)}
                 />
                 <ListEnd />
@@ -330,6 +403,7 @@ function VirtualRows(props: {
   capacity: number;
   suppressed: boolean;
   onRowClick: (index: number, e: MouseEvent) => void;
+  onRowMenu: (index: number, e: MouseEvent) => void;
   register: (scrollToRow: (i: number) => void) => void;
 }) {
   const rowCount = () => commits().length;
@@ -376,6 +450,8 @@ function VirtualRows(props: {
                 selected={selectedSet().has(row()!.hash)}
                 current={cursorIndex() === vi.index}
                 onClick={(e) => props.onRowClick(vi.index, e)}
+                onMenu={(e) => props.onRowMenu(vi.index, e)}
+                index={vi.index}
               />
             </Show>
           );
@@ -407,9 +483,12 @@ function Row(props: {
   selected: boolean;
   current: boolean;
   onClick: (e: MouseEvent) => void;
+  onMenu: (e: MouseEvent) => void;
+  index: number;
 }) {
   return (
     <div
+      data-row={props.index}
       class="absolute left-0 grid w-full cursor-default select-none items-center text-xs hover:bg-bg-muted/60"
       classList={{
         "bg-accent/25": props.selected,
@@ -423,6 +502,10 @@ function Row(props: {
         "grid-template-columns": props.grid,
       }}
       onClick={props.onClick}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        props.onMenu(e);
+      }}
     >
       <div class="h-full" title={props.suppressed ? d().graphSuppressedTip() : undefined}>
         <LogGraph

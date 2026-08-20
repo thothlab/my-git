@@ -2,16 +2,24 @@ import { For, Show, createEffect, createMemo, createResource, createSignal } fro
 import {
   branchTree,
   errText,
-  fetchRemote,
   uiStateGet,
   uiStateSet,
   type BranchNode,
   type UiState,
 } from "../../api";
 import { d } from "../../i18n";
-import { busy, run, setError, state } from "../../store";
+import { busy, setError, state } from "../../store";
 import { PanelBtn, PanelChrome, PanelNote } from "./PanelChrome";
 import { setSelectedBranch } from "./branchSelection";
+import {
+  branchMenuItems,
+  checkoutBranch,
+  fetchAll,
+  newBranchFrom,
+} from "./actions/branchActions";
+import ContextMenu, { createMenuController } from "./actions/ContextMenu";
+import { ActionDialogHost } from "./actions/dialogs";
+import { operationActive, repoRevision } from "./actions/repoRefresh";
 
 /**
  * Branch tree panel: HEAD on top, then Local and Remote groups, branch names
@@ -74,17 +82,35 @@ const folderKey = (group: Group, path: string) => `${group}:${path}`;
 export default function BranchTree() {
   // Sourced on the repository path: opening another repository while the Log
   // mode is on screen must not leave the previous repo's branches rendered.
-  const [branches, { refetch: refetchBranches }] = createResource(
-    () => state()?.repoPath,
-    () => branchTree(),
-  );
-  const [ui, { mutate: mutateUi, refetch: refetchUi }] = createResource(
-    () => state()?.repoPath,
-    () => uiStateGet(),
+  // Keyed on the repository *and* on the action layer's revision counter: a
+  // delete, a rename or a checkout does not move `repoPath`, so a source keyed
+  // on the path alone would keep a deleted branch on screen until the reader
+  // pressed Refresh.
+  const treeKey = () => `${state()?.repoPath ?? ""}#${repoRevision()}`;
+  const [branches, { refetch: refetchBranches }] = createResource(treeKey, () => branchTree());
+  const [ui, { mutate: mutateUi, refetch: refetchUi }] = createResource(treeKey, () =>
+    uiStateGet(),
   );
   const [filter, setFilter] = createSignal("");
   const [favOnly, setFavOnly] = createSignal(false);
   const [selectedKey, setSelectedKey] = createSignal<string>("head");
+  // The context menu's target is captured when the menu opens: a right-click on
+  // a row acts on that row without moving the selection, because the selection
+  // is what scopes the log and the reader did not ask for that to change.
+  const menu = createMenuController();
+  const [menuNode, setMenuNode] = createSignal<BranchNode | null>(null);
+
+  /**
+   * The element of a row, for the keyboard path of the menu. Asked of the DOM
+   * rather than kept in a map: a row filtered out of the tree leaves a detached
+   * node behind, and an anchor taken from one is a rectangle of zeros — the menu
+   * then opens in the corner of the window instead of beside the row.
+   */
+  let listEl: HTMLDivElement | undefined;
+  const rowElement = (key: string): HTMLElement | null => {
+    const el = listEl?.querySelector<HTMLElement>(`[data-row-key="${CSS.escape(key)}"]`);
+    return el?.isConnected ? el : null;
+  };
 
   const favorites = createMemo(() => new Set(ui()?.favorites ?? []));
   const collapsed = createMemo(() => new Set(ui()?.collapsedFolders ?? []));
@@ -235,6 +261,15 @@ export default function BranchTree() {
   const activate = () => {
     const r = current();
     if (r?.kind === "folder" && r.folderKey) toggleFolder(r.folderKey);
+    // Enter on a branch is checkout (История 20). A folder has no revision to
+    // check out, so there Enter keeps its fold/unfold meaning.
+    if (r?.kind === "branch" && r.node && !r.node.isCurrent) void checkoutBranch(r.node);
+  };
+
+  const openMenuFor = (node: BranchNode | null, at: { x: number; y: number } | HTMLElement | undefined) => {
+    setMenuNode(node);
+    if (at && "x" in at) menu.open(at);
+    else menu.openAt(at as HTMLElement | undefined);
   };
 
   /**
@@ -300,15 +335,10 @@ export default function BranchTree() {
     refetchUi();
   };
 
-  /**
-   * Fetch, then re-read the tree: ahead/behind come from `%(upstream:track)`,
-   * so the counters only move once the remote-tracking refs have been updated
-   * (R11i.1). `run()` owns the busy label, so the wait is visible.
-   */
-  const fetchAndRefresh = async () => {
-    await run(fetchRemote(), d().fetching());
-    refetchBranches();
-  };
+  // Fetch lives in the action layer now (it is also a menu item there): the
+  // counters come from `%(upstream:track)`, so the tree has to be re-read after
+  // the remote-tracking refs move — which `afterRepoChange` does through the
+  // revision counter this component's resources are keyed on.
 
   return (
     <PanelChrome
@@ -321,6 +351,13 @@ export default function BranchTree() {
           if (list.length > 0) setSelectedKey(list[e === -1 ? 0 : list.length - 1].key);
         },
         activate,
+        contextMenu: () => {
+          const r = current();
+          openMenuFor(
+            r?.kind === "branch" ? (r.node ?? null) : null,
+            rowElement(selectedKey()) ?? undefined,
+          );
+        },
         onKey,
       }}
       toolbar={
@@ -329,9 +366,9 @@ export default function BranchTree() {
           <PanelBtn
             label="↓"
             tip={d().fetchPruneTip()}
-            disabled={busy()}
-            disabledTip={d().fetching()}
-            onClick={() => void fetchAndRefresh()}
+            disabled={busy() || operationActive()}
+            disabledTip={operationActive() ? d().whyOperationRunning() : d().fetching()}
+            onClick={() => void fetchAll()}
           />
           <PanelBtn label="▾" tip={d().expandAllTip()} onClick={expandAllFolders} />
           <PanelBtn label="▸" tip={d().collapseAllTip()} onClick={collapseAll} />
@@ -340,10 +377,30 @@ export default function BranchTree() {
             tip={d().favoritesOnlyTip()}
             onClick={() => setFavOnly((v) => !v)}
           />
-          <PanelBtn label="+" tip={d().newBranchTip()} disabled disabledTip={d().actionPending()} />
+          <PanelBtn
+            label="+"
+            tip={d().newBranchTip()}
+            disabled={operationActive()}
+            disabledTip={d().whyOperationRunning()}
+            onClick={() => {
+              const r = current();
+              const from = r?.kind === "branch" && r.node ? r.node.name : (state()?.branch ?? "HEAD");
+              void newBranchFrom(from, from);
+            }}
+          />
         </>
       }
     >
+      <ActionDialogHost />
+      <Show when={menu.anchor()}>
+        {(a) => (
+          <ContextMenu
+            anchor={a()}
+            items={() => branchMenuItems(menuNode(), refreshAll)}
+            onClose={menu.close}
+          />
+        )}
+      </Show>
       <div class="flex h-full min-h-0 flex-col text-xs">
         <div class="shrink-0 border-b border-border p-1">
           <input
@@ -364,7 +421,7 @@ export default function BranchTree() {
               fallback={<PanelNote title={d().noCommitsTitle()} hint={d().noCommitsHint()} />}
             >
               <Show when={!nothingMatched()} fallback={<PanelNote title={d().noMatches()} />}>
-                <div class="min-h-0 flex-1 overflow-auto py-1">
+                <div ref={listEl} class="min-h-0 flex-1 overflow-auto py-1">
                   <For each={headRow()}>
                     {(row) => (
                       <RowView
@@ -372,6 +429,7 @@ export default function BranchTree() {
                         selected={selectedKey() === row.key}
                         onSelect={() => setSelectedKey(row.key)}
                         onToggleFavorite={() => {}}
+                        onContextMenu={(e) => openMenuFor(null, { x: e.clientX, y: e.clientY })}
                       />
                     )}
                   </For>
@@ -391,6 +449,12 @@ export default function BranchTree() {
                               if (row.kind === "folder" && row.folderKey) toggleFolder(row.folderKey);
                             }}
                             onToggleFavorite={() => row.node && toggleFavorite(row.node)}
+                                onActivate={() => {
+                              if (row.node && !row.node.isCurrent) void checkoutBranch(row.node);
+                            }}
+                            onContextMenu={(e) =>
+                              openMenuFor(row.node ?? null, { x: e.clientX, y: e.clientY })
+                            }
                           />
                         )}
                       </For>
@@ -414,6 +478,12 @@ export default function BranchTree() {
                               if (row.kind === "folder" && row.folderKey) toggleFolder(row.folderKey);
                             }}
                             onToggleFavorite={() => row.node && toggleFavorite(row.node)}
+                                onActivate={() => {
+                              if (row.node && !row.node.isCurrent) void checkoutBranch(row.node);
+                            }}
+                            onContextMenu={(e) =>
+                              openMenuFor(row.node ?? null, { x: e.clientX, y: e.clientY })
+                            }
                           />
                         )}
                       </For>
@@ -434,6 +504,8 @@ function RowView(props: {
   selected: boolean;
   onSelect: () => void;
   onToggleFavorite: () => void;
+  onContextMenu?: (e: MouseEvent) => void;
+  onActivate?: () => void;
 }) {
   const b = () => props.row.node;
   const tracking = () => {
@@ -443,6 +515,7 @@ function RowView(props: {
   };
   return (
     <div
+      data-row-key={props.row.key}
       class="flex cursor-default items-center gap-1 px-2 py-0.5 font-mono"
       style={{ "padding-left": `${8 + props.row.depth * 12}px` }}
       classList={{
@@ -451,6 +524,11 @@ function RowView(props: {
         "font-semibold": props.row.kind === "head" || props.row.node?.isCurrent,
       }}
       onClick={props.onSelect}
+      onDblClick={() => props.onActivate?.()}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        props.onContextMenu?.(e);
+      }}
       title={props.row.node?.name ?? props.row.label}
     >
       <Show when={props.row.kind === "branch"}>

@@ -226,9 +226,27 @@ export function chooseOption(
   return new Promise((resolve) => setChooseState({ message, options, resolve }));
 }
 
+/**
+ * Modals that live outside this store — the Log panel's own form dialogs.
+ *
+ * "Is a modal up" has to be one question with one answer: the keyboard layer
+ * stands down on it, and a second, private flag somewhere else means arrows keep
+ * moving a list behind a dialog nobody can see them move. Sources register
+ * themselves here; the list is a signal so `modalOpen()` stays reactive.
+ */
+const [modalSources, setModalSources] = createSignal<Array<() => boolean>>([]);
+
+export function registerModalSource(isOpen: () => boolean): () => void {
+  setModalSources((l) => [...l, isOpen]);
+  return () => setModalSources((l) => l.filter((f) => f !== isOpen));
+}
+
 /** True while any modal is up — the keyboard layer stands down meanwhile. */
 export const modalOpen = () =>
-  confirmState() !== null || promptState() !== null || chooseState() !== null;
+  confirmState() !== null ||
+  promptState() !== null ||
+  chooseState() !== null ||
+  modalSources().some((f) => f());
 
 /** Status → { letter, colour class }. Mirrors the TUI palette mapping. */
 export function statusMeta(s: FileState): { letter: string; cls: string } {
