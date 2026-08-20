@@ -141,16 +141,22 @@ function rememberOpened(repoPath: string) {
   localStorage.setItem(RECENT_REPOS_KEY, JSON.stringify(next));
 }
 
+/** Does this failure mean the folder itself is gone? Only then is a remembered
+ *  path worth forgetting — a repository the system merely refused to let us read
+ *  (macOS access prompt declined) is still there, and dropping it would punish the
+ *  user for one "Don't Allow". The literal comes from `CliEngine::resolve_root`. */
+const isMissingFolder = (msg: string) => msg.includes("no such folder");
+
 /** Open a repo by path (absolute or relative) and remember it for next launch. */
 export async function openRepoAt(path: string): Promise<void> {
   await run(apiOpenRepo(path));
   const s = state();
   if (s && !error()) {
     rememberOpened(s.repoPath);
-  } else if (error()) {
-    // Opening failed (e.g. a recent whose folder was deleted): drop that path so
-    // it doesn't linger in the menu and re-error on every click. `path` is the
-    // stored resolved root for a recent-click; a dialog pick won't match (no-op).
+  } else if (error() && isMissingFolder(error())) {
+    // The folder is gone (a recent that was deleted): drop that path so it doesn't
+    // linger in the menu and re-error on every click. `path` is the stored resolved
+    // root for a recent-click; a dialog pick won't match (no-op).
     const pruned = recentRepos().filter((p) => p !== path);
     setRecentRepos(pruned);
     localStorage.setItem(RECENT_REPOS_KEY, JSON.stringify(pruned));
@@ -161,17 +167,31 @@ export async function openRepoAt(path: string): Promise<void> {
  * Startup open. Prefer the launch directory (terminal `cd repo && graft`);
  * if that isn't a git repo (e.g. launched from Finder with cwd "/"), fall back
  * to the last-used repo so double-click still lands somewhere useful.
+ *
+ * The launch-directory probe deliberately bypasses `run()`: a bundle started from
+ * Finder has cwd `/`, so the probe fails on **every** double-click, and its failure
+ * says nothing about anything the user did. Through `run()` it painted the red
+ * banner with `git rev-parse --show-toplevel failed` over a window that had not yet
+ * opened a repository. A failed probe now simply means "not launched from inside a
+ * repository", and the window shows its empty state.
  */
 export async function openInitial(): Promise<void> {
-  await run(apiOpenRepo("."));
-  if (!error()) {
+  let opened = false;
+  try {
+    applyState(await apiOpenRepo("."));
+    setError("");
+    opened = true;
+  } catch {
+    // not started from inside a working tree — silence is the correct report
+  }
+  if (opened) {
     const s = state();
     if (s) rememberOpened(s.repoPath);
   } else {
     const last = localStorage.getItem(LAST_REPO_KEY);
     if (last) {
       await openRepoAt(last);
-      if (error()) localStorage.removeItem(LAST_REPO_KEY); // stale — forget it
+      if (error() && isMissingFolder(error())) localStorage.removeItem(LAST_REPO_KEY);
     }
   }
   // The backend's show-ignored flag is per app-session; re-apply the saved choice.

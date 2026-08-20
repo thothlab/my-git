@@ -65,6 +65,13 @@ pub fn run() {
             commands::op_skip,
             commands::stash_list_app,
             commands::stash_restore,
+            commands::stash_list,
+            commands::stash_apply,
+            commands::stash_pop,
+            commands::stash_drop,
+            commands::stash_files,
+            commands::stash_push,
+            commands::branch_update,
             commands::ui_state_get,
             commands::ui_state_set,
         ])

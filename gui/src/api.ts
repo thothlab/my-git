@@ -404,6 +404,47 @@ export function parseAppStash(entry: string): AppStash {
 export const stashRestore = (name: string) =>
   invoke<RepoState>("stash_restore", { name });
 
+// stash manager (История 21b)
+
+/** One stash of the repository — every stash, not only the application's own. */
+export interface StashEntry {
+  /** git's own `stash@{N}`. It **renumbers** after any pop or drop. */
+  ref: string;
+  /** The stash commit, which does not move — pass it back so a destructive
+   *  operation on a stale list is refused instead of hitting the neighbour. */
+  hash: string;
+  /** Unix seconds; formatting stays on this side, in the panel's locale. */
+  at: number;
+  /** `null` when the stash carries no recognisable branch (detached HEAD). */
+  branch: string | null;
+  message: string;
+  /** Made by the application while switching branches — a mark, not a filter. */
+  fromApp: boolean;
+}
+
+export const stashList = () => invoke<StashEntry[]>("stash_list");
+/** Restore and keep the entry. */
+export const stashApply = (name: string, hash?: string) =>
+  invoke<RepoState>("stash_apply", { name, hash: hash ?? null });
+/** Restore and drop the entry. */
+export const stashPop = (name: string, hash?: string) =>
+  invoke<RepoState>("stash_pop", { name, hash: hash ?? null });
+/** Discard without applying. */
+export const stashDrop = (name: string, hash?: string) =>
+  invoke<RepoState>("stash_drop", { name, hash: hash ?? null });
+/** What the stash changes — the file list of a commit, tracked files only. */
+export const stashFiles = (name: string) =>
+  invoke<CommitFileEntry[]>("stash_files", { name });
+/** Stash the current changes, untracked included. A clean tree is refused. */
+export const stashPush = (message?: string) =>
+  invoke<RepoState>("stash_push", { message: message ?? null });
+
+/** Bring a branch up to date with its upstream: `pull` for the current branch, a
+ *  fast-forward in place for any other. A diverged branch and one with no upstream
+ *  are refused with a reason instead of being touched. */
+export const branchUpdate = (name: string) =>
+  invoke<RepoState>("branch_update", { name });
+
 // panel UI state (task 01)
 export const uiStateGet = () => invoke<UiState>("ui_state_get");
 /** Rust parameter is named `ui`: `state` is taken by Tauri's managed state. */

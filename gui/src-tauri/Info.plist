@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the bundled Info.plist by the Tauri bundler (tauri-build watches
+  src-tauri/Info.plist on macOS). Only the strings macOS shows in its own access
+  prompt live here: a repository normally sits under Documents, Desktop or an
+  external volume, and without these keys the system asks for access with no
+  reason attached, which reads as an application overstepping.
+
+  These keys explain the prompt; they do not make macOS remember the answer.
+  TCC keys a granted permission to the application's code-signing identity, and an
+  unsigned (ad-hoc signed) build gets a new identity on every build, so the prompt
+  returns. Only a Developer ID signature plus notarisation stops that.
+-->
+<plist version="1.0">
+<dict>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>Graft needs access to read the git repository you open from your Documents folder.</string>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>Graft needs access to read the git repository you open from your Desktop.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>Graft needs access to read the git repository you open from your Downloads folder.</string>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>Graft needs access to read a git repository stored on an external volume.</string>
+</dict>
+</plist>
