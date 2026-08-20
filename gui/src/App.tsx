@@ -12,6 +12,7 @@ import BranchTree from "./components/log/BranchTree";
 import LogView from "./components/log/LogView";
 import OperationBar from "./components/log/actions/OperationBar";
 import { registerHotkey, startHotkeys } from "./hotkeys";
+import { checkForUpdatesNow, checkForUpdatesOnStartup } from "./updater";
 import { ModalHost } from "./components/Modals";
 
 const LEFT_WIDTH_KEY = "leftPanelWidth";
@@ -61,10 +62,22 @@ export default function App() {
     registerHotkey("Digit1", () => setViewMode("changes"));
     registerHotkey("Digit2", () => setViewMode("log"));
 
+    // Automatic update checks, all silent: only the About button reports an
+    // outcome. Once at boot is not enough — this window stays open for days, so
+    // an hourly tick and a check on regaining focus cover the machine that was
+    // asleep when the release landed. Registered before the first `await`:
+    // past it the owner computation is gone and `onCleanup` would never run.
+    const updateTimer = setInterval(() => void checkForUpdatesNow(), 60 * 60 * 1000);
+    onCleanup(() => clearInterval(updateTimer));
+    void checkForUpdatesOnStartup();
+
     await openInitial();
+
     // resync on window focus — external git activity between interactions
     const unlisten = await getCurrentWindow().onFocusChanged(({ payload }) => {
-      if (payload) void refresh();
+      if (!payload) return;
+      void refresh();
+      void checkForUpdatesNow();
     });
     onCleanup(unlisten);
   });

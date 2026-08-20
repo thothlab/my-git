@@ -1,8 +1,12 @@
-import { Show } from "solid-js";
+import { Show, createResource } from "solid-js";
 import { state } from "../store";
+import { getVersion } from "@tauri-apps/api/app";
 import { d } from "../i18n";
 
 export default function StatusBar() {
+  // Version from the bundle, never a literal: the hardcoded one here said
+  // "0.1.2" two releases after that stopped being true.
+  const [version] = createResource(() => getVersion());
   const total = () =>
     (state()?.changelists ?? []).reduce((n, c) => n + c.files.length, 0);
 
@@ -15,7 +19,7 @@ export default function StatusBar() {
               {s().repoPath}
             </span>
             <span class="ml-auto">{d().changesCount(total())}</span>
-            <span class="text-fg-muted/70">Graft 0.1.2</span>
+            <span class="text-fg-muted/70">Graft {version() ?? ""}</span>
           </>
         )}
       </Show>
