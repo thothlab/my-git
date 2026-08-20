@@ -137,9 +137,19 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
   // persisted widths, so everything is dropped and read again. The same
   // repository having merely advanced (fetch, pull, a commit) must not move the
   // rows under a reader who has scrolled away — that is offered, not applied.
+  //
+  // `on(state, …)` is not decoration: the body is what reads `RepoState`, and
+  // everything it calls reads store signals synchronously — `checkNewCommits`
+  // reads `commits()`, `atTop()`, `loading()` before its first await. Tracked,
+  // that made the effect depend on the very rows it reloads: at the top of the
+  // list the probe branch is a reload, the reload replaced `commits()`, the
+  // effect ran again, and the log re-read its first page several times a second
+  // for the rest of the session. Visible as a permanent "Loading history…" and,
+  // through the diff source hanging off `commits()`, as a diff panel blinking
+  // between its content and the loading placeholder. `on` untracks the body, so
+  // the dependency is what the comment above says it is: the repository state.
   let lastRepo: string | null = null;
-  createEffect(() => {
-    const s = state();
+  createEffect(on(state, (s) => {
     if (!s) return;
     if (s.repoPath !== lastRepo) {
       lastRepo = s.repoPath;
@@ -153,7 +163,7 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
       return;
     }
     void checkNewCommits();
-  });
+  }));
 
   // R15i: picking a branch in the tree scopes the log to it, and picking the
   // top row scopes it back to HEAD. The tree only writes the choice down; this

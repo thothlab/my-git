@@ -36,17 +36,20 @@ jobs:
           - runner: macos-14
             target: universal-apple-darwin
             rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
-            bundles: dmg
+            bundles: app,dmg
+            updater-glob: '*.app.tar.gz'
             name: macos-universal
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             rust-targets: x86_64-unknown-linux-gnu
             bundles: deb,appimage
+            updater-glob: '*.AppImage'
             name: linux-x86_64
           - runner: windows-2022
             target: x86_64-pc-windows-msvc
             rust-targets: x86_64-pc-windows-msvc
             bundles: nsis
+            updater-glob: '*-setup.exe'
             name: windows-x86_64
 
     steps:
@@ -83,19 +86,46 @@ jobs:
 
       - name: Build Tauri bundles
         working-directory: gui
+        env:
+          # Without these the bundler emits no `.sig` files, the manifest step
+          # has nothing to sign off on, and the release ships without a working
+          # update path.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
-      - name: Collect installers
+      - name: Collect installers and updater artifacts
         shell: bash
+        env:
+          UPDATER_GLOB: ${{ matrix.updater-glob }}
         run: |
+          set -euo pipefail
           mkdir -p dist
           b="gui/src-tauri/target/${{ matrix.target }}/release/bundle"
+          # Installers for humans, plus the bundles the updater downloads and
+          # the `.sig` next to each of them.
           find "$b" -type f \( \
             -name '*.dmg' -o -name '*.AppImage' -o -name '*.deb' \
             -o -name '*.msi' -o -name '*.exe' \
+            -o -name '*.app.tar.gz' -o -name '*.sig' \
           \) -exec cp -v {} dist/ \;
           echo "--- collected ---"
           ls -la dist
+          # Fail here, on the runner that built it, rather than three jobs later
+          # with a release already published: the installers build fine without
+          # signing keys, so nothing else would notice.
+          shopt -s nullglob
+          found=(dist/$UPDATER_GLOB)
+          if [ ${#found[@]} -eq 0 ]; then
+            echo "::error::no updater bundle matching $UPDATER_GLOB in dist/"
+            exit 1
+          fi
+          for f in "${found[@]}"; do
+            if [ ! -f "$f.sig" ]; then
+              echo "::error::$f has no signature - are TAURI_SIGNING_* secrets set?"
+              exit 1
+            fi
+          done
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -112,11 +142,53 @@ jobs:
     if: always() && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-22.04
     steps:
+      # Checkout first: it cleans the workspace, so downloading the artifacts
+      # before it would wipe `dist/` right back out.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/scripts
+            gui/src-tauri/tauri.conf.json
+          sparse-checkout-cone-mode: false
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      # Before the publish step, so `latest.json` goes up with the assets it
+      # describes: a release published first answers 404 to every client that
+      # checks in the meantime. Non-zero exit here stops the release entirely -
+      # an unupdatable release is the failure nobody notices for months.
+      - name: Build updater manifest
+        id: manifest
+        env:
+          # Every platform built => every platform must be in the manifest. A
+          # key missing then means a bundle or its signature quietly failed to
+          # appear, and the released app would answer "you are up to date" to
+          # those users forever.
+          REQUIRE_ALL: ${{ needs.build.result == 'success' && '--require-all' || '' }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/build-updater-manifest.py \
+            dist "${{ github.ref_name }}" "Graft ${{ github.ref_name }}" $REQUIRE_ALL \
+            --config gui/src-tauri/tauri.conf.json
+          cat dist/latest.json
+
+      # A partial release is allowed, an unannounced one is not: whoever reads
+      # the release page has to see which platforms it cannot update.
+      - name: Note platforms without an update path
+        if: steps.manifest.outputs.missing != ''
+        env:
+          MISSING: ${{ steps.manifest.outputs.missing }}
+        run: |
+          {
+            echo 'UPDATER_GAP<<GAP_EOF'
+            echo ""
+            echo "> **In-app updates are NOT available in this release for:** $MISSING - those builds failed for this tag; install and update them by hand."
+            echo 'GAP_EOF'
+          } >> "$GITHUB_ENV"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -127,6 +199,7 @@ jobs:
           name: Graft ${{ github.ref_name }}
           body: |
             **Graft** — desktop git manager. Installers for `${{ github.ref_name }}`.
+            ${{ env.UPDATER_GAP }}
 
             > These builds are **unsigned** (no Apple/Windows certificates), so
             > you must bypass the OS warning once:
@@ -142,3 +215,38 @@ jobs:
 
             Launch it from a terminal inside a git repository, or use **Open…**
             in the app to pick a repository.
+
+      # The endpoint the app polls is a fixed path on the `updater-manifest`
+      # branch, NOT `releases/latest/download/`: this repository publishes two
+      # streams — `v*` for the TUI, `gui-v*` for Graft — so "latest release" is
+      # whichever went out last, and the next TUI release would turn the updater
+      # endpoint into a permanent 404 that only the console would ever mention.
+      #
+      # Pushed after the release is published, so the manifest never points at
+      # assets that are not uploaded yet. The branch holds `latest.json` and
+      # nothing else. raw.githubusercontent.com caches for a few minutes, so an
+      # update shows up shortly after the release, not instantly.
+      - name: Publish the manifest to the updater-manifest branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git clone --depth 1 --branch updater-manifest "$remote" manifest-branch; then
+            :
+          else
+            # First release: start the branch with no history and no code.
+            git init manifest-branch
+            git -C manifest-branch remote add origin "$remote"
+            git -C manifest-branch checkout --orphan updater-manifest
+          fi
+          git -C manifest-branch config user.name "github-actions[bot]"
+          git -C manifest-branch config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp dist/latest.json manifest-branch/latest.json
+          git -C manifest-branch add latest.json
+          if git -C manifest-branch diff --cached --quiet; then
+            echo "manifest unchanged - nothing to push"
+          else
+            git -C manifest-branch commit -m "updater: manifest for ${GITHUB_REF_NAME}"
+            git -C manifest-branch push origin updater-manifest
+          fi

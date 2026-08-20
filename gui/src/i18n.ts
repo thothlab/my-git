@@ -97,6 +97,16 @@ const en = {
   close: () => "Close",
   aboutBlurb: () => "Native desktop git manager (Tauri + SolidJS).",
   sourceOnGithub: () => "Source on GitHub",
+  // Self-update (About modal)
+  checkForUpdates: () => "Check for updates",
+  updChecking: () => "Checking\u2026",
+  updUpToDate: () => "You are on the latest version.",
+  updFound: (version: string) => `Version ${version} is available.`,
+  updUnreachable: () => "Could not reach the update server. Check the connection and try again.",
+  updUpdateTo: (version: string) => `Update to v${version}`,
+  updInstalling: () => "Installing\u2026",
+  updInstallFailed: (message: string) => `Failed to install the update: ${message}`,
+  updLastChecked: (time: string) => `Last checked at ${time}`,
   revertFileConfirm: (path: string) => `Revert ${path} to HEAD? Local changes will be lost.`,
   revertListConfirm: (name: string) =>
     `Revert all files in "${name}" to HEAD? Local changes will be lost.`,
@@ -448,6 +458,16 @@ const ru: Dict = {
   close: () => "Закрыть",
   aboutBlurb: () => "Нативный десктоп git-менеджер (Tauri + SolidJS).",
   sourceOnGithub: () => "Исходники на GitHub",
+  checkForUpdates: () => "Проверить обновления",
+  updChecking: () => "Проверяю\u2026",
+  updUpToDate: () => "У вас последняя версия.",
+  updFound: (version) => `Доступна версия ${version}.`,
+  updUnreachable: () =>
+    "Не удалось достучаться до сервера обновлений. Проверьте связь и попробуйте ещё раз.",
+  updUpdateTo: (version) => `Обновить до v${version}`,
+  updInstalling: () => "Устанавливаю\u2026",
+  updInstallFailed: (message) => `Не удалось установить обновление: ${message}`,
+  updLastChecked: (time) => `Последняя проверка в ${time}`,
   revertFileConfirm: (path) =>
     `Откатить ${path} к HEAD? Локальные правки будут потеряны.`,
   revertListConfirm: (name) =>

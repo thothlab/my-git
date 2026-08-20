@@ -3,7 +3,15 @@ import { Portal } from "solid-js/web";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getVersion } from "@tauri-apps/api/app";
 import { setTheme, theme, type Theme } from "../store";
-import { d, locale, setLocale, type Locale } from "../i18n";
+import { d, dateLocale, locale, setLocale, type Locale } from "../i18n";
+import {
+  checkForUpdatesNow,
+  installPendingUpdate,
+  isCheckingForUpdates,
+  pendingUpdate,
+  updaterLastCheckedAt,
+  updatesSupported,
+} from "../updater";
 
 const REPO_URL = "https://github.com/thothlab/my-git";
 
@@ -129,12 +137,39 @@ function Segmented(props: {
 
 function AboutModal(props: { onClose: () => void }) {
   const [version] = createResource(() => getVersion());
+  // The outcome line of the last *manual* check. Rendered here rather than
+  // through the store modals: About lives in a Portal appended after them, so a
+  // confirm/choose dialog would be painted underneath it and read as "the
+  // button did nothing".
+  const [notice, setNotice] = createSignal<{ text: string; bad: boolean } | null>(null);
+  const [installing, setInstalling] = createSignal(false);
+
+  const onCheck = async () => {
+    setNotice(null);
+    const res = await checkForUpdatesNow();
+    // All three endings answer: silence here is indistinguishable from a broken
+    // button.
+    if (res.error) setNotice({ text: d().updUnreachable(), bad: true });
+    else if (res.found) setNotice({ text: d().updFound(pendingUpdate()!.version), bad: false });
+    else setNotice({ text: d().updUpToDate(), bad: false });
+  };
+
+  const onInstall = async () => {
+    setInstalling(true);
+    try {
+      const err = await installPendingUpdate();
+      if (err) setNotice({ text: d().updInstallFailed(err), bad: true });
+    } finally {
+      setInstalling(false);
+    }
+  };
+
   return (
     <ModalShell title={d().about()} onClose={props.onClose}>
       <div class="flex flex-col items-center gap-2 text-center">
         <AppMark />
         <div class="text-base font-semibold">Graft</div>
-        <div class="text-xs text-fg-muted">v{version() ?? "0.1.2"}</div>
+        <div class="text-xs text-fg-muted">v{version() ?? ""}</div>
         <div class="text-xs text-fg-subtle">{d().aboutBlurb()}</div>
         <button
           class="mt-1 text-xs text-accent hover:underline"
@@ -142,6 +177,46 @@ function AboutModal(props: { onClose: () => void }) {
         >
           {d().sourceOnGithub()}
         </button>
+
+        <Show when={updatesSupported}>
+          <div class="mt-2 flex w-full flex-col items-center gap-2 border-t border-border pt-3">
+            <div class="flex items-center gap-2">
+              <Show when={pendingUpdate()}>
+                {(u) => (
+                  <button
+                    class="rounded bg-accent px-3 py-1 text-xs text-white disabled:opacity-60"
+                    disabled={installing()}
+                    onClick={() => void onInstall()}
+                  >
+                    {installing() ? d().updInstalling() : d().updUpdateTo(u().version)}
+                  </button>
+                )}
+              </Show>
+              <button
+                class="rounded border border-border px-3 py-1 text-xs hover:bg-bg-muted disabled:opacity-60"
+                disabled={isCheckingForUpdates() || installing()}
+                onClick={() => void onCheck()}
+              >
+                {isCheckingForUpdates() ? d().updChecking() : d().checkForUpdates()}
+              </button>
+            </div>
+            <Show when={notice()}>
+              {(n) => (
+                <div
+                  class="text-xs"
+                  classList={{ "text-danger": n().bad, "text-fg-muted": !n().bad }}
+                >
+                  {n().text}
+                </div>
+              )}
+            </Show>
+            <Show when={updaterLastCheckedAt() && !notice()}>
+              <div class="text-xs text-fg-subtle">
+                {d().updLastChecked(updaterLastCheckedAt()!.toLocaleTimeString(dateLocale()))}
+              </div>
+            </Show>
+          </div>
+        </Show>
       </div>
     </ModalShell>
   );
