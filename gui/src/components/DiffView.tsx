@@ -54,6 +54,18 @@ const SPLIT_RATIO_KEY = "diffSplitRatio";
 const WS_KEY = "diffWhitespace";
 const HL_KEY = "diffHighlight";
 const LINE_PX = 16;
+/**
+ * The widest gap a click may open, and the ceiling on the context that follows
+ * from it.
+ *
+ * Both are the same number for a reason: the context asked for is the gap plus
+ * the fold's own margin, so capping the gap caps the request. A gap wider than
+ * this is not refused because the lines are uninteresting but because `-U`
+ * widens every hunk of the file at once — the reader would be asking for the
+ * whole file through a panel that summarises far smaller ones (BIG_DIFF_LINES).
+ */
+const MAX_EXPAND_GAP = 1000;
+const MAX_CONTEXT = MAX_EXPAND_GAP + FOLD_CONTEXT;
 const clampRatio = (r: number) => Math.min(0.8, Math.max(0.2, r));
 
 const readWs = (): WhitespaceMode => {
@@ -131,8 +143,18 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     if (!v || index <= 0) return;
     const gap = v.gaps[index];
     if (gap <= 0) return;
+    // The ceiling is the whole protection against volume the panel cannot draw:
+    // the "big diff" summary is judged by the first answer on purpose (asking to
+    // see more must not show less), so nothing downstream would stop a widened
+    // payload. `-U` applies around *every* change in the file, so one click on a
+    // gap of a hundred thousand lines is the file itself, rendered whole.
+    if (gap > MAX_EXPAND_GAP) {
+      setNote(d().gapTooLarge(gap, MAX_EXPAND_GAP));
+      return;
+    }
+    setNote("");
     setRevealed((r) => [...r, gapRange(v.hunks[index - 1].hunk, v.hunks[index].hunk)]);
-    setContext((c) => Math.max(c ?? 3, gap + FOLD_CONTEXT));
+    setContext((c) => Math.min(MAX_CONTEXT, Math.max(c ?? 3, gap + FOLD_CONTEXT)));
   };
   /** The reader asked for more context than the file was first shown with. */
   const widened = () => context() !== undefined;

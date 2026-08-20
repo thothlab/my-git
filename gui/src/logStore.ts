@@ -177,6 +177,8 @@ let seq = 0;
 /** Request number of the "are there newer commits" probe, guarded separately:
  * it must not invalidate a page in flight, but its own answers still race. */
 let probeSeq = 0;
+/** Same for the direct fetch of a commit by hash (D06). */
+let hashSeq = 0;
 /** How many first-page loads are in flight. Counted rather than compared against
  * `seq`: any other request — a page, a reload of its own — moves `seq` on, and a
  * `finally` that checks `my === seq` then never lowers the flag. The list would
@@ -430,7 +432,10 @@ export function setSearch(s: { text: string; regex: boolean; matchCase: boolean 
  */
 export async function checkNewCommits(): Promise<void> {
   const f = filter();
-  const top = commits()[0]?.hash;
+  // The top of the *history*, not of the list: a row pinned by a hash search
+  // sits at index 0 and is usually an old commit the fresh first page does not
+  // contain, which would read as "the whole page is new".
+  const top = commits().find((c) => !offGraph().has(c.hash))?.hash;
   if (!loaded() || !top || loading()) return;
   if (atTop()) {
     await reload({ keepSelection: true });
@@ -542,10 +547,16 @@ export async function findCommitByHash(text: string): Promise<boolean> {
   const hash = text.trim().toLowerCase();
   if (!HASH_RE.test(hash)) return false;
   if (selectHash(hash)) return true;
-  const my = ++seq;
+  // Its own generation, like the "newer commits" probe: this request is not a
+  // page of the list and must not cancel one. Claiming `seq` would abort the
+  // reload or the page in flight, and neither would ever be asked for again.
+  // The paging counter is still *read*, so an answer that outlived a reload or a
+  // filter change is dropped instead of pinning a row into another history.
+  const at = seq;
+  const myProbe = ++hashSeq;
   try {
     const page = await logPage({ ...filter(), text: hash }, null, PAGE_LIMIT);
-    if (my !== seq) return false;
+    if (at !== seq || myProbe !== hashSeq) return false;
     const found = page.commits.find((c) => c.hash.toLowerCase().startsWith(hash));
     if (!found) return false;
     // In front, where the backend itself puts it: the commit is the answer to

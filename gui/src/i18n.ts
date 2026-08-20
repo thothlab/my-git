@@ -382,6 +382,8 @@ const en = {
   openCurrentUnchanged: () => "The file has no uncommitted changes.",
   expandGap: (n: number) => `Show ${n} hidden lines`,
   expandGapTip: () => "Ask git for the patch with more context around the changes",
+  gapTooLarge: (n: number, max: number) =>
+    `${n} hidden lines is past the ${max} this panel expands: git would widen every hunk of the file at once. Open the file itself to read that region.`,
 };
 
 type Dict = typeof en;
@@ -724,6 +726,8 @@ const ru: Dict = {
   openCurrentUnchanged: () => "У файла нет незакоммиченных изменений.",
   expandGap: (n) => `Показать ${n} скрытых строк`,
   expandGapTip: () => "Запросить патч с большим контекстом вокруг изменений",
+  gapTooLarge: (n, max) =>
+    `${n} скрытых строк - больше потолка в ${max}: git расширил бы все хунки файла разом. Чтобы прочитать этот участок, откройте сам файл.`,
 };
 
 /** Current locale's dictionary. Reactive: reads the `locale` signal. */
