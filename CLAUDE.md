@@ -207,7 +207,8 @@ Git вызывается только как внешний процесс. `gix
 - `localStorage` — всё, что про окно и не про репозиторий: `viewMode`, `theme`, `locale`,
   `lastRepo`, `recentRepos`, `showIgnored`, `groupByDir`, `leftPanelWidth`, `logTreeWidth`,
   `logSplitRatio`, `logDetailsWidth`, `diffSplitRatio`, `diffWhitespace`, `diffHighlight`,
-  `logOrder`, `logDimNonMatching`.
+  `logOrder`, `logDimNonMatching`, `branchMenuOptions` (как показывать выпадающий список
+  веток), `recentBranches` (недавние ветки по репозиториям).
 - Память процесса Rust: `AppState` — корень открытого репозитория и флаг «показывать
   игнорируемые». Флаг живёт сессию приложения, при старте `store.openInitial` переприменяет
   сохранённый выбор.
@@ -249,6 +250,11 @@ Git вызывается только как внешний процесс. `gix
   коммиттера. Не выдавать одно за другое.
 - `branch_tree()` всегда отдаёт `is_favorite: false` — избранное приезжает из
   `ui_state_get()`, строку дерева собирает UI из двух источников.
+- Ключи свёрнутых папок в дереве веток разведены по группам — `fav:` / `local:` / `remote:`.
+  Избранное — третья группа, а не переиспользованный `local`: иначе свёрнутый в избранном
+  `p2p` сворачивал бы `p2p` в Local.
+- Пункт «Emphasis» в меню лога **приглушает, а не фильтрует**. Сужает выборку только
+  `LogFilter`; `LogFilter.authors` — список, git получает `--author` по разу на имя.
 - «Есть ли незакоммиченные изменения» спрашивается командой `repo_local_changes`. Вывод из
   changelist'ов, которые панель уже держит, даёт **другой** ответ: там нет untracked-файлов.
 - `reset --hard` двигает вершину назад, поэтому проба «есть ли коммиты новее» его не замечает —
