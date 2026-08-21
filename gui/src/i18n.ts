@@ -57,6 +57,11 @@ const en = {
   newBranchItem: () => "New branch…",
   local: () => "Local",
   remote: () => "Remote",
+  recentBranches: () => "Recent",
+  branchMenuOptionsTip: () => "How this list is shown",
+  optGroupByPrefix: () => "Group by prefix",
+  optShowRemote: () => "Show remote branches",
+  optShowRecent: () => "Show recent branches",
   // Modals
   confirm: () => "Confirm",
   // CommitPanel
@@ -452,6 +457,11 @@ const ru: Dict = {
   newBranchItem: () => "Новая ветка…",
   local: () => "Локальные",
   remote: () => "Удалённые",
+  recentBranches: () => "Недавние",
+  branchMenuOptionsTip: () => "Как показывать список",
+  optGroupByPrefix: () => "Группировать по префиксу",
+  optShowRemote: () => "Показывать удалённые ветки",
+  optShowRecent: () => "Показывать недавние ветки",
   confirm: () => "Подтвердить",
   commitColon: () => "Коммит:",
   selectedCount: (n) => ` · выбрано ${n}`,
