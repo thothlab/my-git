@@ -1,23 +1,23 @@
 {
-  "notes": "Graft gui-v0.2.3",
+  "notes": "Graft gui-v0.2.4",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVjFRWHJSTWNGODQ3Ui9XT3c4WE1GZU9kcDd1dVZqK3VobEQ1dkdJKzRHSmpSdG9teS9XQ1IxRE9wZzVCZytoV0F2ckZVY0xQRXZvQmNmK1JnZGx4NklSYlIvbGhQa3dvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MjMwNTk2CWZpbGU6R3JhZnQuYXBwLnRhci5negpocE1YTnZMRHNlVzZUWnZJamJEdTlKK1lOdzBxWmg0TVNHU3pYSDEycXZteDUzVGFGUmgzSnVqZ0lDR1A5d29HRTR3dUt3NGlJbTU3TzUxUDVFYW5CUT09Cg==",
-      "url": "https://github.com/thothlab/my-git/releases/download/gui-v0.2.3/Graft.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVjFRWHJSTWNGODdVdDJOQlJ2ZGRSMDhybFo1K0MzUjN2ZGFzZWE5VXhpVncrOC92R2tqLzNpckRKWnBxVFJDalA0eTJ3d1RDT0l6YmtBeHp1blR5RHd5VzJkQlFiQmdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3Mjk1Nzk1CWZpbGU6R3JhZnQuYXBwLnRhci5negp4K3I3dENmWlR1TnViL2d5UEpua3NEckxlUjN4RWpTbkRVWjJzckw0aWNpNUl2UlFyTnZsSXdiTGhDdm03ditabDYxTGQyUGs0UWV2Y0MzOHBLK1JDQT09Cg==",
+      "url": "https://github.com/thothlab/my-git/releases/download/gui-v0.2.4/Graft.app.tar.gz"
     },
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVjFRWHJSTWNGODQ3Ui9XT3c4WE1GZU9kcDd1dVZqK3VobEQ1dkdJKzRHSmpSdG9teS9XQ1IxRE9wZzVCZytoV0F2ckZVY0xQRXZvQmNmK1JnZGx4NklSYlIvbGhQa3dvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MjMwNTk2CWZpbGU6R3JhZnQuYXBwLnRhci5negpocE1YTnZMRHNlVzZUWnZJamJEdTlKK1lOdzBxWmg0TVNHU3pYSDEycXZteDUzVGFGUmgzSnVqZ0lDR1A5d29HRTR3dUt3NGlJbTU3TzUxUDVFYW5CUT09Cg==",
-      "url": "https://github.com/thothlab/my-git/releases/download/gui-v0.2.3/Graft.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVjFRWHJSTWNGODdVdDJOQlJ2ZGRSMDhybFo1K0MzUjN2ZGFzZWE5VXhpVncrOC92R2tqLzNpckRKWnBxVFJDalA0eTJ3d1RDT0l6YmtBeHp1blR5RHd5VzJkQlFiQmdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3Mjk1Nzk1CWZpbGU6R3JhZnQuYXBwLnRhci5negp4K3I3dENmWlR1TnViL2d5UEpua3NEckxlUjN4RWpTbkRVWjJzckw0aWNpNUl2UlFyTnZsSXdiTGhDdm03ditabDYxTGQyUGs0UWV2Y0MzOHBLK1JDQT09Cg==",
+      "url": "https://github.com/thothlab/my-git/releases/download/gui-v0.2.4/Graft.app.tar.gz"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVjFRWHJSTWNGODEvOWFWdjRKb1puM2VWZ3VFMVhTYklrKzJqZVBoWWNvZXk5Q0w2MENzTEtRRzNaMU1obXNKNHo0eW14UW80alBOWEJkTHJrS2p4YlZURjg3YmplWXdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MjMwNjIwCWZpbGU6R3JhZnRfMC4yLjNfYW1kNjQuQXBwSW1hZ2UKQnQ5dk4xOEE4UXdUZU1uRDAzUDBMaXNPWXh6bjA4VVFINEovNDlENGQyY0hvZEFEeEV6Ym00alYyVXpBTXV6M3EzSkF0MEdhWmtjaEN2ejVOSk12Q2c9PQo=",
-      "url": "https://github.com/thothlab/my-git/releases/download/gui-v0.2.3/Graft_0.2.3_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVjFRWHJSTWNGOHluaENaRDRlcklNWi82aUpHNWNMRVFjc1NISEhwZDF5WnNJbnhIdjBpa3BWVGlyM2plbHRwQ09WUENXNE5zbm45d05CWnhaZFFWY1lBUmNGL1pqeUFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3Mjk1ODk1CWZpbGU6R3JhZnRfMC4yLjRfYW1kNjQuQXBwSW1hZ2UKZFBCdm1uVTNXQkQrbDk3K29YNitlNXFnUlgvV2tZNmExZ2NBcUQ4RUh1eUpadTFzTW1vYjVqNEFjdS9IeU1LS0ErQzk4U0E1QjBqOEZKMnFVK0FzRGc9PQo=",
+      "url": "https://github.com/thothlab/my-git/releases/download/gui-v0.2.4/Graft_0.2.4_amd64.AppImage"
     },
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVjFRWHJSTWNGODJzakljWkYzVC9uS1c0czRQOWRBQTZQM1VMcXFhbERIUWMxVGQ5UFd2ajJ1SkwxNFF5T1hHYmwwUjNWNHhBdkJNMW9RV21wYy95TWdHOHk3OWdacFE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MjMwNjMxCWZpbGU6R3JhZnRfMC4yLjNfeDY0LXNldHVwLmV4ZQpLTlZ3WDlXemx5OXF1cGpEb2lpSmtyK1Z5QnlyQjhEKzFWdTM3bktLZTkwUTVYeERWa0pkc0RYaWdHa21BUUI2Tm5yWWlFQmxYbE5EVUJuQW1TUldBdz09Cg==",
-      "url": "https://github.com/thothlab/my-git/releases/download/gui-v0.2.3/Graft_0.2.3_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVjFRWHJSTWNGODdLZTdVcCtzM2ExanVBNCtXNEtieXNhUzkyU1E3dDlNK3o5bSszZnI2amg4cGtiUDhFL1BaU096L3gxcTgxdGdyc2JqamQ3L1IyT3FBSjRmekp4ZEFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3Mjk1OTA1CWZpbGU6R3JhZnRfMC4yLjRfeDY0LXNldHVwLmV4ZQpXalN0cnBZRFdWSHBpR0pTRjhoeDV0dlNmSmx6NitzOTVQeUpic2trdmhHa1VSTVRGU0dZNDlONlhnN2hpNnU2bS9UKzIyRWxHYXI3amZpVUpuV29BZz09Cg==",
+      "url": "https://github.com/thothlab/my-git/releases/download/gui-v0.2.4/Graft_0.2.4_x64-setup.exe"
     }
   },
-  "pub_date": "2026-08-20T12:58:00Z",
-  "version": "0.2.3"
+  "pub_date": "2026-08-21T07:06:00Z",
+  "version": "0.2.4"
 }
