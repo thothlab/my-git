@@ -1,6 +1,6 @@
 [package]
 name = "graft"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "Graft — нативный десктоп git-менеджер с именованными changelist'ами"
 rust-version = "1.77"
