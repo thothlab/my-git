@@ -371,8 +371,17 @@ impl CliEngine {
         Ok(())
     }
 
-    /// Push. `upstream` sets `-u` for a branch with no upstream; `force` uses
-    /// `--force-with-lease` (only ever called behind explicit confirmation).
+    /// Push.
+    ///
+    /// `upstream` sets `-u` for a branch with no upstream, `force` is
+    /// `--force-with-lease`, `force-hard` is a bare `--force`. Both forcing
+    /// modes are only ever reached after the plain push was refused and the
+    /// reader picked one of them by name.
+    ///
+    /// There is no catch-all arm: an unrecognised mode used to fall through to a
+    /// plain push, so a typo in the caller looked like a working button that
+    /// quietly did the *safe* thing — and the two forcing modes differ precisely
+    /// in what they are allowed to destroy.
     pub fn push(&self, mode: &str) -> Result<()> {
         match mode {
             "upstream" => {
@@ -382,8 +391,14 @@ impl CliEngine {
             "force" => {
                 self.git(&["push", "--force-with-lease"])?;
             }
-            _ => {
+            "force-hard" => {
+                self.git(&["push", "--force"])?;
+            }
+            "normal" => {
                 self.git(&["push"])?;
+            }
+            other => {
+                return Err(Error::Rule(format!("unknown push mode: {other}")));
             }
         }
         Ok(())

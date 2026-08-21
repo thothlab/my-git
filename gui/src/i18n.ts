@@ -40,7 +40,6 @@ const en = {
   reloadState: () => "Reload state",
   reloadWindow: () => "Reload window",
   // Toolbar
-  diverged: () => "Branches have diverged. Run push --force-with-lease?",
   themeTip: () => "Theme: auto → light → dark",
   refreshTip: () => "Refresh",
   langTip: () => "Language: English / Русский",
@@ -141,7 +140,6 @@ const en = {
   // Busy phases
   busyFetch: () => "Fetching…",
   busyPull: () => "Pulling…",
-  busyPush: () => "Pushing…",
   // Log mode — panels
   branchesTitle: () => "Branches",
   logTitle: () => "Log",
@@ -303,7 +301,6 @@ const en = {
   menuMergeInto: (cur: string) => `Merge into "${cur}"`,
   menuRebaseOnto: (name: string) => `Rebase the current branch onto "${name}"`,
   menuPush: () => "Push",
-  menuForcePush: () => "Force push (with lease)…",
   menuFetch: () => "Fetch",
   menuStashes: () => "Stashed changes…",
   menuUpdateBranch: (name: string) => `Update "${name}" from upstream`,
@@ -325,7 +322,6 @@ const en = {
   whyNeedTwoCommits: () => "exactly two commits are needed",
   whyOneCommitOnly: () => "several commits are selected",
   whyChecking: () => "checking…",
-  whyNoUpstream: () => "the branch has no upstream to push to",
   whyNoUpstreamUpdate: () => "the branch tracks no upstream to update from",
   whyDetachedHead: () => "HEAD is detached, there is no current branch",
   whyNoLocalBranch: () => "check out a branch first",
@@ -346,8 +342,10 @@ const en = {
     `Branch "${name}" has ${n} ${n === 1 ? "commit" : "commits"} that no other branch contains. Deleting it loses ${n === 1 ? "it" : "them"}.\n\nDelete anyway?`,
   confirmDeleteRemote: (name: string) =>
     `Delete "${name}" on the remote? Everyone who fetches from it loses the branch.`,
-  confirmForcePush: (branch: string, remote: string) =>
-    `Force push "${branch}" to ${remote}.\n\nCommits pushed there by other people may be lost. The lease refuses the push if the remote moved since your last fetch, but nothing else protects them.`,
+  pushRejected: (branch: string, remote: string, why: string) =>
+    `Pushing "${branch}" to ${remote} was refused:\n\n${why}\n\nForcing overwrites what is on the remote; commits pushed there by other people may be lost.`,
+  pushForceLease: () => "Force push with lease — refuse if the remote moved since your last fetch",
+  pushForceHard: () => "Force push — overwrite the remote whatever is on it",
   confirmCheckoutRevision: (hash: string) =>
     `Check out ${hash}. HEAD becomes detached: commits made here belong to no branch until you create one.`,
   confirmAbortOperation: (kind: string) =>
@@ -379,6 +377,7 @@ const en = {
   phaseCheckout: () => "checkout",
   phasePush: () => "push",
   phaseForcePush: () => "push --force-with-lease",
+  phaseForcePushHard: () => "push --force",
   phaseDeleteBranch: () => "delete branch",
   phaseRenameBranch: () => "rename branch",
   phaseCreateBranch: () => "create branch",
@@ -436,7 +435,6 @@ const ru: Dict = {
   uiCrashTitle: () => "Что-то пошло не так в UI",
   reloadState: () => "Перечитать состояние",
   reloadWindow: () => "Перезагрузить окно",
-  diverged: () => "Ветки разошлись. Выполнить push --force-with-lease?",
   themeTip: () => "Тема: auto → light → dark",
   refreshTip: () => "Обновить",
   langTip: () => "Язык: English / Русский",
@@ -533,7 +531,6 @@ const ru: Dict = {
   focusHint: () => "Tab / Shift+Tab переключают фокус между панелями",
   busyFetch: () => "Забираем изменения…",
   busyPull: () => "Подтягиваем изменения…",
-  busyPush: () => "Отправляем изменения…",
   branchesTitle: () => "Ветки",
   logTitle: () => "Лог",
   commitDetailsTitle: () => "Детали коммита",
@@ -690,7 +687,6 @@ const ru: Dict = {
   menuMergeInto: (cur) => `Влить в "${cur}"`,
   menuRebaseOnto: (name) => `Перебазировать текущую ветку на "${name}"`,
   menuPush: () => "Отправить (push)",
-  menuForcePush: () => "Отправить принудительно (с проверкой)…",
   menuFetch: () => "Получить с сервера (fetch)",
   menuStashes: () => "Спрятанные изменения…",
   menuUpdateBranch: (name: string) => `Обновить "${name}" из upstream`,
@@ -712,7 +708,6 @@ const ru: Dict = {
   whyNeedTwoCommits: () => "нужно ровно два коммита",
   whyOneCommitOnly: () => "выбрано несколько коммитов",
   whyChecking: () => "проверяем…",
-  whyNoUpstream: () => "у ветки нет upstream, отправлять некуда",
   whyNoUpstreamUpdate: () => "у ветки нет upstream, неоткуда обновляться",
   whyDetachedHead: () => "HEAD отделён, текущей ветки нет",
   whyNoLocalBranch: () => "сначала перейдите на ветку",
@@ -733,8 +728,10 @@ const ru: Dict = {
     `У ветки "${name}" ${n} ${ruPlural(n, "коммит", "коммита", "коммитов")}, которых нет ни в одной другой ветке. Удаление потеряет их.\n\nВсё равно удалить?`,
   confirmDeleteRemote: (name) =>
     `Удалить "${name}" на сервере? Ветка исчезнет у всех, кто оттуда получает.`,
-  confirmForcePush: (branch, remote) =>
-    `Принудительная отправка "${branch}" в ${remote}.\n\nКоммиты, отправленные туда другими, могут быть потеряны. Проверка (--force-with-lease) откажет, если сервер ушёл вперёд с вашего последнего fetch, но больше их ничто не защищает.`,
+  pushRejected: (branch, remote, why) =>
+    `Отправка "${branch}" в ${remote} отклонена:\n\n${why}\n\nПринудительная отправка перезапишет то, что лежит на сервере; коммиты, отправленные туда другими, могут быть потеряны.`,
+  pushForceLease: () => "Принудительно с проверкой - откажет, если сервер ушёл вперёд с вашего последнего fetch",
+  pushForceHard: () => "Принудительно - перезаписать сервер, что бы на нём ни было",
   confirmCheckoutRevision: (hash) =>
     `Перейти на ${hash}. HEAD станет отделённым: коммиты, сделанные здесь, не будут принадлежать ни одной ветке, пока вы её не создадите.`,
   confirmAbortOperation: (kind) =>
@@ -767,6 +764,7 @@ const ru: Dict = {
   phaseCheckout: () => "checkout",
   phasePush: () => "push",
   phaseForcePush: () => "push --force-with-lease",
+  phaseForcePushHard: () => "push --force",
   phaseDeleteBranch: () => "удаление ветки",
   phaseRenameBranch: () => "переименование ветки",
   phaseCreateBranch: () => "создание ветки",

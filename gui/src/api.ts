@@ -174,7 +174,8 @@ export const branchCreate = (name: string, from?: string) =>
 export const branchCheckout = (name: string, stash: boolean) =>
   invoke<RepoState>("branch_checkout", { name, stash });
 
-export type PushMode = "normal" | "upstream" | "force";
+/** `force` is `--force-with-lease`; `force-hard` is a bare `--force`. */
+export type PushMode = "normal" | "upstream" | "force" | "force-hard";
 export const push = (mode: PushMode) => invoke<RepoState>("push", { mode });
 export const fetchRemote = () => invoke<RepoState>("fetch");
 export const pull = () => invoke<RepoState>("pull");

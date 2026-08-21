@@ -168,17 +168,39 @@ export async function rebaseOntoBranch(node: BranchNode): Promise<void> {
   afterRepoChange();
 }
 
+/**
+ * The one Push of the application — the menu item, the toolbar button and the
+ * Changes mode all come here.
+ *
+ * There is no second "force push" item any more. Two of them offered only
+ * `--force-with-lease`, left a bare `--force` unreachable, and asked the reader
+ * to guess *before* the push which of the two the situation needed. So the plain
+ * push is attempted first and the choice is offered on the refusal — the moment
+ * git has already said why, and the only moment at which the answer is knowable.
+ *
+ * `runResult`, not `run`: the branch is taken on git's own text, and `run` would
+ * only put it in the banner. A successful forced push clears that banner itself,
+ * because `run` clears the error on success.
+ */
 export async function pushCurrent(): Promise<void> {
-  await run(push(state()?.upstream ? "normal" : "upstream"), d().phasePush());
+  const first = state()?.upstream ? "normal" : "upstream";
+  const err = await runResult(push(first), d().phasePush());
   afterRepoChange();
-}
+  if (!err) return;
+  // A branch with no upstream has nothing to force *over*: `-u` failed for some
+  // other reason, and neither force answers it.
+  if (first === "upstream") return;
 
-/** Force push, behind a confirmation that names the branch and the remote. */
-export async function forcePushCurrent(): Promise<void> {
   const branch = state()?.branch ?? "";
   const remote = currentRemote() ?? "";
-  if (!(await confirmAction(d().confirmForcePush(branch, remote), true))) return;
-  await run(push("force"), d().phaseForcePush());
+  const pick = await chooseOption(d().pushRejected(branch, remote, err), [
+    { key: "lease", label: d().pushForceLease() },
+    { key: "force", label: d().pushForceHard(), danger: true },
+    { key: "cancel", label: d().cancel() },
+  ]);
+  if (!pick || pick === "cancel") return;
+  const hard = pick === "force";
+  await run(push(hard ? "force-hard" : "force"), hard ? d().phaseForcePushHard() : d().phaseForcePush());
   afterRepoChange();
 }
 
@@ -297,20 +319,14 @@ export function branchMenuItems(node: BranchNode | null, refreshTree: () => void
   }
 
   items.push({ kind: "sep" });
+  // One item: forcing is offered by `pushCurrent` on a refusal, not chosen here
+  // in advance (see its docblock).
   const pushReason = busyOp ? opReason : detached ? d().whyDetachedHead() : undefined;
   items.push({
     label: d().menuPush(),
     disabled: !!pushReason,
     reason: pushReason,
     run: () => after(pushCurrent()),
-  });
-  const forceReason = pushReason ?? (state()?.upstream ? undefined : d().whyNoUpstream());
-  items.push({
-    label: d().menuForcePush(),
-    danger: true,
-    disabled: !!forceReason,
-    reason: forceReason,
-    run: () => after(forcePushCurrent()),
   });
   items.push({
     label: d().menuFetch(),

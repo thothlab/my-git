@@ -1,28 +1,14 @@
 import { Show } from "solid-js";
-import { fetchRemote, pull, push } from "../api";
-import { busy, confirmAction, run, setViewMode, state, viewMode } from "../store";
+import { fetchRemote, pull } from "../api";
+import { busy, run, setViewMode, state, viewMode } from "../store";
 import { d } from "../i18n";
 import { DISABLED_CLASS } from "./IconButton";
 import AppMenu from "./AppMenu";
 import BranchMenu from "./BranchMenu";
 import RepoMenu from "./RepoMenu";
+import { pushCurrent } from "./log/actions/branchActions";
 
 export default function Toolbar() {
-  const doPush = async () => {
-    const s = state();
-    if (!s) return;
-    if (!s.upstream) {
-      await run(push("upstream"), d().busyPush()); // first push sets upstream (-u)
-      return;
-    }
-    if (s.ahead > 0 && s.behind > 0) {
-      if (await confirmAction(d().diverged()))
-        await run(push("force"), d().busyPush());
-      return;
-    }
-    await run(push("normal"), d().busyPush());
-  };
-
   return (
     <header class="flex items-center gap-2 border-b border-border bg-bg-muted px-3 py-1.5 text-sm">
       <span class="font-semibold">Graft</span>
@@ -37,7 +23,11 @@ export default function Toolbar() {
       <div class="ml-3 flex items-center gap-1">
         <TBtn label="Fetch" onClick={() => void run(fetchRemote(), d().busyFetch())} />
         <TBtn label="Pull" onClick={() => void run(pull(), d().busyPull())} />
-        <TBtn label="Push" onClick={() => void doPush()} accent />
+        {/* One Push for the window: the same flow the Log panel's menu item
+            runs, forcing offered on a refusal rather than guessed from the
+            ahead/behind counters — a server can refuse a push that looks fine
+            from here. */}
+        <TBtn label="Push" onClick={() => void pushCurrent()} accent />
       </div>
 
       {/* Mode switch for the main area. Always visible, in both modes. */}
