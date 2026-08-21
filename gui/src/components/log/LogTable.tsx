@@ -562,7 +562,10 @@ function Row(props: {
           />
         </Show>
       </div>
-      <div class="flex min-w-0 items-center gap-1 px-1">
+      {/* `overflow-hidden`, not merely `min-w-0`: the grid track shrinks, but the
+          reference labels inside are `shrink-0` and used to spill out of it —
+          across the Author column, drawn over its text (bug 6). */}
+      <div class="flex min-w-0 items-center gap-1 overflow-hidden px-2">
         <Show when={props.outside}>
           <span
             class="shrink-0 rounded border border-border px-1 text-[10px] text-fg-subtle"
@@ -633,7 +636,7 @@ function Refs(props: { refs: RefLabel[] }) {
       <For each={shown()}>
         {(r) => (
           <span
-            class={`shrink-0 rounded border px-1 text-[10px] leading-4 ${cls(r)}`}
+            class={`max-w-64 shrink-0 truncate rounded border px-1 text-[10px] leading-4 ${cls(r)}`}
             title={r.name}
           >
             {r.name}
