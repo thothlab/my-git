@@ -678,9 +678,13 @@ function ColHeader(props: {
     window.addEventListener("pointerup", up);
   };
   return (
-    <div class="relative h-full min-w-0">
+    <div class="relative h-full min-w-0 border-l border-border">
+      {/* The grip straddles the boundary and is two pixels wide, not one pixel
+          inside the cell: an invisible one-pixel strip is a control nobody finds,
+          and the column then reads as fixed-width. The border above is the same
+          affordance said visually. */}
       <div
-        class="absolute left-0 top-0 h-full w-1 cursor-col-resize"
+        class="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-accent/40"
         title={props.label + " — " + d().colResizeTip()}
         onPointerDown={onPointerDown}
         onDblClick={props.onReset}
