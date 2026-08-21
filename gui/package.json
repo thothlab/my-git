@@ -1,6 +1,6 @@
 {
   "name": "graft",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "type": "module",
   "description": "Graft — нативный десктоп git-менеджер (Tauri + SolidJS) с именованными changelist'ами",

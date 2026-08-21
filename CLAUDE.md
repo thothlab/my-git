@@ -15,7 +15,10 @@
 
 ## Команды
 
-Все запускаются из корня репозитория.
+Репозиторий — один cargo-workspace (корневой `Cargo.toml`, члены `terminal` и
+`gui/src-tauri`). Cargo-команды работают из корня без `--manifest-path`, `target/` и
+`Cargo.lock` — общие, корневые. Профиль `[profile.release]` задаётся **только** в корневом
+манифесте: в манифестах членов cargo его игнорирует.
 
 | Команда | Что делает |
 |---------|------------|
@@ -24,14 +27,20 @@
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
 | `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`) |
-| `cargo test --manifest-path gui/src-tauri/Cargo.toml` | Rust-сторона GUI, 106 тестов |
-| `cd terminal && cargo build --release` | Собрать TUI |
-| `cd terminal && cargo test` | Тесты TUI, 73 теста |
+| `cargo test` | Оба крейта разом: 119 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 119 тестов |
+| `cargo test -p mygit` | Только тесты TUI, 73 теста |
+| `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
+| `cargo clean` | Один общий `target/` на оба крейта |
 
-Перед коммитом в `gui/` зелёными должны быть `npm run build`, `npx tsc --noEmit` и
-`cargo test`. Запускать по очереди: `cargo` и `vite` на одном дереве дерутся за блокировки.
+**`cargo test` из корня требует собранного `gui/dist`:** `tauri-build` проверяет
+`frontendDist` из `tauri.conf.json`, и без `cd gui && npm run build` крейт `graft` не
+соберётся. Перед коммитом в `gui/` зелёными должны быть `npm run build`, `npx tsc --noEmit`
+и `cargo test`. Запускать по очереди: `cargo` и `vite` на одном дереве дерутся за
+блокировки, а `target/` теперь один на оба крейта.
 
-CI (`.github/workflows/ci.yml`) гоняет только `terminal` — fmt / clippy / test. GUI в CI не
+CI (`.github/workflows/ci.yml`) гоняет только `terminal` (через `-p mygit`, чтобы не тянуть
+Tauri) — fmt / clippy / test. GUI в CI не
 проверяется ничем, локальный прогон — единственные ворота. Релизы: тег `v*` собирает TUI
 (`release.yml`), тег `gui-v*` — инсталляторы Graft (`release-gui.yml`), версию бампить
 одновременно в `gui/package.json`, `gui/src-tauri/Cargo.toml` и `gui/src-tauri/tauri.conf.json`.

@@ -2,6 +2,7 @@ name: ci
 
 # Format, lint and test the terminal (TUI) crate on every push/PR.
 # A gui/ job will be added here when the GUI lands.
+# The repository is a single cargo workspace, so everything runs from the root.
 
 on:
   push:
@@ -24,18 +25,18 @@ jobs:
           toolchain: 1.94.1
           components: rustfmt, clippy
 
+      # Один cargo-workspace на репозиторий: кэш и Cargo.lock корневые.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: terminal
+          workspaces: .
 
+      # Пакет выбирается через `-p mygit`, а не сменой каталога: workspace общий,
+      # и без `-p` шаги затянули бы ещё и Tauri со всеми его системными зависимостями.
       - name: fmt
-        working-directory: terminal
-        run: cargo fmt --check
+        run: cargo fmt -p mygit --check
 
       - name: clippy
-        working-directory: terminal
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy -p mygit --all-targets --locked -- -D warnings
 
       - name: test
-        working-directory: terminal
-        run: cargo test --locked
+        run: cargo test -p mygit --locked

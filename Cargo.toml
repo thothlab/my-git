@@ -1,0 +1,21 @@
+# Один cargo-workspace на весь репозиторий: `cargo test` / `cargo clean` / `cargo build`
+# работают из корня, общий `target/` и один корневой `Cargo.lock`.
+#
+# Крейты остаются на своих местах — их манифесты не переезжают:
+#   terminal/      — TUI `mygit` (движок gix)
+#   gui/src-tauri/ — десктопный Graft (Tauri 2, шелл-аут в системный git)
+[workspace]
+members = ["terminal", "gui/src-tauri"]
+resolver = "2"
+
+# Профиль сборки в workspace задаётся ТОЛЬКО здесь: `[profile.*]` в манифестах
+# членов cargo игнорирует. Значения — объединение прежних профилей обоих крейтов
+# (у GUI дополнительно были `panic = "abort"` и `codegen-units = 1`).
+# `panic = "abort"` для TUI безопасен: терминал восстанавливает panic-hook,
+# который ratatui::init() ставит, а хук отрабатывает и до abort.
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1

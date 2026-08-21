@@ -52,9 +52,10 @@ git-репозитория.
 
 ## Сборка из исходников
 
+Репозиторий — один cargo-workspace, всё запускается из корня:
+
 ```sh
-cd terminal
-cargo build --release
+cargo build -p mygit --release
 ./target/release/mygit      # запускать внутри git-репозитория
 ```
 
