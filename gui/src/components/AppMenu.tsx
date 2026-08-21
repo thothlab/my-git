@@ -1,8 +1,8 @@
-import { For, Show, createResource, createSignal } from "solid-js";
+import { For, Show, createResource, createSignal, onCleanup } from "solid-js";
 import { Portal } from "solid-js/web";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getVersion } from "@tauri-apps/api/app";
-import { setTheme, theme, type Theme } from "../store";
+import { registerModalSource, setTheme, theme, type Theme } from "../store";
 import { d, dateLocale, locale, setLocale, type Locale } from "../i18n";
 import {
   checkForUpdatesNow,
@@ -16,16 +16,56 @@ import { DISABLED_CLASS } from "./IconButton";
 
 const REPO_URL = "https://github.com/thothlab/my-git";
 
-// Pane-style secondary block pinned to the bottom of the CHANGES panel.
-export default function SidebarFooter() {
-  const [modal, setModal] = createSignal<"settings" | "about" | null>(null);
+/**
+ * The window's own menu — Settings, Docs, About — behind one icon at the right
+ * end of the toolbar.
+ *
+ * It used to be a block pinned under the changelist tree, which put the
+ * application's settings inside one of its two modes and left them unreachable
+ * from the other. The toolbar belongs to the window, so the menu lives there.
+ *
+ * `modal` is module state, not component state, and it is registered with
+ * `registerModalSource`: reachable from both modes, these dialogs are now up
+ * while the Log panels are mounted, and an unregistered dialog would leave the
+ * arrows driving the commit list behind it.
+ */
+const [modal, setModal] = createSignal<"settings" | "about" | null>(null);
+registerModalSource(() => modal() !== null);
+
+export default function AppMenu() {
+  const [open, setOpen] = createSignal(false);
+  onCleanup(() => setOpen(false));
+
+  const pick = (fn: () => void) => {
+    setOpen(false);
+    fn();
+  };
 
   return (
     <>
-      <div class="shrink-0 border-t border-border p-1">
-        <FooterItem icon={<GearIcon />} label={d().settings()} onClick={() => setModal("settings")} />
-        <FooterItem icon={<BookIcon />} label={d().docs()} onClick={() => void openUrl(REPO_URL)} />
-        <FooterItem icon={<InfoIcon />} label={d().about()} onClick={() => setModal("about")} />
+      <div class="relative">
+        <button
+          class="flex items-center rounded border border-border px-1.5 py-1 text-fg-subtle hover:bg-bg hover:text-fg"
+          title={d().appMenuTip()}
+          aria-haspopup="menu"
+          aria-expanded={open()}
+          onClick={() => setOpen((v) => !v)}
+        >
+          <SlidersIcon />
+        </button>
+        <Show when={open()}>
+          <>
+            {/* A click anywhere else closes it. `fixed inset-0` rather than a
+                blur handler: the menu items are inside the button's own subtree
+                and a blur would fire before the click they were opened for. */}
+            <div class="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+            <div class="absolute right-0 top-full z-40 mt-1 w-44 rounded-md border border-border bg-bg py-1 shadow-lg">
+              <MenuItem icon={<GearIcon />} label={d().settings()} onClick={() => pick(() => setModal("settings"))} />
+              <MenuItem icon={<BookIcon />} label={d().docs()} onClick={() => pick(() => void openUrl(REPO_URL))} />
+              <MenuItem icon={<InfoIcon />} label={d().about()} onClick={() => pick(() => setModal("about"))} />
+            </div>
+          </>
+        </Show>
       </div>
 
       <Show when={modal() === "settings"}>
@@ -38,15 +78,27 @@ export default function SidebarFooter() {
   );
 }
 
-function FooterItem(props: { icon: any; label: string; onClick: () => void }) {
+function MenuItem(props: { icon: any; label: string; onClick: () => void }) {
   return (
     <button
-      class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-fg hover:bg-bg-muted"
+      class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-fg hover:bg-bg-muted"
       onClick={props.onClick}
     >
       <span class="shrink-0 text-fg-subtle">{props.icon}</span>
       <span>{props.label}</span>
     </button>
+  );
+}
+
+/** The trigger's own mark: sliders, not a gear — the gear is one item inside. */
+function SlidersIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="4" y1="8" x2="20" y2="8" />
+      <line x1="4" y1="16" x2="20" y2="16" />
+      <circle cx="15" cy="8" r="2.5" />
+      <circle cx="9" cy="16" r="2.5" />
+    </svg>
   );
 }
 

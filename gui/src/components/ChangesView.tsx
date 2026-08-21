@@ -46,7 +46,6 @@ import {
   toggleShowIgnored,
 } from "../store";
 import { d } from "../i18n";
-import SidebarFooter from "./SidebarFooter";
 import { openStashPanel, reloadStashes, stashCount } from "./StashPanel";
 
 // Which paths a drag carries: the checked set if the dragged row is part of it,
@@ -176,7 +175,6 @@ export default function ChangesView() {
         </Show>
       </div>
 
-      <SidebarFooter />
       <ContextMenu />
     </div>
   );

@@ -3,6 +3,7 @@ import { fetchRemote, pull, push } from "../api";
 import { busy, confirmAction, run, setViewMode, state, viewMode } from "../store";
 import { d } from "../i18n";
 import { DISABLED_CLASS } from "./IconButton";
+import AppMenu from "./AppMenu";
 import BranchMenu from "./BranchMenu";
 import RepoMenu from "./RepoMenu";
 
@@ -44,6 +45,10 @@ export default function Toolbar() {
         <ModeBtn mode="changes" label={d().modeChanges()} tip={d().modeChangesTip()} />
         <ModeBtn mode="log" label={d().modeLog()} tip={d().modeLogTip()} />
       </div>
+
+      {/* Settings, Docs and About. They belong to the window, not to one of its
+          modes, which is why they no longer hang under the changelist tree. */}
+      <AppMenu />
     </header>
   );
 }
