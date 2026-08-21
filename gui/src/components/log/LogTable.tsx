@@ -224,7 +224,7 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
 
   const filterActive = () => {
     const f = filter();
-    return !!(f.text || f.author || f.branch || f.since || f.until || f.paths.length);
+    return !!(f.text || f.authors.length || f.branch || f.since || f.until || f.paths.length);
   };
 
   return (
@@ -293,6 +293,12 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
                   />
                   {d().highlightMine()}
                 </label>
+                {/* The complaint this answers: the option was called "My commits
+                    and the current branch" and read as a filter, so the log
+                    still showing everyone else's commits looked broken. It
+                    dims; narrowing is the User filter's job, and the two are not
+                    the same mechanism. */}
+                <div class="px-2 pb-1 pt-0.5 text-[11px] text-fg-subtle">{d().highlightHint()}</div>
               </div>
             </Show>
           </div>

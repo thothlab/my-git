@@ -123,7 +123,7 @@ fn open_lanes_of(repo: &Path, filter: &LogFilter, cursor: Option<&LogCursor>) ->
 /// belongs in `model.rs`, which is task 01's zone.
 fn breaks_history(filter: &LogFilter) -> bool {
     filter.text.is_some()
-        || filter.author.is_some()
+        || !filter.authors.is_empty()
         || filter.since.is_some()
         || filter.until.is_some()
         || !filter.paths.is_empty()
@@ -155,17 +155,27 @@ fn filter_args(filter: &LogFilter) -> Vec<String> {
         }
     }
     let text = filter.text.as_deref().filter(|t| !t.is_empty());
-    let author = filter.author.as_deref().filter(|t| !t.is_empty());
+    // Repeated `--author` is git's own OR: a commit is kept if any of them
+    // matches. Blank entries are dropped rather than passed on — `--author=`
+    // matches everything, so one empty row in the list would silently undo the
+    // whole filter.
+    let authors: Vec<&str> = filter
+        .authors
+        .iter()
+        .map(|x| x.trim())
+        .filter(|x| !x.is_empty())
+        .collect();
     if let Some(text) = text {
         a.push(format!("--grep={text}"));
     }
-    if let Some(author) = author {
+    for author in &authors {
         a.push(format!("--author={author}"));
     }
     // The pattern flags govern `--author` as much as `--grep`: git matches an author
     // as a regular expression by default, so a name with a dot or a bracket in it
     // would over-match or fail outright while the user typed no pattern at all.
-    if text.is_some() || author.is_some() {
+    // They are global to the query, so they cover every `--author` at once.
+    if text.is_some() || !authors.is_empty() {
         if filter.regex {
             a.push(s("--extended-regexp"));
         } else {
@@ -592,7 +602,7 @@ mod tests {
             ("text with case", LogFilter { text: Some("ON MAIN".into()), match_case: true, ..Default::default() }, vec![]),
             ("regex", LogFilter { text: Some("^on (main|feature)$".into()), regex: true, ..Default::default() }, vec!["on main", "on feature"]),
             ("regex off treats the pattern literally", LogFilter { text: Some("^on (main|feature)$".into()), ..Default::default() }, vec![]),
-            ("author", LogFilter { author: Some("Other One".into()), ..Default::default() }, vec!["by other"]),
+            ("author", LogFilter { authors: vec!["Other One".into()], ..Default::default() }, vec!["by other"]),
             ("paths", LogFilter { paths: vec!["f.txt".into()], ..Default::default() }, vec!["on feature"]),
         ];
         for (label, f, expect) in cases {
@@ -605,7 +615,7 @@ mod tests {
         }
 
         // combined filters narrow further than each alone
-        let both = LogFilter { author: Some("Test".into()), text: Some("on".into()), ..Default::default() };
+        let both = LogFilter { authors: vec!["Test".into()], text: Some("on".into()), ..Default::default() };
         assert_eq!(subjects(&both), vec!["on main", "on feature", "second"], "\"second\" contains \"on\" too — the text filter is a substring match");
 
         // a date window cuts by time
@@ -758,14 +768,53 @@ mod tests {
         let dir = scratch_repo();
         let p = dir.path();
         commit_as(p, "o.txt", "by pattern", "A. B (x)", "ab@example.com");
-        let f = LogFilter { author: Some("A. B (x)".into()), ..Default::default() };
+        let f = LogFilter { authors: vec!["A. B (x)".into()], ..Default::default() };
         let got = page(p, &f, None, 20).unwrap();
         assert_eq!(got.commits.len(), 1, "the name is a name, not a pattern: {:?}", got.commits);
         assert_eq!(got.commits[0].subject, "by pattern");
 
         // and the same string as a regular expression is a pattern again
-        let f = LogFilter { author: Some("A. B \\(x\\)".into()), regex: true, ..Default::default() };
+        let f = LogFilter { authors: vec!["A. B \\(x\\)".into()], regex: true, ..Default::default() };
         assert_eq!(page(p, &f, None, 20).unwrap().commits.len(), 1);
+    }
+
+    #[test]
+    fn two_authors_are_ored_not_anded() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        commit_as(p, "a.txt", "by other", "Other One", "other@example.com");
+        commit_as(p, "b.txt", "by third", "Third Person", "third@example.com");
+        let f = LogFilter {
+            authors: vec!["Other One".into(), "Third Person".into()],
+            ..Default::default()
+        };
+        let got: Vec<String> = page(p, &f, None, 50)
+            .unwrap()
+            .commits
+            .into_iter()
+            .map(|c| c.subject)
+            .collect();
+        assert_eq!(
+            got,
+            vec!["by third".to_string(), "by other".to_string()],
+            "repeated --author is git's own OR; anding them would leave nothing: {got:?}"
+        );
+    }
+
+    /// A blank entry is `--author=`, which matches everything: one empty row in
+    /// the list would silently undo the whole filter.
+    #[test]
+    fn a_blank_author_entry_does_not_widen_the_filter() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        commit_as(p, "a.txt", "by other", "Other One", "other@example.com");
+        let f = LogFilter {
+            authors: vec!["Other One".into(), "   ".into()],
+            ..Default::default()
+        };
+        let got = page(p, &f, None, 50).unwrap();
+        assert_eq!(got.commits.len(), 1, "{:?}", got.commits);
+        assert_eq!(got.commits[0].subject, "by other");
     }
 
     #[test]

@@ -230,7 +230,8 @@ export interface LogFilter {
   text?: string | null;
   regex: boolean;
   matchCase: boolean;
-  author?: string | null;
+  /** Author names, OR'd: a commit is kept if any of them matches. */
+  authors: string[];
   since?: number | null;
   until?: number | null;
   paths: string[];
@@ -242,7 +243,7 @@ export const emptyLogFilter = (): LogFilter => ({
   text: null,
   regex: false,
   matchCase: false,
-  author: null,
+  authors: [],
   since: null,
   until: null,
   paths: [],

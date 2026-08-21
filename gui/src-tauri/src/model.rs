@@ -221,7 +221,11 @@ pub struct LogFilter {
     pub text: Option<String>,
     pub regex: bool,
     pub match_case: bool,
-    pub author: Option<String>,
+    /// Author names to keep, OR'd together — `git log` accepts `--author` more
+    /// than once and matches a commit whose author satisfies any of them. A
+    /// single `Option<String>` was the one shape that could not say "these two
+    /// people", which is the question a log filter is most often asked.
+    pub authors: Vec<String>,
     pub since: Option<i64>,
     pub until: Option<i64>,
     pub paths: Vec<String>,

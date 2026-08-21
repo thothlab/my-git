@@ -146,11 +146,29 @@ export default function FilterBar() {
     return "";
   };
 
+  /** One name reads as the name; several read as a count, because the button is
+   * one line wide and three truncated names say less than "3 authors". */
+  const authorLabel = () => {
+    const a = filter().authors;
+    if (a.length === 0) return null;
+    return a.length === 1 ? a[0] : d().fltAuthorsChip(a.length);
+  };
+
+  const toggleAuthor = (name: string) => {
+    const list = filter().authors;
+    set({ authors: list.includes(name) ? list.filter((x) => x !== name) : [...list, name] });
+  };
+
   const chips = createMemo(() => {
     const f = filter();
     const out: { key: string; label: string; clear: () => void }[] = [];
     if (f.branch) out.push({ key: "branch", label: f.branch, clear: () => setBranch(null) });
-    if (f.author) out.push({ key: "author", label: f.author, clear: () => set({ author: null }) });
+    for (const a of f.authors)
+      out.push({
+        key: `author:${a}`,
+        label: a,
+        clear: () => set({ authors: filter().authors.filter((x) => x !== a) }),
+      });
     if (f.since || f.until)
       out.push({ key: "date", label: dateLabel(), clear: () => set({ since: null, until: null }) });
     for (const p of f.paths)
@@ -165,7 +183,7 @@ export default function FilterBar() {
   const clearAll = () => {
     setSelectedBranch(null);
     // One reload, not four: the whole filter is replaced in a single call.
-    applyFilter({ ...filter(), branch: null, author: null, since: null, until: null, paths: [] });
+    applyFilter({ ...filter(), branch: null, authors: [], since: null, until: null, paths: [] });
   };
 
   return (
@@ -254,17 +272,18 @@ export default function FilterBar() {
         <Menu
           id="author"
           label={d().fltAuthor()}
-          value={filter().author}
+          value={authorLabel()}
           open={openMenu()}
           setOpen={setOpenMenu}
         >
+          {/* Stays open on a pick: choosing several people is the point, and a
+              menu that closes after each one makes the second choice cost as
+              much as the first. */}
           <AuthorMenu
             repo={repoPath()}
-            current={filter().author ?? null}
-            onPick={(a) => {
-              set({ author: a });
-              setOpenMenu(null);
-            }}
+            current={filter().authors}
+            onToggle={toggleAuthor}
+            onClear={() => set({ authors: [] })}
           />
         </Menu>
         <Menu
@@ -458,9 +477,24 @@ function BranchMenu(props: { current: string | null; onPick: (b: string | null) 
 
 // ── Author ───────────────────────────────────────────────────────────────────
 
-/** Authors of this repository's history, read once per repository per session:
- * the list walks the whole log and does not change while the panel is open. */
-function AuthorMenu(props: { repo: string; current: string | null; onPick: (a: string | null) => void }) {
+/**
+ * Authors of this repository's history, read once per repository per session:
+ * the list walks the whole log and does not change while the panel is open.
+ *
+ * **Several may be picked at once.** `git log` takes `--author` more than once
+ * and ORs them, so "these two people" is a question the filter can actually put
+ * — it simply had nowhere to put it while the field held one string.
+ *
+ * "Me" is the repository's configured address, not a name: `--author` matches
+ * the author line, address included, and the address is the identity git itself
+ * treats as the same person across the spellings of a name.
+ */
+function AuthorMenu(props: {
+  repo: string;
+  current: string[];
+  onToggle: (a: string) => void;
+  onClear: () => void;
+}) {
   const [q, setQ] = createSignal("");
   const [authors] = createResource(
     () => props.repo,
@@ -468,6 +502,7 @@ function AuthorMenu(props: { repo: string; current: string | null; onPick: (a: s
   );
   const shown = () =>
     (authors() ?? []).filter((a) => a.toLowerCase().includes(q().toLowerCase()));
+  const me = () => state()?.userEmail ?? "";
   return (
     <div class="max-h-72 overflow-auto">
       <input
@@ -476,11 +511,24 @@ function AuthorMenu(props: { repo: string; current: string | null; onPick: (a: s
         value={q()}
         onInput={(e) => setQ(e.currentTarget.value)}
       />
-      <Item label={d().fltAnyAuthor()} on={!props.current} onClick={() => props.onPick(null)} />
+      <Item
+        label={d().fltAnyAuthor()}
+        on={props.current.length === 0}
+        onClick={props.onClear}
+      />
+      <Show when={me()}>
+        <Item
+          label={d().fltAuthorMe(me())}
+          on={props.current.includes(me())}
+          onClick={() => props.onToggle(me())}
+        />
+      </Show>
       <Show when={!authors.loading} fallback={<div class="px-2 py-1 text-fg-muted">{d().fltAuthorsLoading()}</div>}>
         <Show when={shown().length > 0} fallback={<div class="px-2 py-1 text-fg-muted">{d().fltAuthorsEmpty()}</div>}>
           <For each={shown()}>
-            {(a) => <Item label={a} on={props.current === a} onClick={() => props.onPick(a)} />}
+            {(a) => (
+              <Item label={a} on={props.current.includes(a)} onClick={() => props.onToggle(a)} />
+            )}
           </For>
         </Show>
       </Show>
