@@ -354,3 +354,61 @@ pub struct StashEntry {
     /// The panel shows every stash; this only lets it tell them apart.
     pub from_app: bool,
 }
+
+/// Line endings of a working-tree file, as they lie on disk.
+///
+/// Inbound as well as outbound: `file_write` takes it back so the text the webview
+/// edited in `\n` is restored to what the file actually had. It is the *only* thing
+/// the write derives — the tail of the text, blank lines and final newline alike, is
+/// written exactly as given. A file with *mixed*
+/// endings has no value here — it is refused for editing instead (`EditBlock::MixedEol`),
+/// because rewriting it would normalise every line and produce a whole-file diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Eol {
+    Lf,
+    Crlf,
+}
+
+/// Why a working-tree file cannot be edited in place. A machine key, not prose:
+/// the message is assembled in the frontend from both `i18n` dictionaries, unlike
+/// `Error::Rule`, whose text deliberately stays English in both locales.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EditBlock {
+    Binary,
+    TooLarge,
+    MixedEol,
+    Missing,
+}
+
+/// A working-tree file read for in-place editing.
+///
+/// `text` is normalised to `\n` — a textarea works in `\n`, and handing out `\r\n`
+/// would show `^M`. `digest` is the fingerprint of the bytes **as they lie on disk**,
+/// which is the only way a later write can tell that the file changed underneath;
+/// every successful write returns a new one and the client keeps the *latest*.
+///
+/// `finalNewline` is information for the UI, not an instruction to the write: `text`
+/// already carries its own trailing newline, or carries none.
+/// When `blocked` is set, `text` is `None` and `digest` is empty — there is nothing
+/// on disk to fingerprint (`Missing`) or the bytes were deliberately not read
+/// (`TooLarge`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextFile {
+    pub text: Option<String>,
+    pub digest: String,
+    pub eol: Eol,
+    pub final_newline: bool,
+    pub blocked: Option<EditBlock>,
+}
+
+/// What a successful `file_write` reports back: the fingerprint of what now lies on
+/// disk. The client **must** replace its previous digest with it, or the next
+/// automatic save would compare against a digest its own write already made stale.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileWritten {
+    pub digest: String,
+}

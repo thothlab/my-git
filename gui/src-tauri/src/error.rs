@@ -14,6 +14,14 @@ pub enum Error {
     Parse(String),
     /// A domain rule was violated (duplicate list name, deleting Default, ...).
     Rule(String),
+    /// The file on disk no longer matches what the application last read or wrote
+    /// there, so a write was refused rather than overwriting someone else's change.
+    ///
+    /// Its own variant rather than a `Rule` with a recognisable opening: the client
+    /// **branches** here — it offers a choice between rereading and overwriting — and
+    /// matching that branch against prose breaks on the first rewording, translation
+    /// included. The discriminator is the serialized `kind`, see below.
+    Stale(String),
 }
 
 impl std::fmt::Display for Error {
@@ -23,6 +31,7 @@ impl std::fmt::Display for Error {
             Error::Io(m) => write!(f, "io error: {m}"),
             Error::Parse(m) => write!(f, "parse error: {m}"),
             Error::Rule(m) => write!(f, "{m}"),
+            Error::Stale(m) => write!(f, "{m}"),
         }
     }
 }
@@ -48,6 +57,7 @@ impl Serialize for Error {
             Error::Io(m) => ("io", m.clone(), None),
             Error::Parse(m) => ("parse", m.clone(), None),
             Error::Rule(m) => ("rule", m.clone(), None),
+            Error::Stale(m) => ("stale", m.clone(), None),
         };
         let mut st = s.serialize_struct("Error", 3)?;
         st.serialize_field("kind", kind)?;

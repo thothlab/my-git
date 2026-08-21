@@ -28,6 +28,8 @@ pub fn run() {
             commands::file_rollback,
             commands::list_rollback,
             commands::diff_file,
+            commands::file_read,
+            commands::file_write,
             commands::hunk_stage,
             commands::hunk_unstage,
             commands::hunk_revert,

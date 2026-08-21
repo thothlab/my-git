@@ -6,8 +6,32 @@ use std::process::{Command, Stdio};
 use super::GitEngine;
 use crate::error::{Error, Result};
 use crate::model::{
-    BranchInfo, DiffLine, FileDiff, FileState, FileStatus, Hunk, RefKind, RefLabel, RepoSnapshot,
+    BranchInfo, DiffLine, EditBlock, Eol, FileDiff, FileState, FileStatus, Hunk, RefKind, RefLabel,
+    RepoSnapshot, TextFile,
 };
+
+/// Largest working-tree file offered for in-place editing: 2 MiB. Craft, not a
+/// format limit — a textarea in the webview stops keeping up above it, and every
+/// automatic save ships the whole text across the Tauri boundary.
+pub const EDIT_SIZE_CEILING: u64 = 2 * 1024 * 1024;
+
+static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// FNV-1a over raw bytes, rendered as sixteen hex digits. The crate's only
+/// implementation: `engine::log` fingerprints a filter's argument list with it and
+/// this module fingerprints a file's bytes, and a second copy of the loop would be a
+/// second chance to get the constants wrong.
+///
+/// A "did it change" probe, not a security boundary — a cryptographic hash would cost
+/// a crate for the same answer.
+pub(crate) fn fnv1a(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
 
 /// git backend implemented by shelling out to the system `git`.
 pub struct CliEngine {
@@ -114,6 +138,231 @@ impl CliEngine {
             }
         }
         Ok(())
+    }
+
+    /// Resolve a client-supplied path against the repository root, refusing anything
+    /// that leaves it — lexically **and** after following symlinks.
+    ///
+    /// The lexical pass alone would pass a symlink that lives inside the repository and
+    /// points outside it. The real-path pass alone cannot answer for a file that is
+    /// *missing*, which this feature has to report rather than fail on — so a missing
+    /// tail is resolved through its deepest existing ancestor. Both sides are
+    /// canonicalised before comparing: on macOS a temporary directory lives at
+    /// `/var/...` whose real path is `/private/var/...`, and comparing the two spellings
+    /// would reject perfectly ordinary paths.
+    ///
+    /// What comes back is the **resolved** path when the target exists. That is what
+    /// makes a write go *through* a symlink rather than over it: `rename` does not
+    /// follow one, so renaming onto the link's own path would replace the link with a
+    /// plain file — the very change of type the outward-pointing link is refused for.
+    fn worktree_path(&self, rel: &str) -> Result<PathBuf> {
+        use std::path::Component;
+        let outside = || Error::Rule(format!("{rel} is not a path inside the repository"));
+        if rel.is_empty() {
+            return Err(Error::Rule("no file path given".into()));
+        }
+        let candidate = Path::new(rel);
+        for c in candidate.components() {
+            match c {
+                Component::Normal(_) | Component::CurDir => {}
+                _ => return Err(outside()),
+            }
+        }
+        let joined = self.repo.join(candidate);
+        let root = std::fs::canonicalize(&self.repo)
+            .map_err(|e| Error::Io(format!("{}: {e}", self.repo.display())))?;
+
+        // The target itself: resolved, so a link is followed to what it really names.
+        if let Ok(real) = std::fs::canonicalize(&joined) {
+            return if real.starts_with(&root) {
+                Ok(real)
+            } else {
+                Err(outside())
+            };
+        }
+        // Not there yet — a component that does not exist cannot be a symlink, so the
+        // deepest existing ancestor answers the question. The path is returned
+        // unresolved: there is nothing to resolve it to.
+        let mut probe = joined.as_path();
+        loop {
+            probe = match probe.parent() {
+                Some(parent) if parent != probe => parent,
+                _ => return Err(outside()),
+            };
+            if let Ok(real) = std::fs::canonicalize(probe) {
+                return if real.starts_with(&root) {
+                    Ok(joined)
+                } else {
+                    Err(outside())
+                };
+            }
+        }
+    }
+
+    /// Read a working-tree file for in-place editing.
+    ///
+    /// Everything that makes the file unfit for editing comes back as a `blocked` key
+    /// with `text: None` — not as an error: the reason has to be shown *before* the
+    /// user reaches for the control, and a project rule says an inactive control must
+    /// carry its reason. Only a path that is not the repository's business is an error.
+    ///
+    /// `text` is the whole file, its line endings normalised to `\n` for the webview
+    /// and its trailing newline — or absence of one — left exactly as it lies on disk.
+    /// It is the single truth about the bytes: `write_text_file` converts the endings
+    /// back and writes what it is given, adding and removing nothing. `final_newline`
+    /// travels alongside as information for the UI, not as an instruction to the write.
+    pub fn read_text_file(&self, rel: &str) -> Result<TextFile> {
+        let path = self.worktree_path(rel)?;
+        let blocked = |b: EditBlock| TextFile {
+            text: None,
+            digest: String::new(),
+            eol: Eol::Lf,
+            final_newline: true,
+            blocked: Some(b),
+        };
+
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) if m.is_file() => m,
+            // A directory is as un-editable as an absent file, and for the same
+            // reason: there is no text there.
+            Ok(_) => return Ok(blocked(EditBlock::Missing)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(blocked(EditBlock::Missing))
+            }
+            Err(e) => return Err(Error::Io(format!("{rel}: {e}"))),
+        };
+        // Judged from the metadata, before reading: slurping a gigabyte only to
+        // announce it is too big is the failure this ceiling exists to avoid.
+        if meta.len() > EDIT_SIZE_CEILING {
+            return Ok(blocked(EditBlock::TooLarge));
+        }
+
+        let bytes = std::fs::read(&path).map_err(|e| Error::Io(format!("{rel}: {e}")))?;
+        // A NUL byte is what git itself calls binary, and no editor should hand it to
+        // a textarea — valid UTF-8 or not.
+        if bytes.contains(&0) {
+            return Ok(blocked(EditBlock::Binary));
+        }
+        // Validated over the slice: a copy of a two-megabyte buffer is made only once
+        // the file is known to be text, and never for a file that is not.
+        let text = match std::str::from_utf8(&bytes) {
+            Ok(t) => t,
+            Err(_) => return Ok(blocked(EditBlock::Binary)),
+        };
+
+        let crlf = text.matches("\r\n").count();
+        let lf = text.matches('\n').count();
+        let eol = match (crlf, lf) {
+            // No CRLF at all: LF, and a file with no line endings whatsoever lands
+            // here too — a one-line `VERSION` is an ordinary editable file.
+            (0, _) => Eol::Lf,
+            (c, l) if c == l => Eol::Crlf,
+            // Rewriting a mixed file would normalise every line at once and show up
+            // as a whole-file diff, so it is refused rather than silently repaired.
+            _ => return Ok(blocked(EditBlock::MixedEol)),
+        };
+        // A bare `\r` (classic Mac, or a stray one inside a CRLF file) is mixed too:
+        // it would not survive the round trip.
+        if text.bytes().filter(|&b| b == b'\r').count() != crlf {
+            return Ok(blocked(EditBlock::MixedEol));
+        }
+
+        Ok(TextFile {
+            digest: fnv1a(&bytes),
+            final_newline: text.ends_with('\n'),
+            text: Some(text.replace("\r\n", "\n")),
+            eol,
+            blocked: None,
+        })
+    }
+
+    /// Write an edited working-tree file back, and report the fingerprint of what now
+    /// lies on disk.
+    ///
+    /// **Freshness is judged first**, before every other refusal. A write that is both
+    /// stale and out of bounds is still, first of all, a file someone else changed:
+    /// reporting the other reason would leave the outside change unannounced and the
+    /// client without its "reread or overwrite" choice, which only `kind: "stale"`
+    /// triggers.
+    ///
+    /// `expect` is not optional and has one reserved value: **the empty string means
+    /// "there should be no file here"**. That is how the overwrite branch recreates a
+    /// file deleted underneath the editor — a reread of a missing file reports
+    /// `digest: ""`, and handing it back asks for exactly that state. It is unambiguous:
+    /// an existing file never fingerprints to the empty string, not even an empty one.
+    /// Every other value must match the bytes on disk, or the write is `Error::Stale`.
+    ///
+    /// Line endings in `text` are **normalised on the way in** — `\r\n`, a lone `\r` and
+    /// `\n` alike all become line breaks, and every break leaves as `eol`. A lone `\r`
+    /// arrives from a paste and, written through, would make the next read classify the
+    /// file as `mixed-eol`: the application would have locked the user out of a file it
+    /// wrote itself. Whatever this method writes, `read_text_file` can open again.
+    /// Apart from the endings the text is written verbatim: no terminator is appended
+    /// and none is removed.
+    ///
+    /// The write goes through a uniquely named temp file next to the target plus a
+    /// rename, the way `changelists.json` and `graft-ui.json` are written — an
+    /// interrupted write must not leave the file half-written. The target's permissions
+    /// are carried over: a rename would otherwise hand a 755 script the temp file's mode
+    /// and turn "one line changed" into a mode change in git.
+    pub fn write_text_file(&self, rel: &str, text: &str, eol: Eol, expect: &str) -> Result<String> {
+        let path = self.worktree_path(rel)?;
+
+        match std::fs::read(&path) {
+            Ok(current) => {
+                if expect.is_empty() {
+                    return Err(Error::Stale(format!(
+                        "{rel} is on disk again; it was expected to be absent"
+                    )));
+                }
+                if fnv1a(&current) != expect {
+                    return Err(Error::Stale(format!(
+                        "{rel} changed on disk since it was read"
+                    )));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if !expect.is_empty() {
+                    return Err(Error::Stale(format!("{rel} was deleted on disk")));
+                }
+                // Absent, and absence is what the caller expected: recreated below.
+            }
+            Err(e) => return Err(Error::Io(format!("{rel}: {e}"))),
+        }
+
+        let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
+        let bytes = match eol {
+            Eol::Lf => normalised.into_bytes(),
+            Eol::Crlf => normalised.replace('\n', "\r\n").into_bytes(),
+        };
+        // The ceiling guards the way out as well as the way in: a paste could otherwise
+        // grow a file past the size at which `read_text_file` will open it again, and
+        // the user would be locked out of the file the application itself wrote.
+        if bytes.len() as u64 > EDIT_SIZE_CEILING {
+            return Err(Error::Rule(format!(
+                "{rel} would be larger than the {} MiB editing ceiling",
+                EDIT_SIZE_CEILING / (1024 * 1024)
+            )));
+        }
+
+        let dir = path
+            .parent()
+            .ok_or_else(|| Error::Io(format!("{rel} has no parent directory")))?;
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| Error::Io(format!("{rel} has no file name")))?;
+        let n = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!(".{name}.graft.tmp.{}.{n}", std::process::id()));
+        std::fs::write(&tmp, &bytes).map_err(|e| Error::Io(format!("{rel}: {e}")))?;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let _ = std::fs::set_permissions(&tmp, meta.permissions());
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(Error::Io(format!("{rel}: {e}")));
+        }
+        Ok(fnv1a(&bytes))
     }
 
     /// Run git feeding `input` on stdin (used by `git apply`).
@@ -796,6 +1045,506 @@ pub(crate) mod tests {
         run(p, &["add", "a.txt"]);
         run(p, &["commit", "-m", "init"]);
         dir
+    }
+
+    // ---- read_text_file / write_text_file (prd_03 task 01) ----
+
+    /// The read/write round trip must be byte-identical when nothing was changed.
+    /// This is the invariant "two saves in a row" and the staleness check both rest
+    /// on: if writing back an untouched file changed a single byte, the digest the
+    /// write returns would describe a file the user never asked for.
+    #[test]
+    fn reading_and_writing_back_leaves_the_bytes_alone() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("t.txt"), "one\ntwo\nthree\n").unwrap();
+        let eng = CliEngine::new(p);
+
+        let f = eng.read_text_file("t.txt").unwrap();
+        assert_eq!(f.blocked, None);
+        assert_eq!(f.text.as_deref(), Some("one\ntwo\nthree\n"));
+        assert_eq!(f.eol, Eol::Lf);
+        assert!(f.final_newline);
+
+        let d = eng
+            .write_text_file("t.txt", f.text.as_deref().unwrap(), f.eol, &f.digest)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(p.join("t.txt")).unwrap(),
+            b"one\ntwo\nthree\n".to_vec()
+        );
+        assert_eq!(d, f.digest, "unchanged bytes must fingerprint the same");
+    }
+
+    #[test]
+    fn an_edit_reaches_the_file() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("t.txt"), "one\ntwo\n").unwrap();
+        let eng = CliEngine::new(p);
+        let f = eng.read_text_file("t.txt").unwrap();
+        eng.write_text_file("t.txt", "one\nTWO\n", f.eol, &f.digest)
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("t.txt")).unwrap(),
+            "one\nTWO\n"
+        );
+    }
+
+    /// Scenario "Two saves in a row": the second save uses the digest the first
+    /// returned, and succeeds — the file on disk is the application's own write.
+    #[test]
+    fn two_saves_in_a_row_succeed() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("t.txt"), "one\n").unwrap();
+        let eng = CliEngine::new(p);
+        let f = eng.read_text_file("t.txt").unwrap();
+        let d1 = eng
+            .write_text_file("t.txt", "two\n", f.eol, &f.digest)
+            .unwrap();
+        let d2 = eng
+            .write_text_file("t.txt", "three\n", f.eol, &d1)
+            .expect("second save must not be refused as stale");
+        assert_ne!(d1, d2);
+        assert_eq!(std::fs::read_to_string(p.join("t.txt")).unwrap(), "three\n");
+    }
+
+    /// Scenario "File changed by another program". The refusal is asserted through
+    /// the *serialization* — that is the seam the client branches on; matching the
+    /// prose would break on the first rewording or translation.
+    #[test]
+    fn a_stale_digest_is_refused_and_the_file_is_untouched() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("t.txt"), "one\n").unwrap();
+        let eng = CliEngine::new(p);
+        let f = eng.read_text_file("t.txt").unwrap();
+        std::fs::write(p.join("t.txt"), "changed by someone else\n").unwrap();
+
+        let err = eng
+            .write_text_file("t.txt", "mine\n", f.eol, &f.digest)
+            .expect_err("a write over an outside change must be refused");
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["kind"], "stale");
+        assert_eq!(
+            std::fs::read_to_string(p.join("t.txt")).unwrap(),
+            "changed by someone else\n",
+            "a refused write must not touch the file"
+        );
+    }
+
+    /// Scenario "A file with CRLF endings": editing one line leaves every other
+    /// ending as it was.
+    #[test]
+    fn crlf_endings_survive_an_edit() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("w.txt"), "one\r\ntwo\r\nthree\r\n").unwrap();
+        let eng = CliEngine::new(p);
+        let f = eng.read_text_file("w.txt").unwrap();
+        assert_eq!(f.eol, Eol::Crlf);
+        assert_eq!(f.text.as_deref(), Some("one\ntwo\nthree\n"));
+        assert!(f.final_newline);
+
+        eng.write_text_file("w.txt", "one\nTWO\nthree\n", f.eol, &f.digest)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(p.join("w.txt")).unwrap(),
+            b"one\r\nTWO\r\nthree\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_file_without_a_final_newline_keeps_none() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("t.txt"), "one\ntwo").unwrap();
+        let eng = CliEngine::new(p);
+        let f = eng.read_text_file("t.txt").unwrap();
+        assert!(!f.final_newline);
+        assert_eq!(f.text.as_deref(), Some("one\ntwo"));
+        eng.write_text_file("t.txt", "one\nTWO", f.eol, &f.digest)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(p.join("t.txt")).unwrap(),
+            b"one\nTWO".to_vec()
+        );
+    }
+
+    /// Scenario "Mixed line endings".
+    #[test]
+    fn mixed_line_endings_block_editing() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("m.txt"), "one\r\ntwo\nthree\r\n").unwrap();
+        let f = CliEngine::new(p).read_text_file("m.txt").unwrap();
+        assert_eq!(f.blocked, Some(EditBlock::MixedEol));
+        assert_eq!(f.text, None);
+    }
+
+    /// Scenario "Binary file".
+    #[test]
+    fn a_non_utf8_file_blocks_editing() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("b.bin"), [0x00, 0xff, 0xfe, b'a']).unwrap();
+        let f = CliEngine::new(p).read_text_file("b.bin").unwrap();
+        assert_eq!(f.blocked, Some(EditBlock::Binary));
+        assert_eq!(f.text, None);
+    }
+
+    /// Scenario "File above the size ceiling".
+    #[test]
+    fn a_file_above_the_ceiling_blocks_editing() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(
+            p.join("big.txt"),
+            vec![b'x'; EDIT_SIZE_CEILING as usize + 1],
+        )
+        .unwrap();
+        let f = CliEngine::new(p).read_text_file("big.txt").unwrap();
+        assert_eq!(f.blocked, Some(EditBlock::TooLarge));
+        assert_eq!(f.text, None);
+    }
+
+    /// Scenario "File no longer on disk".
+    #[test]
+    fn a_missing_file_blocks_editing() {
+        let dir = scratch_repo();
+        let f = CliEngine::new(dir.path())
+            .read_text_file("gone.txt")
+            .unwrap();
+        assert_eq!(f.blocked, Some(EditBlock::Missing));
+        assert_eq!(f.text, None);
+    }
+
+    /// Project rule: the command takes a path from the client, so `..`, an absolute
+    /// path and a path that leaves the repository root are all refused — on read and
+    /// on write alike.
+    #[test]
+    fn a_path_outside_the_repository_is_refused() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let eng = CliEngine::new(p);
+        for bad in ["../outside.txt", "sub/../../outside.txt", "/etc/hosts"] {
+            let e = eng
+                .read_text_file(bad)
+                .err()
+                .unwrap_or_else(|| panic!("read of {bad} must be refused"));
+            assert_eq!(serde_json::to_value(&e).unwrap()["kind"], "rule");
+            let e = eng
+                .write_text_file(bad, "x\n", Eol::Lf, "")
+                .err()
+                .unwrap_or_else(|| panic!("write of {bad} must be refused"));
+            assert_eq!(serde_json::to_value(&e).unwrap()["kind"], "rule");
+        }
+    }
+
+    /// A write leaves no leftovers next to the file: the temp name is unique per
+    /// call and always renamed away.
+    #[test]
+    fn a_write_leaves_no_temp_file_behind() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join("sub")).unwrap();
+        std::fs::write(p.join("sub/t.txt"), "one\n").unwrap();
+        let eng = CliEngine::new(p);
+        let f = eng.read_text_file("sub/t.txt").unwrap();
+        eng.write_text_file("sub/t.txt", "two\n", f.eol, &f.digest)
+            .unwrap();
+        let names: Vec<_> = std::fs::read_dir(p.join("sub"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["t.txt".to_string()]);
+    }
+
+    /// `text` is the whole truth about the bytes: whatever tail it carries is written
+    /// verbatim, and nothing is appended or trimmed on the way. Both directions are
+    /// checked here — a tail grown by a blank line, and a tail that is not there.
+    #[test]
+    fn the_tail_of_the_text_is_written_verbatim() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let eng = CliEngine::new(p);
+        for (on_disk, typed) in [
+            ("one\ntwo", "one\ntwo\n\n"),
+            ("one\ntwo\n", "one\ntwo"),
+            ("one\ntwo\n", "one\ntwo\n\n\n"),
+        ] {
+            std::fs::write(p.join("t.txt"), on_disk).unwrap();
+            let f = eng.read_text_file("t.txt").unwrap();
+            assert_eq!(
+                f.text.as_deref(),
+                Some(on_disk),
+                "read gives back the tail too"
+            );
+            let d = eng
+                .write_text_file("t.txt", typed, f.eol, &f.digest)
+                .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(p.join("t.txt")).unwrap(),
+                typed,
+                "the file holds exactly the text it was handed"
+            );
+            let again = eng.read_text_file("t.txt").unwrap();
+            assert_eq!(
+                again.text.as_deref(),
+                Some(typed),
+                "a reread agrees with the write"
+            );
+            assert_eq!(again.digest, d);
+        }
+    }
+
+    /// A rename hands the target the temp file's mode unless it is carried over, and
+    /// a 755 script silently losing its exec bit turns "one line changed" into a mode
+    /// change in git.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_keeps_the_files_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_repo();
+        let p = dir.path();
+        let f = p.join("run.sh");
+        std::fs::write(&f, "echo one\n").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let eng = CliEngine::new(p);
+        let t = eng.read_text_file("run.sh").unwrap();
+        eng.write_text_file("run.sh", "echo two\n", t.eol, &t.digest)
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    /// A symlink living inside the repository but pointing outside it passes every
+    /// lexical check. Reading it would show a file the repository does not contain, and
+    /// writing it would additionally replace the link with a plain file, because
+    /// `rename` does not follow one.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_that_leaves_the_repository_is_refused() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().join("outside.txt");
+        std::fs::write(&outside, "not ours\n").unwrap();
+        std::os::unix::fs::symlink(&outside, p.join("link.txt")).unwrap();
+        let eng = CliEngine::new(p);
+
+        let e = eng
+            .read_text_file("link.txt")
+            .expect_err("read must be refused");
+        assert_eq!(serde_json::to_value(&e).unwrap()["kind"], "rule");
+        let e = eng
+            .write_text_file("link.txt", "mine\n", Eol::Lf, "")
+            .expect_err("write must be refused");
+        assert_eq!(serde_json::to_value(&e).unwrap()["kind"], "rule");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "not ours\n");
+        assert!(
+            std::fs::symlink_metadata(p.join("link.txt"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself must survive a refused write"
+        );
+    }
+
+    /// A deletion is an outside change like any other, so it has to arrive at the same
+    /// seam: the client offers "reread or overwrite" on `kind: "stale"` alone.
+    #[test]
+    fn a_file_deleted_under_us_is_stale_not_io() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("t.txt"), "one\n").unwrap();
+        let eng = CliEngine::new(p);
+        let f = eng.read_text_file("t.txt").unwrap();
+        std::fs::remove_file(p.join("t.txt")).unwrap();
+        let e = eng
+            .write_text_file("t.txt", "mine\n", f.eol, &f.digest)
+            .expect_err("writing over a deleted file must be refused");
+        assert_eq!(serde_json::to_value(&e).unwrap()["kind"], "stale");
+    }
+
+    /// The ceiling guards the way out too: growing a file past it would leave a file the
+    /// reader refuses to reopen, written by the application itself.
+    #[test]
+    fn a_write_above_the_ceiling_is_refused() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("t.txt"), "one\n").unwrap();
+        let eng = CliEngine::new(p);
+        let f = eng.read_text_file("t.txt").unwrap();
+        let huge = "x".repeat(EDIT_SIZE_CEILING as usize + 1);
+        let e = eng
+            .write_text_file("t.txt", &huge, f.eol, &f.digest)
+            .expect_err("a write past the ceiling must be refused");
+        assert_eq!(serde_json::to_value(&e).unwrap()["kind"], "rule");
+        assert_eq!(std::fs::read_to_string(p.join("t.txt")).unwrap(), "one\n");
+    }
+
+    /// The two dimensions crossed: CRLF endings and no terminator on the last line.
+    #[test]
+    fn crlf_without_a_final_newline_survives() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("w.txt"), "one\r\ntwo").unwrap();
+        let eng = CliEngine::new(p);
+        let f = eng.read_text_file("w.txt").unwrap();
+        assert_eq!(f.eol, Eol::Crlf);
+        assert!(!f.final_newline);
+        assert_eq!(f.text.as_deref(), Some("one\ntwo"));
+        eng.write_text_file("w.txt", "one\nTWO", f.eol, &f.digest)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(p.join("w.txt")).unwrap(),
+            b"one\r\nTWO".to_vec()
+        );
+    }
+
+    /// A file with no line endings at all — a one-line `VERSION` — has nothing to be
+    /// inconsistent about and must not be mistaken for mixed endings.
+    #[test]
+    fn a_file_with_no_line_endings_is_editable() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("VERSION"), "1.2.3").unwrap();
+        let eng = CliEngine::new(p);
+        let f = eng.read_text_file("VERSION").unwrap();
+        assert_eq!(f.blocked, None);
+        assert_eq!(f.eol, Eol::Lf);
+        assert!(!f.final_newline);
+        eng.write_text_file("VERSION", "1.2.4", f.eol, &f.digest)
+            .unwrap();
+        assert_eq!(std::fs::read(p.join("VERSION")).unwrap(), b"1.2.4".to_vec());
+    }
+
+    /// The overwrite branch after an outside deletion: a reread reports `missing` with
+    /// an empty digest, and handing that digest back means "there should be no file
+    /// here" — which is what recreates it with the typed text.
+    #[test]
+    fn an_empty_expect_recreates_a_deleted_file() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("t.txt"), "one\n").unwrap();
+        let eng = CliEngine::new(p);
+        let f = eng.read_text_file("t.txt").unwrap();
+        std::fs::remove_file(p.join("t.txt")).unwrap();
+
+        let after = eng.read_text_file("t.txt").unwrap();
+        assert_eq!(after.blocked, Some(EditBlock::Missing));
+        assert_eq!(after.digest, "");
+
+        let d = eng
+            .write_text_file("t.txt", "typed\n", f.eol, &after.digest)
+            .expect("overwriting a deleted file must recreate it");
+        assert_eq!(std::fs::read_to_string(p.join("t.txt")).unwrap(), "typed\n");
+        assert_eq!(eng.read_text_file("t.txt").unwrap().digest, d);
+    }
+
+    /// The empty digest is a claim about the file's absence, not a way to skip the
+    /// probe: a file that came back is an outside change like any other.
+    #[test]
+    fn an_empty_expect_is_refused_when_the_file_exists() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("t.txt"), "someone else\n").unwrap();
+        let e = CliEngine::new(p)
+            .write_text_file("t.txt", "mine\n", Eol::Lf, "")
+            .expect_err("a present file must not be overwritten by an absence claim");
+        assert_eq!(serde_json::to_value(&e).unwrap()["kind"], "stale");
+        assert_eq!(
+            std::fs::read_to_string(p.join("t.txt")).unwrap(),
+            "someone else\n"
+        );
+    }
+
+    /// A write that is both stale and out of bounds is first of all a file someone else
+    /// changed: only `kind: "stale"` gives the client its "reread or overwrite" choice,
+    /// so reporting the other reason would leave the outside change unannounced.
+    #[test]
+    fn staleness_is_judged_before_the_ceiling() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("t.txt"), "one\n").unwrap();
+        let eng = CliEngine::new(p);
+        let f = eng.read_text_file("t.txt").unwrap();
+        std::fs::write(p.join("t.txt"), "changed by someone else\n").unwrap();
+
+        let huge = "x".repeat(EDIT_SIZE_CEILING as usize + 1);
+        let e = eng
+            .write_text_file("t.txt", &huge, f.eol, &f.digest)
+            .expect_err("both refusals apply");
+        assert_eq!(
+            serde_json::to_value(&e).unwrap()["kind"],
+            "stale",
+            "the outside change must be the reason the client hears"
+        );
+    }
+
+    /// A symlink whose target is inside the repository is written *through*: `rename`
+    /// does not follow one, so renaming onto the link's own path would swap the link for
+    /// a plain file — a change of type in git, from an edit of one line.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_goes_through_a_symlink_inside_the_repository() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join("real")).unwrap();
+        std::fs::write(p.join("real/t.txt"), "one\n").unwrap();
+        std::os::unix::fs::symlink(p.join("real/t.txt"), p.join("link.txt")).unwrap();
+        let eng = CliEngine::new(p);
+
+        let f = eng.read_text_file("link.txt").unwrap();
+        assert_eq!(f.blocked, None);
+        eng.write_text_file("link.txt", "two\n", f.eol, &f.digest)
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(p.join("real/t.txt")).unwrap(),
+            "two\n",
+            "the target holds the new text"
+        );
+        assert!(
+            std::fs::symlink_metadata(p.join("link.txt"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link must still be a link"
+        );
+    }
+
+    /// The invariant: a file the application just wrote is a file the application can
+    /// open again. A lone `\r` arrives from a paste, and written through it would make
+    /// the next read call the file `mixed-eol`.
+    #[test]
+    fn a_pasted_lone_carriage_return_does_not_lock_the_file() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        for (eol, on_disk, expect_bytes) in [
+            (Eol::Lf, "one\n", b"one\ntwo\nthree\n".to_vec()),
+            (Eol::Crlf, "one\r\n", b"one\r\ntwo\r\nthree\r\n".to_vec()),
+        ] {
+            std::fs::write(p.join("t.txt"), on_disk).unwrap();
+            let eng = CliEngine::new(p);
+            let f = eng.read_text_file("t.txt").unwrap();
+            assert_eq!(f.eol, eol);
+            // What a paste from a classic-Mac source looks like.
+            eng.write_text_file("t.txt", "one\rtwo\r\nthree\n", f.eol, &f.digest)
+                .unwrap();
+            assert_eq!(std::fs::read(p.join("t.txt")).unwrap(), expect_bytes);
+
+            let again = eng.read_text_file("t.txt").unwrap();
+            assert_eq!(
+                again.blocked, None,
+                "the application must reopen its own write"
+            );
+            assert_eq!(again.text.as_deref(), Some("one\ntwo\nthree\n"));
+        }
     }
 
     #[test]

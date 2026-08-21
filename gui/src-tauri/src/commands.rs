@@ -10,8 +10,9 @@ use crate::engine::GitEngine;
 use crate::error::{Error, Result};
 use crate::engine::{branches, commit as commit_engine, log as log_engine, ops};
 use crate::model::{
-    BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, FileDiff, FileState,
-    FileStatus, LogCursor, LogFilter, LogPage, RepoState, StashEntry, UiState,
+    BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, Eol, FileDiff,
+    FileState, FileStatus, FileWritten, LogCursor, LogFilter, LogPage, RepoState, StashEntry,
+    TextFile, UiState,
 };
 use crate::uistate;
 
@@ -197,6 +198,35 @@ pub async fn diff_file(
     context: Option<u32>,
 ) -> Result<FileDiff> {
     CliEngine::new(state.repo_path()?).diff_file(&path, &against, &whitespace, context)
+}
+
+/// Read a working-tree file for in-place editing. Read-only, own type — the frontend
+/// drives it with `createResource` + `refetch`.
+#[tauri::command]
+pub async fn file_read(state: State<'_, AppState>, path: String) -> Result<TextFile> {
+    CliEngine::new(state.repo_path()?).read_text_file(&path)
+}
+
+/// Write an edited working-tree file back.
+///
+/// The one mutation of this project that does **not** return `RepoState` and does not
+/// go through `run()`: it fires on every pause in typing, and republishing global
+/// state that often would flicker the toolbar busy and re-lay out the panel under the
+/// caret. It reports the new digest instead; the client replaces its previous one with
+/// it, or its own next save would be refused as stale.
+///
+/// `text` is written as given, endings converted to `eol`: there is no `finalNewline`
+/// argument, because the trailing newline is part of the text the editor holds.
+#[tauri::command]
+pub async fn file_write(
+    state: State<'_, AppState>,
+    path: String,
+    text: String,
+    eol: Eol,
+    expect: String,
+) -> Result<FileWritten> {
+    let digest = CliEngine::new(state.repo_path()?).write_text_file(&path, &text, eol, &expect)?;
+    Ok(FileWritten { digest })
 }
 
 #[tauri::command]

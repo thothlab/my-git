@@ -81,12 +81,7 @@ fn tip(repo: &Path, filter: &LogFilter) -> Result<Option<String>> {
 /// another. FNV-1a over the very argument list that produced the page — a filter
 /// field that changes nothing in the query changes nothing here either.
 fn fingerprint(filter: &LogFilter) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in filter_args(filter).join("\u{1}").bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{h:016x}")
+    super::cli::fnv1a(filter_args(filter).join("\u{1}").as_bytes())
 }
 
 fn cursor_header(repo: &Path, filter: &LogFilter) -> Result<String> {
