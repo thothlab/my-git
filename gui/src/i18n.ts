@@ -435,6 +435,28 @@ const en = {
     `${n} hidden lines is past the ${max} this panel expands: git would widen every hunk of the file at once. Open the file itself to read that region.`,
   expandTooLarge: (n: number, max: number) =>
     `With that region revealed the patch comes back at ${n} lines, past the ${max} this panel draws: git widens every hunk of the file at once. The diff is left as it was. Open the file itself to read that region.`,
+  // Editing the working-tree side. The ceiling named below mirrors
+  // `EDIT_SIZE_CEILING` in `engine/cli.rs` (2 MiB).
+  editToggle: () => "Edit",
+  editToggleTip: () => "Edit this file in the right column",
+  editOffUnified: () => "Editing is offered in the side-by-side view.",
+  editOffReadOnly: () =>
+    "The right side is a revision, not the working tree, so it cannot be edited.",
+  editOffLoading: () => "Reading the file…",
+  editOffBinary: () => "This file is not text.",
+  editOffTooLarge: () => "The file is larger than 2 MiB, the ceiling for editing here.",
+  editOffMixedEol: () =>
+    "The file mixes CRLF and LF line endings; editing it here would rewrite every line of it.",
+  editOffMissing: () => "The file is no longer on disk.",
+  editUnsaved: () => "unsaved",
+  editUnsavedTip: () => "What was typed has not reached the file yet.",
+  editSaveTip: () => "Cmd/Ctrl+S writes the file and recomputes the comparison",
+  editStaleAsk: () =>
+    "The file changed on disk after it was opened here. Reread it from disk, or overwrite it with the text you typed?",
+  editStaleReread: () => "Reread from disk (the typed text is lost)",
+  editStaleOverwrite: () => "Overwrite with the typed text",
+  hunkEditTip: () =>
+    "The comparison on screen was not computed from the file as it is now. Finish editing to stage or revert.",
 };
 
 type Dict = typeof en;
@@ -832,6 +854,26 @@ const ru: Dict = {
     `${n} скрытых строк - больше потолка в ${max}: git расширил бы все хунки файла разом. Чтобы прочитать этот участок, откройте сам файл.`,
   expandTooLarge: (n, max) =>
     `С раскрытым участком патч приходит на ${n} строк - больше потолка в ${max}, который панель рисует: git расширяет все хунки файла разом. Diff оставлен как был. Чтобы прочитать этот участок, откройте сам файл.`,
+  editToggle: () => "Правка",
+  editToggleTip: () => "Править этот файл в правой колонке",
+  editOffUnified: () => "Правка предлагается в двухколоночном виде.",
+  editOffReadOnly: () =>
+    "Справа ревизия, а не рабочее дерево - её нельзя править.",
+  editOffLoading: () => "Читаем файл…",
+  editOffBinary: () => "Файл не текстовый.",
+  editOffTooLarge: () => "Файл больше 2 МиБ - потолка для правки здесь.",
+  editOffMixedEol: () =>
+    "В файле смешаны переводы строк CRLF и LF; правка переписала бы все его строки.",
+  editOffMissing: () => "Файла больше нет на диске.",
+  editUnsaved: () => "не сохранено",
+  editUnsavedTip: () => "Набранное ещё не дошло до файла.",
+  editSaveTip: () => "Cmd/Ctrl+S записывает файл и пересчитывает сравнение",
+  editStaleAsk: () =>
+    "Файл на диске изменился после того, как его здесь открыли. Перечитать его с диска или перезаписать набранным текстом?",
+  editStaleReread: () => "Перечитать с диска (набранное будет потеряно)",
+  editStaleOverwrite: () => "Перезаписать набранным",
+  hunkEditTip: () =>
+    "Diff на экране посчитан не по текущему файлу. Закончите правку, чтобы ставить в индекс или откатывать.",
 };
 
 /** Current locale's dictionary. Reactive: reads the `locale` signal. */

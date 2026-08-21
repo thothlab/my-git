@@ -44,11 +44,29 @@ await build({
   logLevel: "warning",
 });
 
+// Its own call: esbuild puts outputs under the common base of an entry-point
+// list, so bundling this one together with `pathTree.ts` would write it to
+// `diff/editRules.js` and the loader below would not find it.
+await build({
+  entryPoints: [join(here, "..", "src", "components", "diff", "editRules.ts")],
+  outdir: out,
+  format: "esm",
+  logLevel: "warning",
+});
+
 const load = (name) => import(pathToFileURL(join(out, name)).href);
 const { compilePattern, spansIn, matchesCommit } = await load("searchPattern.js");
 const { asInputDate, dayStart, dayEnd, startOfToday, relativeToRepo, toSlash } =
   await load("filterValues.js");
 const { baseName, buildFileTree, countFiles, treeDirPaths } = await load("pathTree.js");
+const {
+  editAvailability,
+  draftReduce,
+  draftDirty,
+  draftShouldWrite,
+  countLines,
+  lineStartOffset,
+} = await load("editRules.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -139,6 +157,62 @@ const held = buildFileTree(files("a/keep.ts", "a/b/c.ts"));
 eq(treeDirPaths(held), ["a", "a/b"], "a directory with a file of its own does not merge away");
 eq(baseName("a/b/c.ts"), "c.ts", "base name of a nested path");
 eq(baseName("top.ts"), "top.ts", "base name of a bare name");
+
+// -- When editing the right side is offered (prd_03) ---------------------------
+// The three conditions of the PRD, written out by hand: side-by-side view, the
+// right side is the working tree (`sideLabels(...).right.readOnly === false`),
+// and the file came back editable. A reason key, never a bare `false`.
+const cond = (o) => editAvailability({ split: true, readOnly: false, loading: false, blocked: null, ...o });
+eq(cond({}), null, "all three conditions met: editing is offered");
+eq(cond({ split: false }), "unified", "unified view names itself as the reason");
+eq(cond({ readOnly: true }), "read-only", "a revision on the right cannot be edited");
+eq(cond({ loading: true }), "loading", "the file has not been read yet");
+eq(cond({ blocked: "binary" }), "binary", "a blocked file reports the backend's own key");
+eq(cond({ blocked: "too-large" }), "too-large", "...including the size ceiling");
+eq(cond({ split: false, blocked: "binary" }), "unified", "the nearest reason wins over a later one");
+eq(cond({ readOnly: true, loading: true }), "read-only", "read-only is judged before the read");
+
+// -- The draft between the keyboard and the disk -------------------------------
+// The trace that earns its keep is the last one: typing *while a write is in
+// flight* must leave the draft dirty when that write lands, or the second
+// automatic save never happens and the last words typed stay in the window only
+// (PRD §Риски, "вторая автозапись подряд").
+const trace = (...events) => events.reduce(draftReduce, { text: "", saved: "", writing: null });
+const opened = trace({ kind: "synced", text: "a" });
+eq(opened, { text: "a", saved: "a", writing: null }, "opening a file leaves nothing unsaved");
+eq(draftDirty(opened), false, "...and nothing to write");
+const typed = draftReduce(opened, { kind: "type", text: "ab" });
+eq(draftDirty(typed), true, "a keystroke is unsaved at once");
+eq(draftShouldWrite(typed), true, "...and is something to write");
+const sent = draftReduce(typed, { kind: "sent" });
+eq(draftShouldWrite(sent), false, "a write in flight is never doubled");
+eq(draftDirty(sent), true, "...while the disk still has the old text");
+const typedAgain = draftReduce(sent, { kind: "type", text: "abc" });
+eq(draftShouldWrite(typedAgain), false, "typing during a write still waits for it");
+const landed = draftReduce(typedAgain, { kind: "ok" });
+eq(landed, { text: "abc", saved: "ab", writing: null }, "the write marks clean what it sent, not what is typed now");
+eq(draftShouldWrite(landed), true, "so the characters typed meanwhile are written next");
+const settled = draftReduce(draftReduce(landed, { kind: "sent" }), { kind: "ok" });
+eq(draftDirty(settled), false, "two writes in a row settle the draft");
+const refused = draftReduce(draftReduce(typed, { kind: "sent" }), { kind: "fail" });
+eq(refused, { text: "ab", saved: "a", writing: null }, "a failed write keeps the typed text and the old disk state");
+eq(draftShouldWrite(refused), true, "...and the text is still waiting to be written");
+eq(draftReduce(typed, { kind: "ok" }), { text: "ab", saved: "a", writing: null }, "an answer with nothing in flight moves nothing");
+eq(draftReduce(typed, { kind: "synced", text: "z" }), { text: "z", saved: "z", writing: null }, "rereading from disk replaces the draft");
+
+// -- Text measurements the editor draws by ------------------------------------
+// A textarea puts the caret on the empty line after a trailing newline, so that
+// line is drawn and has to be numbered.
+eq(countLines(""), 1, "an empty file is one line");
+eq(countLines("a"), 1, "one line without a terminator");
+eq(countLines("a\n"), 2, "a trailing newline opens a line of its own");
+eq(countLines("a\nb"), 2, "two lines, no terminator");
+eq(countLines("a\n\nb\n"), 4, "blank lines are counted");
+eq(lineStartOffset("a\nbb\nc", 1), 0, "the first line starts at the beginning");
+eq(lineStartOffset("a\nbb\nc", 2), 2, "past the first newline");
+eq(lineStartOffset("a\nbb\nc", 3), 5, "past the second");
+eq(lineStartOffset("a\nbb\nc", 9), 6, "a line the draft no longer has clamps to the end");
+eq(lineStartOffset("", 3), 0, "an empty draft has one offset");
 
 await rm(out, { recursive: true, force: true });
 console.log(failed === 0 ? `\nall green (${process.env.TZ ?? "local"} time zone)` : `\n${failed} FAILED`);

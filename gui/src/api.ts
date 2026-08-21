@@ -47,7 +47,7 @@ export interface RepoState {
 // Error shape returned by Rust commands (see error.rs). Always carries a message;
 // git failures also carry the underlying stderr.
 export interface BackendError {
-  kind: "git" | "io" | "parse" | "rule";
+  kind: "git" | "io" | "parse" | "rule" | "stale";
   message: string;
   stderr?: string | null;
 }
@@ -451,3 +451,48 @@ export const branchUpdate = (name: string) =>
 export const uiStateGet = () => invoke<UiState>("ui_state_get");
 /** Rust parameter is named `ui`: `state` is taken by Tauri's managed state. */
 export const uiStateSet = (ui: UiState) => invoke<UiState>("ui_state_set", { ui });
+
+// in-place editing of a working-tree file (prd_03)
+
+/** Line endings of the file as they lie on disk; `file_write` takes it back so
+ *  the text the webview edited in `\n` is restored to what the file had. */
+export type Eol = "lf" | "crlf";
+/** Why a working-tree file cannot be edited in place. A machine key: the message
+ *  is assembled from both `i18n` dictionaries, unlike an `Error::Rule` text. */
+export type EditBlock = "binary" | "too-large" | "mixed-eol" | "missing";
+
+export interface TextFile {
+  /** Content with line endings normalised to `\n`; `null` when `blocked`. */
+  text: string | null;
+  /** Fingerprint of the bytes as they lie on disk; `""` when `blocked`. */
+  digest: string;
+  eol: Eol;
+  /** Information for the UI. The write does **not** derive the tail from it —
+   *  `text` already carries its own trailing newline, or carries none. */
+  finalNewline: boolean;
+  blocked: EditBlock | null;
+}
+
+export interface FileWritten {
+  /** Fingerprint of what now lies on disk. The client **must** replace its
+   *  previous digest with it, or its own next write would look stale. */
+  digest: string;
+}
+
+export const fileRead = (path: string) => invoke<TextFile>("file_read", { path });
+
+/** Write `text` back to `path`, refusing when the bytes on disk no longer
+ *  fingerprint to `expect`. `expect: ""` means "the file must not be there" and
+ *  creates it — which is how "overwrite" recreates a file deleted underneath. */
+export const fileWrite = (path: string, text: string, eol: Eol, expect: string) =>
+  invoke<FileWritten>("file_write", { path, text, eol, expect });
+
+/**
+ * Is this failure the one the user can answer — the file changed underneath?
+ *
+ * Keyed on `kind` and on nothing else. Matching the prose would look like it
+ * works on a hand check and break on the first rewording, translation included,
+ * and the branch behind it is real: the user is offered a choice of two actions.
+ */
+export const isStaleError = (e: unknown): boolean =>
+  !!e && typeof e === "object" && (e as Partial<BackendError>).kind === "stale";

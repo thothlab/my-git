@@ -12,6 +12,8 @@ import {
   commitFileDiff,
   commitsCompareDiff,
   diffFile,
+  errText,
+  fileRead,
   hunkRevert,
   hunkStage,
   hunkUnstage,
@@ -20,9 +22,10 @@ import {
   type FileDiff,
   type Hunk,
   type RepoState,
+  type TextFile,
   type WhitespaceMode,
 } from "../api";
-import { confirmAction, run, selectedPath } from "../store";
+import { confirmAction, modalOpen, refresh, run, selectedPath } from "../store";
 import { d } from "../i18n";
 import { beginDrag } from "./Resizer";
 import { registerHotkey } from "../hotkeys";
@@ -31,6 +34,7 @@ import {
   FOLD_CONTEXT,
   buildView,
   pairChanged,
+  sameDiffSource,
   sideLabels,
   wordSegments,
   type DiffSource,
@@ -39,6 +43,25 @@ import {
   type Row,
   type SideLabel,
 } from "./diff/model";
+import {
+  countLines,
+  editAvailability,
+  lineStartOffset,
+  type EditUnavailable,
+} from "./diff/editRules";
+import {
+  blockText,
+  closeEditor,
+  editorBlocked,
+  editorDirty,
+  editorOpen,
+  editorPath,
+  editorText,
+  flushPending,
+  openEditor,
+  saveNow,
+  setEditorText,
+} from "./diff/editState";
 import { DISABLED_CLASS } from "./IconButton";
 
 export type { DiffSource, HighlightMode } from "./diff/model";
@@ -118,6 +141,18 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
 
   const [base, setBase] = createSignal<DiffBase>("worktree");
   const [split, setSplit] = createSignal(true);
+  /** The editing surface holds the caret. Drives what the panel gives back to
+   *  it — see the arrow shortcuts below. */
+  const [editorFocused, setEditorFocused] = createSignal(false);
+  /**
+   * The comparison on screen was not computed from the file as it now is.
+   *
+   * Judged by the freshness of the diff, not by the cleanliness of the draft:
+   * an automatic save leaves the draft clean and deliberately does *not*
+   * recompute, and hunk actions that came back then would apply a patch matched
+   * by content against a file that no longer has it.
+   */
+  const [editStale, setEditStale] = createSignal(false);
   const [ws, setWsSig] = createSignal<WhitespaceMode>(readWs());
   const [hl, setHlSig] = createSignal<HighlightMode>(readHl());
   const setWs = (m: WhitespaceMode) => {
@@ -203,6 +238,10 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
 
   const act = async (fn: () => Promise<RepoState>) => {
     await run(fn());
+    // The request did not change — the *file* did. Without dropping the key the
+    // answer that comes back is refused as "already drawn" and the panel keeps
+    // showing the patch from before the hunk was staged.
+    dropAccepted();
     refetch();
   };
 
@@ -249,6 +288,32 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
   const [shown, setShown] = createSignal<FileDiff | null>(null);
   /** Request identity of the accepted payload, and what it cost to draw. */
   let acceptedKey: string | null = null;
+  /**
+   * Forget which payload is on screen, so the next one is published even though
+   * the request that asked for it is word for word the one already accepted.
+   *
+   * Belongs beside the field it clears: the effect below refuses a payload whose
+   * request it has already drawn, and that is right for a repeated request and
+   * wrong for every path that changed the file underneath — staging, reverting,
+   * and saving an edit alike.
+   */
+  const dropAccepted = () => {
+    acceptedKey = null;
+    fileChanged = true;
+  };
+  /**
+   * The next payload is published because the *file* moved, not because the
+   * reader did.
+   *
+   * It matters which of the two it is. A payload arriving on a new source or a
+   * wider context is met by the reset effect below, which throws the reading
+   * position away wholesale — right, because the reader went somewhere else.
+   * This one has to be reconciled instead: the reader has not moved, and
+   * discarding where they were reading would be worse than the staleness. What
+   * cannot survive is anything that counts or points at rows: the differences
+   * were renumbered by the change, and the anchored elements are detached.
+   */
+  let fileChanged = false;
   let acceptedContext: number | undefined = undefined;
   let acceptedRevealed: GapRange[] = [];
   let drawnLines = 0;
@@ -311,7 +376,20 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     acceptedContext = ctx;
     acceptedRevealed = untrack(revealed);
     drawnLines = got;
+    if (!fileChanged) return setShown(f);
+    fileChanged = false;
+    // Before publishing: the entries are elements of the rows about to be
+    // replaced, and the `ref` callbacks of the new ones refill the map. Cleared
+    // afterwards, it would be the fresh entries that got thrown away and every
+    // jump to a difference would scroll nowhere without saying so.
+    anchors.clear();
     setShown(f);
+    // The count comes from the payload just published, so the pointer is
+    // clamped against the list that exists rather than the one it was chosen
+    // in: a file whose last difference was just staged has fewer, and "that was
+    // the last one" is otherwise answered about differences still above.
+    const count = untrack(view)?.count ?? 0;
+    setCurrent((c) => (c < 0 ? -1 : Math.min(c, count - 1)));
   });
 
 
@@ -392,12 +470,33 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
   // Standalone (Changes mode) the panel is not in the focus cycle, so its
   // navigation needs application shortcuts. Hosted, the panel's own handlers
   // carry them and a second registration would throw.
+  //
+  // While the editor holds the caret the two are given back: on macOS Cmd+Up /
+  // Cmd+Down are the ends of the text, and the caret wins. Suppression has to be
+  // an unregistration rather than a check inside the handler — the keyboard
+  // layer calls `preventDefault()` on a match before running anything, so a
+  // handler that declined would still have eaten the keystroke. Re-registration
+  // is the effect re-running: Solid disposes the previous run first, and the
+  // `onCleanup` inside `registerHotkey` goes with it.
   if (!hosted) {
-    registerHotkey("ArrowDown", () => api.next());
-    registerHotkey("ArrowUp", () => api.prev());
+    createEffect(() => {
+      if (editorFocused()) return;
+      registerHotkey("ArrowDown", () => api.next());
+      registerHotkey("ArrowUp", () => api.prev());
+    });
   }
 
   const bigDiff = () => (baseLines() ?? 0) > BIG_DIFF_LINES && !whole();
+  /**
+   * Where the editing surface starts, as a percentage of the panel.
+   *
+   * The split ratio when there are paired rows to sit beside; the whole panel
+   * when there are none — a diff folded into its "big diff" summary, or a file
+   * with no changes for this base. Editing reads the file, not the diff, so
+   * both of those are ordinary files to edit, and a half-width editor beside a
+   * one-line notice would be a strange thing to draw.
+   */
+  const editorLeft = () => (hasSideBySide() ? ratio() * 100 : 0);
   const hasSideBySide = () =>
     split() && !diff.loading && !diff.error && !!view() && view()!.hunks.length > 0 && !bigDiff();
 
@@ -422,6 +521,170 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
 
   const sizeText = (n?: number) => (n == null ? d().sizeUnknown() : d().bytes(n));
 
+  // ── Editing the right column ───────────────────────────────────────────────
+
+  /**
+   * The file the editor would open, or `null` when this comparison has no
+   * editable side. `sideLabels(...).right.readOnly` is the existing answer to
+   * "is this side the working tree" and deliberately stays the only one — the
+   * file already carries three disagreeing predicates about staging.
+   */
+  const editTarget = () => {
+    const s = source();
+    const l = labels();
+    return s && split() && l && !l.right.readOnly ? s.path : null;
+  };
+  // The reason a read failed, kept beside the resource rather than inside it:
+  // reading a rejected resource re-throws, and this value is read from the
+  // tooltip of a control that must never take the panel down with it.
+  const [readErr, setReadErr] = createSignal("");
+  const [textFile, { refetch: refetchText }] = createResource(
+    editTarget,
+    async (p): Promise<TextFile | null> => {
+      setReadErr("");
+      try {
+        return await fileRead(p);
+      } catch (e) {
+        setReadErr(errText(e));
+        return null;
+      }
+    },
+  );
+
+  const editReason = (): EditUnavailable | null =>
+    editAvailability({
+      split: split(),
+      readOnly: labels()?.right.readOnly ?? true,
+      loading: textFile.loading,
+      blocked: textFile()?.blocked ?? null,
+    });
+  // The two reasons that are about this panel; the other four are about the
+  // file, and `blockText` words them for both readers at once.
+  const reasonText = (r: EditUnavailable): string =>
+    r === "unified"
+      ? d().editOffUnified()
+      : r === "read-only"
+        ? d().editOffReadOnly()
+        : r === "loading"
+          ? d().editOffLoading()
+          : blockText(r);
+  /** A disabled control here always says why — that is a rule of the project,
+   *  not decoration. */
+  const editTip = () => {
+    // A named reason first: `readErr` outlives the comparison it belongs to
+    // (nothing refetches once there is no editable side), and a stale read
+    // failure must not stand in for "the right side is a revision".
+    const r = editReason();
+    if (r) return reasonText(r);
+    return readErr() || `${d().editToggleTip()} — ${d().editSaveTip()}`;
+  };
+  const editDisabled = () => !!editReason() || !!readErr();
+  /** The editor is open *on the file this panel is showing*. The draft outlives
+   *  the panel, so a remount finds it still open and picks it back up. */
+  const editing = () => editorOpen() && editorPath() === source()?.path;
+
+  let taEl: HTMLTextAreaElement | undefined;
+  let gutterEl: HTMLDivElement | undefined;
+  const lineCount = createMemo(() => countLines(editorText()));
+  // Memoised on the *count*: one text node instead of tens of thousands of
+  // elements, rebuilt only when a line is added or removed rather than on every
+  // character.
+  const gutter = createMemo(() => {
+    const n = lineCount();
+    const out = new Array<string>(n);
+    for (let i = 0; i < n; i++) out[i] = String(i + 1);
+    return out.join("\n");
+  });
+
+  const enterEdit = async (line?: number) => {
+    const s = source();
+    if (!s || editDisabled() || editing()) return;
+    if (!(await openEditor(s.path))) {
+      // Availability was judged on a read taken when the file was selected, and
+      // the file can change between that read and this press. The refusal says
+      // which of the four reasons it is instead of doing nothing visible.
+      const b = editorBlocked();
+      if (b) setNote(blockText(b));
+      refetchText();
+      return;
+    }
+    setNote("");
+    setEditStale(true);
+    // The textarea does not exist until `editing()` flips and Solid flushes.
+    queueMicrotask(() => {
+      taEl?.focus();
+      if (line != null && taEl) {
+        const at = lineStartOffset(editorText(), line);
+        taEl.setSelectionRange(at, at);
+      }
+    });
+  };
+
+  /** Write what is on screen and show the file as it now is. */
+  const recompute = async () => {
+    dropAccepted();
+    await refetch();
+    setEditStale(false);
+    // Last, because this is the call that can move the selection: an edit can
+    // flip a file's status, and a re-selection landing mid-recompute would look
+    // like a departure and close the editor under the caret.
+    refresh();
+  };
+
+  /** Leaving the editor: the deferred write is waited for here, because this
+   *  path can afford to wait and the recomputed diff has to describe the file
+   *  the write just made. */
+  const leaveEdit = async () => {
+    if (!editorOpen()) return;
+    await saveNow();
+    closeEditor();
+    refetchText();
+    await recompute();
+  };
+
+  const saveExplicit = async () => {
+    if (!editorOpen()) return;
+    await saveNow();
+    await recompute();
+    // Still open, so hunk actions stay refused — `editing()` says so on its own.
+  };
+
+  // Held only while this panel has an open editor to save: taken for the whole
+  // life of the component it would swallow Cmd+S in the Log mode and over every
+  // read-only comparison, where the panel has nothing to write. Same shape as
+  // the arrow shortcuts above — registration is the effect re-running, and the
+  // `onCleanup` inside `registerHotkey` gives the combination back.
+  createEffect(() => {
+    if (!editing()) return;
+    registerHotkey("KeyS", () => void saveExplicit());
+  });
+
+  // A departure the panel cannot wait out: another file, another comparison
+  // base, the window closing. The pending write is issued and the draft is let
+  // go; `ws()` is deliberately not part of this key — the whitespace mode is a
+  // reading option, and changing it must not throw away the caret.
+  let editSrc: DiffSource | null = null;
+  createEffect(() => {
+    const s = source();
+    // `sameDiffSource`, not a stringified key: a source is rebuilt fresh by
+    // whoever selects a file, so identity changes on its own, and the order of
+    // keys in a literal is not a promise anyone made.
+    if (sameDiffSource(s, editSrc)) return;
+    const left = editSrc !== null;
+    editSrc = s;
+    if (!left) return;
+    setEditStale(false);
+    if (editorOpen()) {
+      closeEditor();
+      refresh();
+    }
+  });
+
+  // Unmount is a departure too — the window mode switches above the "the user is
+  // typing" cut-off — but not a close: the draft is module-level so that it
+  // survives, and only the timer has to be emptied.
+  onCleanup(flushPending);
+
   return (
     <Show
       when={source()}
@@ -436,6 +699,11 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
           <span class="min-w-0 truncate font-mono" title={source()!.path}>
             {source()!.path}
           </span>
+          <Show when={editing() && editorDirty()}>
+            <span class="shrink-0 text-warn" title={d().editUnsavedTip()}>
+              ● {d().editUnsaved()}
+            </span>
+          </Show>
           <Show when={!hosted}>
             <div class="ml-auto flex shrink-0 overflow-hidden rounded border border-border">
               <For each={bases()}>
@@ -508,10 +776,30 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
 
           <button
             class="w-20 shrink-0 whitespace-nowrap rounded border border-border px-1.5 py-0.5 text-center hover:bg-bg-muted"
-            onClick={() => setSplit((v) => !v)}
+            onClick={() => {
+              // Editing is a side-by-side affair; leaving the layout leaves it.
+              if (editing()) void leaveEdit();
+              setSplit((v) => !v);
+            }}
             title="Side-by-side / unified"
           >
             {split() ? "▥ split" : "▤ unified"}
+          </button>
+
+          <button
+            class={`shrink-0 whitespace-nowrap rounded border px-1.5 py-0.5 text-center ${DISABLED_CLASS}`}
+            classList={{
+              "border-accent bg-accent text-white": editing(),
+              "border-border hover:bg-bg-muted": !editing(),
+            }}
+            disabled={editDisabled() && !editing()}
+            title={editTip()}
+            // Without this the textarea loses focus before the click lands, the
+            // blur handler closes the editor, and the click then reopens it.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => void (editing() ? leaveEdit() : enterEdit())}
+          >
+            ✎ {d().editToggle()}
           </button>
         </div>
 
@@ -610,6 +898,10 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
                               })
                             }
                             stageable={stageable()}
+                            editStale={editing() || editStale()}
+                            onEditLine={
+                              editDisabled() ? undefined : (n) => void enterEdit(n)
+                            }
                             widened={widened()}
                             base={source()!.kind === "worktree" ? (source() as { base: DiffBase }).base : null}
                             onStage={() => act(() => hunkStage(hv.hunk.patch))}
@@ -634,7 +926,70 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
           {/* One draggable divider for the whole side-by-side view. Absolute over
               the viewport (not the scrolling content), positioned at the split
               ratio; it doubles as the vertical divider line. */}
-          <Show when={hasSideBySide()}>
+          {/*
+            The editing surface, laid over the right half rather than drawn into
+            the rows.
+
+            This is what keeps the promise that the left column does not move
+            while someone is typing: the rows are not re-rendered at all, because
+            nothing about them is asked to change. It is also why the draft is
+            one textarea for the whole file instead of a field per line — a list
+            of fields is `<For>` with recreated nodes, which is focus lost on
+            every keystroke.
+
+            `wrap="off"` is load-bearing: a wrapped line would draw as two and
+            the gutter's numbering would drift from the file's.
+          */}
+          <Show when={editing()}>
+            <div
+              class="absolute inset-y-0 right-0 z-30 flex border-l border-border bg-bg font-mono text-xs"
+              style={{ left: `${editorLeft()}%` }}
+            >
+              <div
+                ref={gutterEl}
+                class="shrink-0 select-none overflow-hidden whitespace-pre bg-bg-subtle px-2 text-right text-fg-muted"
+                style={{ "line-height": `${LINE_PX}px` }}
+              >
+                {gutter()}
+              </div>
+              <textarea
+                ref={taEl}
+                class="min-w-0 flex-1 resize-none border-0 bg-bg px-2 text-fg outline-none"
+                style={{ "line-height": `${LINE_PX}px` }}
+                spellcheck={false}
+                wrap="off"
+                value={editorText()}
+                onInput={(e) => setEditorText(e.currentTarget.value)}
+                onScroll={(e) => {
+                  if (gutterEl) gutterEl.scrollTop = e.currentTarget.scrollTop;
+                }}
+                onKeyDown={(e) => {
+                  if (e.code !== "Escape") return;
+                  e.preventDefault();
+                  void leaveEdit();
+                }}
+                onFocus={() => setEditorFocused(true)}
+                onBlur={() => {
+                  setEditorFocused(false);
+                  // The stale-file question takes the focus and gives it back;
+                  // closing here would answer it against a draft that is gone.
+                  if (modalOpen()) return;
+                  // The window lost focus (Cmd+Tab, clicking the desktop):
+                  // not the user leaving the editor, and closing then reads as
+                  // the panel shutting itself for no reason. Asked of the
+                  // document, not answered from `relatedTarget` — that one is
+                  // null for a click on any *non-focusable* part of the
+                  // application too, which is a departure and must close.
+                  if (!document.hasFocus()) return;
+                  void leaveEdit();
+                }}
+              />
+            </div>
+          </Show>
+
+          {/* Hidden while editing: the handle sits above the editing surface and
+              would resize it from under the caret. */}
+          <Show when={hasSideBySide() && !editing()}>
             <div
               role="separator"
               aria-orientation="vertical"
@@ -729,6 +1084,11 @@ function HunkBody(props: {
   anchor: (idx: number, el: HTMLElement) => void;
   onOpen: (id: string) => void;
   stageable: boolean;
+  /** The diff on screen was not computed from the file as it now is. */
+  editStale: boolean;
+  /** Double-click on a right-hand line: open the editor with the caret there.
+   *  Absent when editing is not available for this comparison. */
+  onEditLine?: (newNo: number) => void;
   /** The payload was asked for with more context than the file was first shown
    * with, so a hunk here can cover what used to be two. */
   widened: boolean;
@@ -741,8 +1101,18 @@ function HunkBody(props: {
   // Unstage and Revert act on a wider region than the one the reader saw before
   // expanding. The buttons say so rather than quietly doing more (R46i).
   const label = (base: string) => (props.widened ? `${base} · ${d().hunkWide()}` : base);
+  // A hunk patch is matched against the file by content, so applying one that
+  // describes an older version either lands on the wrong region or is refused by
+  // git. Refused before the click, with the reason, rather than after it.
+  const off = () => !props.stageable || props.editStale;
   const tip = () =>
-    !props.stageable ? d().hunkWhitespaceTip() : props.widened ? d().hunkWideTip() : undefined;
+    props.editStale
+      ? d().hunkEditTip()
+      : !props.stageable
+        ? d().hunkWhitespaceTip()
+        : props.widened
+          ? d().hunkWideTip()
+          : undefined;
   return (
     <div class="border-b border-border">
       <div class="flex items-center gap-2 bg-bg-muted px-2 py-0.5 text-accent">
@@ -751,14 +1121,14 @@ function HunkBody(props: {
           <Show when={props.base === "worktree"}>
             <HunkBtn
               label={label("Stage")}
-              disabled={!props.stageable}
+              disabled={off()}
               tip={tip()}
               onClick={props.onStage}
             />
             <HunkBtn
               label={label("Revert")}
               danger
-              disabled={!props.stageable}
+              disabled={off()}
               tip={tip()}
               onClick={props.onRevert}
             />
@@ -766,7 +1136,8 @@ function HunkBody(props: {
           <Show when={props.base === "index"}>
             <HunkBtn
               label={label("Unstage")}
-              tip={props.widened ? d().hunkWideTip() : undefined}
+              disabled={props.editStale}
+              tip={props.editStale ? d().hunkEditTip() : props.widened ? d().hunkWideTip() : undefined}
               onClick={props.onUnstage}
             />
           </Show>
@@ -794,6 +1165,7 @@ function HunkBody(props: {
                   highlight={props.highlight}
                   active={row.diff >= 0 && row.diff === props.current}
                   anchor={props.anchor}
+                  onEditLine={props.onEditLine}
                 />
               )}
             </For>
@@ -843,6 +1215,7 @@ function RowView(props: {
   highlight: HighlightMode;
   active: boolean;
   anchor: (idx: number, el: HTMLElement) => void;
+  onEditLine?: (newNo: number) => void;
 }) {
   const segs = createMemo(() =>
     props.highlight === "words" && pairChanged(props.row)
@@ -876,6 +1249,7 @@ function RowView(props: {
           frac={1 - props.ratio}
           highlight={props.highlight}
           segs={segs()?.right}
+          onEditLine={props.onEditLine}
         />
       </Show>
     </div>
@@ -959,11 +1333,21 @@ function Cell(props: {
   frac: number;
   highlight: HighlightMode;
   segs?: Seg[];
+  /** Second, equal way into the editor: point at the line and open it there. */
+  onEditLine?: (newNo: number) => void;
 }) {
   const no = () => (props.side === "old" ? props.line?.oldNo : props.line?.newNo);
   const bg = () => (props.line ? lineBg(props.line.origin) : "bg-bg-muted/40");
+  const editHere = () => {
+    const n = props.line?.newNo;
+    if (props.side === "new" && n != null) props.onEditLine?.(n);
+  };
   return (
-    <div class={`flex min-w-0 ${bg()}`} style={{ width: `${props.frac * 100}%` }}>
+    <div
+      class={`flex min-w-0 ${bg()}`}
+      style={{ width: `${props.frac * 100}%` }}
+      onDblClick={editHere}
+    >
       <span class="w-10 shrink-0 select-none pr-2 text-right text-fg-muted">
         {no() ?? ""}
       </span>
