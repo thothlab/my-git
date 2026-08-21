@@ -33,6 +33,34 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> String {
     format!("{h:016x}")
 }
 
+/// Take back the directories a write made for itself, after that write failed.
+///
+/// **Only empty ones, from the deepest up, stopping at the first that will not go.**
+/// The right this has is over what this write created and nothing else: another process
+/// may have put a file into the new directory between the `create_dir_all` and the
+/// refusal, and removing the subtree would take that file with it. A directory that is
+/// no longer there is skipped rather than ending the walk — a partly made chain still
+/// has its shallower links to undo.
+///
+/// Best-effort: the write is already being refused, and a failure to tidy up must not
+/// replace the reason the caller is waiting for.
+fn undo(deepest: &Path, created: &Option<PathBuf>) {
+    let Some(top) = created else { return };
+    let mut cur = deepest;
+    loop {
+        if cur.exists() && std::fs::remove_dir(cur).is_err() {
+            return;
+        }
+        if cur == top.as_path() {
+            return;
+        }
+        cur = match cur.parent() {
+            Some(p) => p,
+            None => return,
+        };
+    }
+}
+
 /// git backend implemented by shelling out to the system `git`.
 pub struct CliEngine {
     repo: PathBuf,
@@ -297,8 +325,14 @@ impl CliEngine {
     /// arrives from a paste and, written through, would make the next read classify the
     /// file as `mixed-eol`: the application would have locked the user out of a file it
     /// wrote itself. Whatever this method writes, `read_text_file` can open again.
-    /// Apart from the endings the text is written verbatim: no terminator is appended
-    /// and none is removed.
+    ///
+    /// **A NUL byte is dropped rather than refused**, for the same invariant: written
+    /// through, it would make the next read call the file `binary` and lock the user
+    /// out of what the application itself wrote. Dropping is chosen over an `Error::Rule`
+    /// because a NUL is invisible in a textarea — it can only have arrived in a paste,
+    /// the user cannot see it to delete it, and a refusal would leave them unable to
+    /// save at all. Apart from the endings and that byte the text is written verbatim:
+    /// no terminator is appended and none is removed.
     ///
     /// The write goes through a uniquely named temp file next to the target plus a
     /// rename, the way `changelists.json` and `graft-ui.json` are written — an
@@ -330,7 +364,10 @@ impl CliEngine {
             Err(e) => return Err(Error::Io(format!("{rel}: {e}"))),
         }
 
-        let normalised = text.replace("\r\n", "\n").replace('\r', "\n");
+        let normalised = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\0', "");
         let bytes = match eol {
             Eol::Lf => normalised.into_bytes(),
             Eol::Crlf => normalised.replace('\n', "\r\n").into_bytes(),
@@ -348,18 +385,52 @@ impl CliEngine {
         let dir = path
             .parent()
             .ok_or_else(|| Error::Io(format!("{rel} has no parent directory")))?;
+        // The overwrite branch recreates a file that was deleted outside the editor,
+        // and `git rm` of the last file in a folder takes the folder too. Created only
+        // here, after the freshness and ceiling verdicts, so an Io failure of the mkdir
+        // cannot preempt a `stale` or a `rule` (order of refusals, prd_03_interfaces).
+        // Staying inside the repository is already settled: `worktree_path` rejected
+        // every `..`, and for a path that does not exist yet it canonicalised the
+        // deepest existing ancestor and required it under the root.
+        //
+        // Whatever this makes, a failure below unmakes: an operation that did not
+        // happen must leave nothing new in the working tree. Git does not track empty
+        // directories, so no `git status` would ever report the leftover — which is
+        // precisely why it would stay there.
+        let mut created: Option<PathBuf> = None;
+        if !dir.exists() {
+            // The shallowest directory that is about to appear: removing that one
+            // removes the whole chain, and only the chain.
+            let mut top = dir;
+            while let Some(parent) = top.parent() {
+                if parent.exists() {
+                    break;
+                }
+                top = parent;
+            }
+            created = Some(top.to_path_buf());
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                // It may have made part of the chain before failing.
+                undo(dir, &created);
+                return Err(Error::Io(format!("{rel}: {e}")));
+            }
+        }
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| Error::Io(format!("{rel} has no file name")))?;
         let n = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = dir.join(format!(".{name}.graft.tmp.{}.{n}", std::process::id()));
-        std::fs::write(&tmp, &bytes).map_err(|e| Error::Io(format!("{rel}: {e}")))?;
+        if let Err(e) = std::fs::write(&tmp, &bytes) {
+            undo(dir, &created);
+            return Err(Error::Io(format!("{rel}: {e}")));
+        }
         if let Ok(meta) = std::fs::metadata(&path) {
             let _ = std::fs::set_permissions(&tmp, meta.permissions());
         }
         if let Err(e) = std::fs::rename(&tmp, &path) {
             let _ = std::fs::remove_file(&tmp);
+            undo(dir, &created);
             return Err(Error::Io(format!("{rel}: {e}")));
         }
         Ok(fnv1a(&bytes))
@@ -1259,6 +1330,71 @@ pub(crate) mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, vec!["t.txt".to_string()]);
+    }
+
+    /// A write that fails leaves the working tree as it found it: the directories it
+    /// had to make for the recreated file go back too (prd_03 task 03).
+    #[test]
+    fn a_failed_write_takes_its_new_directories_back() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        // A name at the length limit: the temp file next to it is longer still, so the
+        // write fails *after* the directories were made and before any rename.
+        let rel = format!("sub/deep/{}.txt", "x".repeat(250));
+        let e = CliEngine::new(p)
+            .write_text_file(&rel, "text\n", Eol::Lf, "")
+            .expect_err("the write cannot succeed with that name");
+        assert_eq!(serde_json::to_value(&e).unwrap()["kind"], "io");
+        assert!(
+            !p.join("sub").exists(),
+            "a refused write leaves nothing behind it"
+        );
+    }
+
+    /// A NUL byte cannot survive a round trip — `read_text_file` calls a file holding
+    /// one binary — so the write drops it and the file stays editable (prd_03 task 03).
+    #[test]
+    fn a_nul_byte_does_not_lock_the_file_out_of_editing() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("t.txt"), "one\n").unwrap();
+        let eng = CliEngine::new(p);
+        let f = eng.read_text_file("t.txt").unwrap();
+        let d = eng
+            .write_text_file("t.txt", "one\ntw\0o\n", f.eol, &f.digest)
+            .unwrap();
+
+        let again = eng.read_text_file("t.txt").unwrap();
+        assert_eq!(
+            again.blocked, None,
+            "what the application wrote it can reopen"
+        );
+        assert_eq!(again.text.as_deref(), Some("one\ntwo\n"));
+        assert_eq!(again.digest, d, "the digest describes the bytes on disk");
+    }
+
+    /// `git rm` of the last file in a folder takes the folder with it. Recreating the
+    /// file through the overwrite branch has to put the folder back (prd_03 task 03).
+    #[test]
+    fn recreating_a_file_remakes_its_missing_directory() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let eng = CliEngine::new(p);
+        assert!(!p.join("sub").exists());
+
+        let gone = eng.read_text_file("sub/deep/t.txt").unwrap();
+        assert_eq!(gone.blocked, Some(EditBlock::Missing));
+        assert_eq!(
+            gone.digest, "",
+            "an absent file fingerprints to the sentinel"
+        );
+
+        eng.write_text_file("sub/deep/t.txt", "back\n", Eol::Lf, "")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("sub/deep/t.txt")).unwrap(),
+            "back\n"
+        );
     }
 
     /// `text` is the whole truth about the bytes: whatever tail it carries is written

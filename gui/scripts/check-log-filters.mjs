@@ -66,6 +66,8 @@ const {
   draftShouldWrite,
   countLines,
   lineStartOffset,
+  clampCurrent,
+  mayOverwrite,
 } = await load("editRules.js");
 
 let failed = 0;
@@ -213,6 +215,28 @@ eq(lineStartOffset("a\nbb\nc", 2), 2, "past the first newline");
 eq(lineStartOffset("a\nbb\nc", 3), 5, "past the second");
 eq(lineStartOffset("a\nbb\nc", 9), 6, "a line the draft no longer has clamps to the end");
 eq(lineStartOffset("", 3), 0, "an empty draft has one offset");
+
+// -- The pointer at the current difference, after the payload was replaced -----
+// Staging or editing republishes the file with a different number of
+// differences, and the pointer is clamped against the list that now exists.
+eq(clampCurrent(0, 2), -1, "a file with no differences left has no current one");
+eq(clampCurrent(2, 5), 1, "a shortened list points at its own last difference");
+eq(clampCurrent(9, 2), 2, "a longer list leaves the pointer where it stood");
+eq(clampCurrent(0, -1), -1, "nothing chosen stays nothing chosen");
+eq(clampCurrent(9, -1), -1, "...and is not pulled up to the first difference");
+eq(clampCurrent(3, 2), 2, "the last difference of an unchanged list is kept");
+
+// -- When an overwrite may go ahead (prd_03) ----------------------------------
+// The reread behind "overwrite" can come back blocked. Only `missing` is a
+// blockage an overwrite answers - its empty digest is the documented way to
+// create the file again. Every other one has an empty digest too, and writing
+// with it would be refused as "changed on disk", asking the same question again
+// under a reason that is not the true one (rule 3 of prd_03_interfaces.md).
+eq(mayOverwrite(null), true, "an editable file is overwritten with the typed text");
+eq(mayOverwrite("missing"), true, "a deleted file is created again");
+eq(mayOverwrite("binary"), false, "a file replaced by a binary is not written over");
+eq(mayOverwrite("too-large"), false, "...nor one that outgrew the ceiling");
+eq(mayOverwrite("mixed-eol"), false, "...nor one whose line endings became mixed");
 
 await rm(out, { recursive: true, force: true });
 console.log(failed === 0 ? `\nall green (${process.env.TZ ?? "local"} time zone)` : `\n${failed} FAILED`);

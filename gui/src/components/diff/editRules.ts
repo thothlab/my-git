@@ -128,3 +128,36 @@ export function lineStartOffset(text: string, line: number): number {
   }
   return at;
 }
+
+/**
+ * Where the "current difference" pointer lands once the file has been
+ * republished with a different number of differences — staging, reverting or an
+ * edit all replace the payload underneath it.
+ *
+ * The pointer is clamped against the list that now exists, not the one it was
+ * chosen in: a file whose last difference was just staged has fewer, and "that
+ * was the last one" would otherwise be answered about differences still above.
+ * A file with none left has no current difference. Nothing chosen stays nothing
+ * chosen — `-1` is not pulled up to the first difference, because arriving at a
+ * new payload is not the user asking to go anywhere.
+ */
+export function clampCurrent(count: number, current: number): number {
+  if (current < 0) return -1;
+  return Math.min(current, count - 1);
+}
+
+/**
+ * May the typed text be written over what the reread found? Only when the file
+ * is editable, or when it is simply not there.
+ *
+ * `missing` is the one blockage an overwrite answers: the digest of an absent
+ * file is `""`, and `""` is exactly what tells the backend to create it. Every
+ * other blockage reports the same empty digest without meaning the same thing,
+ * so writing with it would be refused as "changed on disk" and put the very
+ * same question back on screen under a reason that is not the true one (rule 3
+ * of `prd_03_interfaces.md`). Not the rule the *reread* branch asks: that one
+ * needs text, and `missing` has none.
+ */
+export function mayOverwrite(blocked: EditBlock | null): boolean {
+  return blocked === null || blocked === "missing";
+}

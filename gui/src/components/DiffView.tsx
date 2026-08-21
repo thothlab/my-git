@@ -44,6 +44,7 @@ import {
   type SideLabel,
 } from "./diff/model";
 import {
+  clampCurrent,
   countLines,
   editAvailability,
   lineStartOffset,
@@ -386,10 +387,9 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     setShown(f);
     // The count comes from the payload just published, so the pointer is
     // clamped against the list that exists rather than the one it was chosen
-    // in: a file whose last difference was just staged has fewer, and "that was
-    // the last one" is otherwise answered about differences still above.
+    // in. The rule itself lives in `editRules.clampCurrent`, where it is checked.
     const count = untrack(view)?.count ?? 0;
-    setCurrent((c) => (c < 0 ? -1 : Math.min(c, count - 1)));
+    setCurrent((c) => clampCurrent(count, c));
   });
 
 

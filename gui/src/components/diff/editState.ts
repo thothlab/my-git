@@ -12,6 +12,7 @@ import {
   AUTOSAVE_MS,
   draftReduce,
   draftShouldWrite,
+  mayOverwrite,
   type Draft,
   type DraftEvent,
   type EditBlock,
@@ -97,10 +98,23 @@ const disarm = () => {
   timer = undefined;
 };
 
-/** A keystroke: the draft moves and the deferred write is pushed back. */
+/**
+ * A keystroke: the draft moves and the deferred write is pushed back.
+ *
+ * **A NUL byte is dropped here, where the text is assembled**, and not only in
+ * the backend. The write drops it too — that stays as the guard for any other
+ * caller — but a draft still holding the byte would count as saved while the
+ * file on disk differs from it by exactly that byte, and "everything is on
+ * disk" would stop being true. Fixing it on this side rather than by having
+ * `file_write` report the text it wrote: that command answers with a
+ * fingerprint by design (PRD §Контракты и API), and sending the whole file back
+ * on every pause in typing is the round trip the design avoids. A NUL can only
+ * have arrived in a paste — it is invisible in a textarea — so nothing the user
+ * can see is lost.
+ */
 export function setEditorText(t: string): void {
   if (!editorOpen()) return;
-  apply({ kind: "type", text: t });
+  apply({ kind: "type", text: t.includes("\0") ? t.replaceAll("\0", "") : t });
   disarm();
   timer = setTimeout(() => {
     timer = undefined;
@@ -262,9 +276,7 @@ async function resolveStale(p: string, cause: unknown): Promise<void> {
       apply({ kind: "synced", text: f.text });
       return;
     }
-    // `missing` is the one blockage an overwrite answers: its empty digest is
-    // the documented way to create the file again with the typed text.
-    if (f.blocked !== null && f.blocked !== "missing") {
+    if (!mayOverwrite(f.blocked)) {
       setError(blockText(f.blocked));
       return;
     }
