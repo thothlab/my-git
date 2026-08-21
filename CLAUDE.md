@@ -27,8 +27,8 @@
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
 | `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`) |
-| `cargo test` | Оба крейта разом: 119 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 119 тестов |
+| `cargo test` | Оба крейта разом: 145 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 145 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -288,7 +288,7 @@ Git вызывается только как внешний процесс. `gix
 режет их на задачи и исполняет по коммиту на задачу.
 
 Где что лежит: `<vault>/Projects/my-git/gui/PRD/` — требования, PRD, спек-дельты,
-задачи и отчёты; `<vault>/Projects/my-git/gui/PRD/run/prd_02/dashboard.html` — ход работы.
+задачи и отчёты; `<vault>/Projects/my-git/gui/PRD/run/prd_03/dashboard.html` — ход работы.
 Нарратив инициативы, ТЗ и журнал `Правки.md` — в том же бандле vault.
 
 Два правила, которые стоит знать до того, как что-то менять: снять требование
@@ -296,5 +296,5 @@ Git вызывается только как внешний процесс. `gix
 попадает в живую спеку не раньше команды `/prd archive NN`.
 
 Работа прервалась на середине — фраза «продолжи PRD» поднимает состояние
-из `run/prd_02/state.js`; ничего пересказывать не нужно.
+из `run/prd_03/state.js`; ничего пересказывать не нужно.
 <!-- prd:end -->
