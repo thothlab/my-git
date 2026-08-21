@@ -60,9 +60,10 @@ jobs:
         with:
           targets: ${{ matrix.rust-targets }}
 
+      # Один cargo-workspace на репозиторий: кэш, Cargo.lock и target/ корневые.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: gui/src-tauri
+          workspaces: .
 
       - name: Install Linux system deps
         if: runner.os == 'Linux'
@@ -101,7 +102,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          b="gui/src-tauri/target/${{ matrix.target }}/release/bundle"
+          # target/ корневой (workspace), а не gui/src-tauri/target/. Шаг
+          # выполняется из корня репозитория, путь относительный от него.
+          b="target/${{ matrix.target }}/release/bundle"
           # Installers for humans, plus the bundles the updater downloads and
           # the `.sig` next to each of them.
           find "$b" -type f \( \

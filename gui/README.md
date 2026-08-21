@@ -41,7 +41,7 @@ npm run tauri dev      # поднимает Vite и открывает нати�
 cd gui
 npm install
 npm run build                                   # фронт → dist/
-cargo build --manifest-path src-tauri/Cargo.toml # бэкенд (встраивает dist/)
+cargo build -p graft                            # бэкенд (встраивает dist/), target/ в корне
 # или релизный бандл (.app/.dmg на macOS):
 npm run tauri build
 ```
@@ -49,10 +49,13 @@ npm run tauri build
 ## Тесты бэкенда
 
 ```sh
-cargo test --manifest-path gui/src-tauri/Cargo.toml
+cargo test -p graft   # из корня репозитория (workspace)
 ```
 
-**106 тестов.** Гоняют реальные git-операции на временных репозиториях (`tempfile` +
+Тестам нужен собранный фронт: `tauri-build` проверяет `frontendDist` (`gui/dist`),
+поэтому перед первым прогоном — `cd gui && npm run build`.
+
+**119 тестов.** Гоняют реальные git-операции на временных репозиториях (`tempfile` +
 `git init`): синк changelist'ов и byte-compat с TUI, изоляция коммита по списку,
 stage/revert по hunk'ам, push/fetch/ahead-behind на локальном bare-origin, страницы и
 лейны лога, cherry-pick/revert/merge/rebase/reset и заначки при переключении ветки.

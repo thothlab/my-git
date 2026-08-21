@@ -10,7 +10,7 @@ name: release
 # The GUI (gui/) will get its own build entries here once it exists.
 #
 # Cut a release:
-#   1. Bump `version` in terminal/Cargo.toml (and refresh Cargo.lock), commit.
+#   1. Bump `version` in terminal/Cargo.toml (and refresh the root Cargo.lock), commit.
 #   2. git tag v0.x.y && git push origin v0.x.y
 
 on:
@@ -47,20 +47,20 @@ jobs:
           toolchain: 1.94.1
           targets: ${{ matrix.target }}
 
+      # Один cargo-workspace на репозиторий: кэш, Cargo.lock и target/ корневые.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: terminal
+          workspaces: .
 
       - name: Build
-        working-directory: terminal
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build -p mygit --release --locked --target ${{ matrix.target }}
 
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           pkg="mygit-${{ github.ref_name }}-${{ matrix.name }}"
-          dir="terminal/target/${{ matrix.target }}/release"
+          dir="target/${{ matrix.target }}/release"
           tar -C "$dir" -czf "$pkg.tar.gz" mygit
           echo "ASSET=$pkg.tar.gz" >> "$GITHUB_ENV"
 
@@ -69,7 +69,7 @@ jobs:
         shell: pwsh
         run: |
           $pkg = "mygit-${{ github.ref_name }}-${{ matrix.name }}"
-          $dir = "terminal/target/${{ matrix.target }}/release"
+          $dir = "target/${{ matrix.target }}/release"
           Compress-Archive -Path "$dir/mygit.exe" -DestinationPath "$pkg.zip"
           "ASSET=$pkg.zip" >> $env:GITHUB_ENV
 

@@ -50,9 +50,10 @@ a manual run also uploads them as downloadable workflow artifacts.
 
 ## Build from source
 
+The repository is a single cargo workspace, so everything runs from the root:
+
 ```sh
-cd terminal
-cargo build --release
+cargo build -p mygit --release
 ./target/release/mygit      # run inside a git repo
 ```
 
