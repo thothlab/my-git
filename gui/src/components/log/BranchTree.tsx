@@ -37,7 +37,12 @@ import { operationActive, repoRevision } from "./actions/repoRefresh";
  * **A favourite leaves its group.** It used to be sorted first *inside* its
  * folder, which is invisible from outside the folder — the star read as a button
  * that does nothing. A favourite now rises into its own section at the top of
- * the panel, by its full name, and is not drawn a second time below.
+ * the panel and is not drawn a second time below. The section is folded into
+ * folders by the same rule as Local and Remote — a flat list of full names is
+ * unreadable once more than a handful of long branches are starred — and it is
+ * a *third* group (`fav`), not a re-use of `local`: row keys and the persisted
+ * `collapsedFolders` are namespaced by group, so `p2p` folded in Favourites
+ * would otherwise fold `p2p` in Local as well.
  *
  * Three seams worth knowing before changing anything here:
  *
@@ -57,7 +62,7 @@ import { operationActive, repoRevision } from "./actions/repoRefresh";
 /** `full_ref` of the synthetic detached-HEAD node (engine `branches::DETACHED_REF`). */
 const DETACHED_REF = "HEAD";
 
-type Group = "local" | "remote";
+type Group = "local" | "remote" | "fav";
 
 interface FolderNode {
   kind: "folder";
@@ -185,7 +190,7 @@ export default function BranchTree() {
    * once, in the section above, and a second copy inside its folder would make
    * the star look like it merely duplicated the row.
    */
-  const groupTree = (group: Group) => {
+  const groupTree = (group: "local" | "remote") => {
     const list = (branches() ?? []).filter((b) =>
       group === "remote" ? b.isRemote : !b.isRemote && b.fullRef !== DETACHED_REF,
     );
@@ -194,15 +199,19 @@ export default function BranchTree() {
   };
 
   /**
-   * Favourites, flat and by full name. Flat because a favourite is precisely a
-   * branch pulled out of the structure; by full name because the last path
-   * segment alone is ambiguous once the folders are gone — `feature/x` and
-   * `origin/x` would both read as `x`.
+   * Favourites, folded into folders by their full name. Local and remote
+   * favourites share the section and are told apart by the folder they land in:
+   * `origin/x` nests under `origin`, `feature/x` under `feature`. That is what
+   * answers the ambiguity which once forced a flat list of full names.
    */
-  const favBranches = createMemo(() =>
-    (branches() ?? [])
-      .filter((b) => b.fullRef !== DETACHED_REF && favorites().has(favKey(b)) && matches(b))
-      .sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent) || a.name.localeCompare(b.name)),
+  const favTree = createMemo(() =>
+    sortTree(
+      buildTree(
+        (branches() ?? []).filter(
+          (b) => b.fullRef !== DETACHED_REF && favorites().has(favKey(b)) && matches(b),
+        ),
+      ),
+    ),
   );
 
   const localTree = createMemo(() => groupTree("local"));
@@ -228,7 +237,7 @@ export default function BranchTree() {
             depth,
             group,
             node: n.node,
-            favorite: false,
+            favorite: group === "fav",
           });
           continue;
         }
@@ -250,17 +259,7 @@ export default function BranchTree() {
     return out;
   };
 
-  const favRows = createMemo<Row[]>(() =>
-    favBranches().map((b) => ({
-      key: `b:${b.fullRef}`,
-      kind: "branch" as const,
-      label: b.name,
-      depth: 0,
-      group: b.isRemote ? ("remote" as Group) : ("local" as Group),
-      node: b,
-      favorite: true,
-    })),
-  );
+  const favRows = createMemo(() => rowsOf("fav", favTree()));
 
   const localRows = createMemo(() => rowsOf("local", localTree()));
   const remoteRows = createMemo(() => rowsOf("remote", remoteTree()));
@@ -359,6 +358,7 @@ export default function BranchTree() {
         walk(group, n.children);
       }
     };
+    walk("fav", favTree());
     walk("local", localTree());
     walk("remote", remoteTree());
     return keys;
@@ -515,7 +515,10 @@ export default function BranchTree() {
                           <RowView
                             row={row}
                             selected={selectedKey() === row.key}
-                            onSelect={() => setSelectedKey(row.key)}
+                            onSelect={() => {
+                              setSelectedKey(row.key);
+                              if (row.kind === "folder" && row.folderKey) toggleFolder(row.folderKey);
+                            }}
                             onToggleFavorite={() => row.node && toggleFavorite(row.node)}
                             onActivate={() => {
                               if (row.node && !row.node.isCurrent) void checkoutBranch(row.node);
@@ -703,9 +706,9 @@ function Note(props: { text: string }) {
  *   one branch stays a folder. The file version merges while `files.length === 0`
  *   — the same thing said in the file world, but not expressible on a single
  *   `children` array without knowing what a leaf is.
- * - Collapse keys are namespaced by group (`local:` / `remote:`), because
- *   `p2p` under Local and `p2p` under Remote collapse apart. File trees key on
- *   the bare path.
+ * - Collapse keys are namespaced by group (`fav:` / `local:` / `remote:`),
+ *   because `p2p` under Favourites, under Local and under Remote collapse apart.
+ *   File trees key on the bare path.
  *
  * The path *paths* rule is shared in spirit and matched by hand: `allFolderKeys`
  * walks the compacted tree, so a merged chain has one key, exactly like
