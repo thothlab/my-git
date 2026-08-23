@@ -71,6 +71,8 @@ const {
   samePayload,
   drawRows,
   endsEditSession,
+  readingSpot,
+  editorScrollTop,
 } = await load("editRules.js");
 
 let failed = 0;
@@ -343,6 +345,58 @@ eq(endsEditSession("unified"), true, "the split/unified button leaves the editab
 eq(endsEditSession("source"), true, "selecting another file ends the session on this one");
 eq(endsEditSession("blur"), false, "the refresh button takes the caret and nothing else");
 eq(endsEditSession("window"), false, "...nor does alt-tabbing out of the window end it");
+
+// -- Where the editor opens when the control is pressed -----------------------
+// The rows passed in are the ones that carry a `newNo`, measured against the top
+// of the scrolling viewport; a row scrolled past has a negative `top`. The rule
+// picks the topmost one still visible, and the panel puts the caret on that line
+// and scrolls the textarea so it sits at the same height it had in the diff.
+const row = (top, line, height = 16) => ({ top, height, line });
+
+eq(readingSpot([row(0, 1), row(16, 2)]), { line: 1, offset: 0 }, "an unscrolled diff opens at its first line");
+eq(
+  readingSpot([row(-320, 100), row(-16, 120), row(0, 121), row(16, 122)]),
+  { line: 121, offset: 0 },
+  "scrolled down, the topmost visible row is the reader's place",
+);
+eq(
+  readingSpot([row(-8, 127), row(8, 128)]),
+  { line: 127, offset: -8 },
+  "a row half over the top edge still counts, and says how far over",
+);
+eq(
+  readingSpot([row(-16, 40), row(0, 60), row(16, 61)]),
+  { line: 60, offset: 0 },
+  "a row whose bottom edge sits exactly on the top edge is past",
+);
+eq(readingSpot([]), null, "nothing drawn - an empty diff or a big-diff summary");
+eq(
+  readingSpot([row(-64, 10), row(-16, 12)]),
+  null,
+  "a viewport with no line of the new version in it opens the file at its start",
+);
+
+// The scan stops at the answer: the caller measures the DOM lazily, so a rule
+// that drained the sequence would cost a layout read per row of the file.
+let measured = 0;
+function* lazyRows() {
+  for (const r of [row(-32, 100), row(-16, 101), row(0, 102), row(16, 103), row(32, 104)]) {
+    measured++;
+    yield r;
+  }
+}
+eq(readingSpot(lazyRows()), { line: 102, offset: 0 }, "a lazy source answers the same");
+eq(measured, 3, "...and nothing below the first visible row was measured for it");
+
+// Only the clamp is asserted. What the arithmetic does between the clamps is
+// one line of formula, and an expectation spelled with that same formula would
+// hold whatever the formula became - it would check the code against itself.
+eq(editorScrollTop({ line: 1, offset: 0 }, 16), 0, "the first line has nothing above it to scroll");
+eq(
+  editorScrollTop({ line: 5, offset: 300 }, 16),
+  0,
+  "a line nearer the top than the offset asks for clamps - it is on the first screen anyway",
+);
 
 await rm(out, { recursive: true, force: true });
 console.log(failed === 0 ? `\nall green (${process.env.TZ ?? "local"} time zone)` : `\n${failed} FAILED`);

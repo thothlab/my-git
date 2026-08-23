@@ -50,9 +50,13 @@ import {
   countLines,
   drawRows,
   editAvailability,
+  editorScrollTop,
   endsEditSession,
   lineStartOffset,
+  readingSpot,
+  type DrawnRow,
   type EditExit,
+  type ReadingSpot,
   samePayload,
   type EditUnavailable,
 } from "./diff/editRules";
@@ -744,7 +748,52 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     return out.join("\n");
   });
 
-  const enterEdit = async (line?: number) => {
+  /**
+   * The place in the file the reader has in front of them, read off the rows on
+   * screen. Measured here and passed in, rather than looked up after the file
+   * has been opened: `openEditor` is awaited, and geometry taken afterwards
+   * describes a panel that may already have been redrawn.
+   *
+   * Only rows that carry a `newNo` are tagged in the markup, so the query is
+   * the filtering the rule (`editRules.readingSpot`) expects of its caller.
+   *
+   * The rows are measured **as the rule asks for them**, not up front: the
+   * answer is the first visible one, `querySelectorAll` is in document order,
+   * and a file of thousands of rows would otherwise pay a full layout read per
+   * row inside a click handler to learn something the top of the list already
+   * said.
+   */
+  const spotOnScreen = (): ReadingSpot | null => {
+    if (!scrollEl) return null;
+    const box = scrollEl.getBoundingClientRect().top;
+    const els = scrollEl.querySelectorAll<HTMLElement>("[data-new-no]");
+    function* measure(): Generator<DrawnRow> {
+      for (const el of els) {
+        const r = el.getBoundingClientRect();
+        yield { top: r.top - box, height: r.height, line: Number(el.dataset.newNo) };
+      }
+    }
+    return readingSpot(measure());
+  };
+
+  /**
+   * The same measurement for a row the caller already has in hand: a viewport
+   * top in page coordinates, turned into the distance below the top of the
+   * scrolling box that `editRules.editorScrollTop` reads.
+   */
+  const rowOffset = (top: number): number | null =>
+    scrollEl ? top - scrollEl.getBoundingClientRect().top : null;
+
+  /**
+   * `at` is where the caret goes: the line double-clicked, or the place the
+   * reader was reading when they pressed the control. Both anchor a line to the
+   * height it had on screen — for the control that is the topmost visible row,
+   * for the double-click the row under the pointer, which is the one place the
+   * reader has just named. `offset` is `null` only when the geometry could not
+   * be taken at all; then the caret is placed and the surface is left where it
+   * opened.
+   */
+  const enterEdit = async (at?: { line: number; offset: number | null }) => {
     const s = source();
     if (!s || editDisabled() || editing()) return;
     if (!(await openEditor(s.path))) {
@@ -761,10 +810,18 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     // The textarea does not exist until `editing()` flips and Solid flushes.
     queueMicrotask(() => {
       taEl?.focus();
-      if (line != null && taEl) {
-        const at = lineStartOffset(editorText(), line);
-        taEl.setSelectionRange(at, at);
-      }
+      if (!at || !taEl) return;
+      // Order matters: `setSelectionRange` lays the box out, so the scroll
+      // assigned after it lands instead of being clamped against a height the
+      // browser has not measured yet.
+      const off = lineStartOffset(editorText(), at.line);
+      taEl.setSelectionRange(off, off);
+      if (at.offset === null) return;
+      taEl.scrollTop = editorScrollTop({ line: at.line, offset: at.offset }, LINE_PX);
+      // The textarea's own `onScroll` mirrors this into the gutter, but only
+      // once the event is delivered; the numbers are set here as well so they
+      // are never drawn a frame out of step with the text beside them.
+      if (gutterEl) gutterEl.scrollTop = taEl.scrollTop;
     });
   };
 
@@ -973,7 +1030,9 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
             // decides anything (`editRules.endsEditSession`), so this is now
             // only about not making the reader click back into their text.
             onMouseDown={(e) => e.preventDefault()}
-            onClick={() => (editing() ? exitEdit("toggle") : void enterEdit())}
+            onClick={() =>
+              editing() ? exitEdit("toggle") : void enterEdit(spotOnScreen() ?? undefined)
+            }
           >
             ✎ {d().editToggle()}
           </button>
@@ -1076,7 +1135,9 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
                             stageable={stageable()}
                             editStale={editing() || editStale()}
                             onEditLine={
-                              editDisabled() ? undefined : (n) => void enterEdit(n)
+                              editDisabled()
+                                ? undefined
+                                : (n, top) => void enterEdit({ line: n, offset: rowOffset(top) })
                             }
                             widened={widened()}
                             base={source()!.kind === "worktree" ? (source() as { base: DiffBase }).base : null}
@@ -1255,9 +1316,11 @@ function HunkBody(props: {
   stageable: boolean;
   /** The diff on screen was not computed from the file as it now is. */
   editStale: boolean;
-  /** Double-click on a right-hand line: open the editor with the caret there.
+  /** Double-click on a right-hand line: open the editor with the caret there,
+   *  showing that line at the height it was clicked at — `top` is the row's
+   *  viewport top, in page coordinates.
    *  Absent when editing is not available for this comparison. */
-  onEditLine?: (newNo: number) => void;
+  onEditLine?: (newNo: number, top: number) => void;
   /** The payload was asked for with more context than the file was first shown
    * with, so a hunk here can cover what used to be two. */
   widened: boolean;
@@ -1376,7 +1439,12 @@ function lineBg(o: string | undefined) {
 }
 
 /** One paired row, in either layout. The anchor lands on the row that opens a
- * difference, which is what the previous / next buttons scroll to. */
+ * difference, which is what the previous / next buttons scroll to.
+ *
+ * `data-new-no` carries the line of the new version this row draws — the one
+ * thing `spotOnScreen` needs to say where the reader is in the file. It is left
+ * off a row with no right-hand line, which is what makes that query the
+ * filtering `editRules.readingSpot` expects of its caller. */
 function RowView(props: {
   row: Row;
   split: boolean;
@@ -1384,7 +1452,7 @@ function RowView(props: {
   highlight: HighlightMode;
   active: boolean;
   anchor: (idx: number, el: HTMLElement) => void;
-  onEditLine?: (newNo: number) => void;
+  onEditLine?: (newNo: number, top: number) => void;
 }) {
   const segs = createMemo(() =>
     props.highlight === "words" && pairChanged(props.row)
@@ -1395,6 +1463,7 @@ function RowView(props: {
     <div
       class="flex"
       classList={{ "ring-1 ring-inset ring-accent": props.active && props.row.first }}
+      data-new-no={props.row.right?.newNo}
       ref={(el) => {
         if (props.row.first && props.row.diff >= 0) props.anchor(props.row.diff, el);
       }}
@@ -1503,19 +1572,23 @@ function Cell(props: {
   highlight: HighlightMode;
   segs?: Seg[];
   /** Second, equal way into the editor: point at the line and open it there. */
-  onEditLine?: (newNo: number) => void;
+  onEditLine?: (newNo: number, top: number) => void;
 }) {
   const no = () => (props.side === "old" ? props.line?.oldNo : props.line?.newNo);
   const bg = () => (props.line ? lineBg(props.line.origin) : "bg-bg-muted/40");
-  const editHere = () => {
+  // The row's own top goes with the line number: this cell *is* the row the
+  // reader pointed at, so its geometry is the height the line has to come back
+  // to. Read at the click, before the editor is opened and the panel redrawn.
+  const editHere = (el: HTMLElement) => {
     const n = props.line?.newNo;
-    if (props.side === "new" && n != null) props.onEditLine?.(n);
+    if (props.side === "new" && n != null)
+      props.onEditLine?.(n, el.getBoundingClientRect().top);
   };
   return (
     <div
       class={`flex min-w-0 ${bg()}`}
       style={{ width: `${props.frac * 100}%` }}
-      onDblClick={editHere}
+      onDblClick={(e) => editHere(e.currentTarget)}
     >
       <span class="w-10 shrink-0 select-none pr-2 text-right text-fg-muted">
         {no() ?? ""}

@@ -285,3 +285,86 @@ export type EditExit = "escape" | "toggle" | "unified" | "source" | "blur" | "wi
 export function endsEditSession(exit: EditExit): boolean {
   return exit === "escape" || exit === "toggle" || exit === "unified" || exit === "source";
 }
+
+/**
+ * One drawn diff row that carries a line number of the new version, measured
+ * against the top of the scrolling viewport: `top` is the row's upper edge in
+ * viewport coordinates (negative once it has been scrolled past) and `height`
+ * its drawn height.
+ *
+ * Viewport-relative rather than `offsetTop` plus `scrollTop`: `offsetTop` is
+ * only the right number while the scrolling box is also the row's
+ * `offsetParent`, which is true today by accident of one `absolute` and would
+ * go silently wrong the day a wrapper between them becomes positioned.
+ */
+export interface DrawnRow {
+  top: number;
+  height: number;
+  /** `newNo` of the row — rows without one are not offered here. */
+  line: number;
+}
+
+/** The place in the file the reader is looking at: a line of the new version
+ *  and how far below the top of the viewport that line was drawn. */
+export interface ReadingSpot {
+  line: number;
+  /** Viewport-relative top of the row; negative when it is partly scrolled off. */
+  offset: number;
+}
+
+/**
+ * Where the reader is in the file, from the rows on screen: the topmost one
+ * still visible.
+ *
+ * The topmost visible row and not the current difference: `current` is `-1`
+ * until someone uses previous/next, so a rule that preferred it would answer
+ * "start of file" in the very case this exists for — a reader who scrolled by
+ * hand — while the topmost row lands next to the current difference anyway
+ * whenever there is one, because jumping to it scrolled it into view.
+ *
+ * `rows` are the rows that *have* a `newNo`, in document order; the deletion
+ * rows in between are simply not passed. Filtering before the scan gives the
+ * same answer as scanning and then skipping, because "the bottom edge is below
+ * the top of the viewport" is monotone in document order — once true for a row
+ * it is true for every row after it.
+ *
+ * **An `Iterable`, not an array, and the scan stops at the answer.** That same
+ * monotonicity makes every row after the first visible one irrelevant, and
+ * measuring a row is not free: the caller's source measures the DOM lazily, so
+ * a diff of thousands of rows costs the handful above the fold rather than a
+ * `getBoundingClientRect` per row inside a click handler.
+ *
+ * `null` when nothing qualifies — an empty diff, a viewport filled entirely by
+ * deleted lines, the summary of a big diff. The caller opens the file at its
+ * beginning then; guessing the last line above the viewport would move the
+ * reader in the one direction they can already see is wrong.
+ */
+export function readingSpot(rows: Iterable<DrawnRow>): ReadingSpot | null {
+  for (const r of rows) if (r.top + r.height > 0) return { line: r.line, offset: r.top };
+  return null;
+}
+
+/**
+ * Scroll offset that brings **the anchor line** back to the height it was read
+ * at — `spot.offset` below the top of the box, where the diff had drawn it.
+ *
+ * That one line, and not the picture around it. Two things differ on the way in
+ * and neither is corrected here: the diff rows are drawn `leading-tight` (about
+ * 15 px) while the editing surface is `LINE_PX`, so lines drift roughly a pixel
+ * apart per line away from the anchor; and above the anchor the two surfaces
+ * hold different content, because the deleted lines the comparison shows are
+ * not in the file. Keeping one named line where the reader left it is the whole
+ * promise — holding the two columns level while someone types is deliberately
+ * not offered here.
+ *
+ * `(line - 1) * lineHeight` is the exact top of a line in the textarea only
+ * because that surface is drawn for it — `wrap="off"`, so one line is one drawn
+ * row, an explicit `line-height`, and no vertical padding.
+ *
+ * Clamped at zero: a line near the top of the file has less text above it than
+ * the offset asks for, and there is nothing to scroll. The caret is on the first
+ * screen either way, so it stays visible.
+ */
+export function editorScrollTop(spot: ReadingSpot, lineHeight: number): number {
+  return Math.max(0, (spot.line - 1) * lineHeight - spot.offset);
+}
