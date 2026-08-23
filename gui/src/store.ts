@@ -69,7 +69,22 @@ export function cycleTheme() {
 }
 applyTheme();
 
-/** Install a fresh RepoState and re-validate everything that pointed into the old one. */
+/**
+ * Install a fresh RepoState and re-validate everything that pointed into the old one.
+ *
+ * **`setState` here must stay a bare call — no `batch`, no transition.** It is
+ * not only a store update: a new state object is how the window says "the world
+ * may have moved", and `DiffView` hangs its whole invalidation on it. Its effect
+ * on `state` drops the diff it has drawn and re-reads the file, which is what
+ * makes a `git reset` run in a terminal show up when the panel is refreshed —
+ * and what every staged hunk now relies on, since the diff panel no longer
+ * re-reads on its own. Deferred or coalesced away, that failure is silent: the
+ * build stays green and the panel keeps drawing the previous patch.
+ *
+ * The revision below runs *after* the effect has already fired, so nothing may
+ * assume the effect sees a re-validated selection — `DiffView` defers its own
+ * read by a microtask for exactly that reason.
+ */
 function applyState(s: RepoState): void {
   setState(s);
   // keep selection valid after the tree changes

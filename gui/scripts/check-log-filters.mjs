@@ -68,6 +68,7 @@ const {
   lineStartOffset,
   clampCurrent,
   mayOverwrite,
+  samePayload,
 } = await load("editRules.js");
 
 let failed = 0;
@@ -237,6 +238,45 @@ eq(mayOverwrite("missing"), true, "a deleted file is created again");
 eq(mayOverwrite("binary"), false, "a file replaced by a binary is not written over");
 eq(mayOverwrite("too-large"), false, "...nor one that outgrew the ceiling");
 eq(mayOverwrite("mixed-eol"), false, "...nor one whose line endings became mixed");
+
+// -- Is the answer that just arrived the one already on screen? ---------------
+// Every fresh RepoState makes the panel re-read the file, and most of those
+// answers are identical. Republishing one rebuilds a reference-keyed row list
+// and takes the scroll position with it, so an alt-tab would jump the reader to
+// the top of the file.
+const hunk = (header, patch) => ({ header, patch });
+const payload = (over = {}) => ({
+  path: "a.txt",
+  binary: false,
+  mergeFirstParent: false,
+  hunks: [hunk("@@ -1,2 +1,2 @@", "-a\n+b\n")],
+  ...over,
+});
+eq(samePayload(payload(), payload()), true, "the same patch read twice is the same payload");
+eq(samePayload(payload(), null), false, "the first answer replaces nothing shown");
+eq(samePayload(null, null), false, "...and two absences are not a match either");
+eq(
+  samePayload(payload(), payload({ hunks: [hunk("@@ -1,2 +1,2 @@", "-a\n+c\n")] })),
+  false,
+  "a hunk whose text changed is a different payload",
+);
+eq(
+  samePayload(payload(), payload({ hunks: [hunk("@@ -1,3 +1,3 @@", "-a\n+b\n")] })),
+  false,
+  "...as is one that moved to other line numbers",
+);
+eq(samePayload(payload(), payload({ hunks: [] })), false, "a staged hunk leaves a shorter list");
+eq(samePayload(payload(), payload({ path: "b.txt" })), false, "another file is another payload");
+eq(
+  samePayload(payload({ binary: true, oldSize: 4 }), payload({ binary: true, oldSize: 9 })),
+  false,
+  "a binary file is compared by its sizes",
+);
+eq(
+  samePayload(payload(), payload({ mergeFirstParent: true })),
+  false,
+  "the first-parent note is part of what is drawn",
+);
 
 await rm(out, { recursive: true, force: true });
 console.log(failed === 0 ? `\nall green (${process.env.TZ ?? "local"} time zone)` : `\n${failed} FAILED`);

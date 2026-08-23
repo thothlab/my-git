@@ -5,6 +5,7 @@ import {
   createResource,
   createSignal,
   createEffect,
+  on,
   onCleanup,
   untrack,
 } from "solid-js";
@@ -17,6 +18,7 @@ import {
   hunkRevert,
   hunkStage,
   hunkUnstage,
+  repoState,
   type DiffBase,
   type DiffLine,
   type FileDiff,
@@ -25,7 +27,7 @@ import {
   type TextFile,
   type WhitespaceMode,
 } from "../api";
-import { confirmAction, modalOpen, refresh, run, selectedPath } from "../store";
+import { confirmAction, modalOpen, run, selectedPath, state } from "../store";
 import { d } from "../i18n";
 import { beginDrag } from "./Resizer";
 import { registerHotkey } from "../hotkeys";
@@ -48,6 +50,7 @@ import {
   countLines,
   editAvailability,
   lineStartOffset,
+  samePayload,
   type EditUnavailable,
 } from "./diff/editRules";
 import {
@@ -238,12 +241,11 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
   });
 
   const act = async (fn: () => Promise<RepoState>) => {
+    // The request does not change — the *file* does. Nothing is dropped or
+    // refetched here: `run()` installs a fresh `RepoState`, and the effect that
+    // watches it re-reads the file for us. Doing it here as well would ask git
+    // for the same patch twice on every staged hunk.
     await run(fn());
-    // The request did not change — the *file* did. Without dropping the key the
-    // answer that comes back is refused as "already drawn" and the panel keeps
-    // showing the patch from before the hunk was staged.
-    dropAccepted();
-    refetch();
   };
 
   // Split ratio: fraction of width given to the "old" (left) side, shared across
@@ -315,6 +317,47 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
    * were renumbered by the change, and the anchored elements are detached.
    */
   let fileChanged = false;
+  /**
+   * The one `RepoState` this panel has already answered for, by identity.
+   *
+   * Deliberately not a "skip the next one" flag: another panel committing or
+   * stashing installs a state of its own while this re-read is in flight, and a
+   * flag would be spent on *that* one — the change nobody re-read would go
+   * unnoticed, and the redraw would land on the quiet answer instead, over an
+   * editor that is still open. Naming the object leaves both in their right
+   * places.
+   */
+  let quietState: RepoState | null = null;
+  /**
+   * `refresh()` whose result the state effect below will not answer with a
+   * second read, because the caller has just read the file itself.
+   *
+   * The state is marked before it is installed, which is what the two
+   * continuations of one promise buy: this `then` is registered first, so it
+   * runs before the `await` inside `run()` hands the same object to
+   * `applyState`. A state arriving from anywhere else is not this object and
+   * stays loud.
+   */
+  const refreshQuiet = () => {
+    const p = repoState();
+    void p.then(
+      (s) => {
+        quietState = s;
+      },
+      // The read that was to be quiet never happened. `run()` answers a failure
+      // by re-reading the repository itself, and *that* state is deliberately
+      // left loud: it is a different read, taken later, whose content this
+      // panel has not seen, so calling it quiet would be a claim it cannot
+      // back. Inheriting instead would mean teaching the store a per-caller
+      // quiet channel for one panel's saved round trip. The cost of the loud
+      // state is one redraw, and `samePayload` swallows it unless the file
+      // really did move.
+      () => {
+        quietState = null;
+      },
+    );
+    void run(p);
+  };
   let acceptedContext: number | undefined = undefined;
   let acceptedRevealed: GapRange[] = [];
   let drawnLines = 0;
@@ -377,6 +420,15 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     acceptedContext = ctx;
     acceptedRevealed = untrack(revealed);
     drawnLines = got;
+    // The re-read found the file exactly as it is already drawn — the common
+    // outcome of "the world may have moved". Redrawing it would rebuild every
+    // row for an identical patch and drop the reader's scroll position with
+    // them; the rule itself lives in `editRules.samePayload`, where it is
+    // checked.
+    if (samePayload(f, untrack(shown))) {
+      fileChanged = false;
+      return;
+    }
     if (!fileChanged) return setShown(f);
     fileChanged = false;
     // Before publishing: the entries are elements of the rows about to be
@@ -391,6 +443,62 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     const count = untrack(view)?.count ?? 0;
     setCurrent((c) => clampCurrent(count, c));
   });
+
+  /**
+   * A fresh `RepoState` means the world may have moved — including outside the
+   * application.
+   *
+   * `acceptedKey` describes the *request*, not what the request reads, so a
+   * `git reset` run in a terminal leaves the panel drawing the patch it drew
+   * before: the refresh button re-reads the repository, the request comes out
+   * word for word the same, and the answer is refused as "already drawn". Every
+   * installation of a new state — the refresh button, the window regaining
+   * focus, any mutation through `run()` — is the moment that guess stops being
+   * safe, so the payload on screen stops counting as current and the next one
+   * is published.
+   *
+   * `dropAccepted()` and not the reset above: the reader has not gone anywhere,
+   * so the reading position is reconciled rather than thrown away.
+   *
+   * No loop is possible: `refetch()` reaches only the read-only diff commands,
+   * which answer with a `FileDiff` and never install a `RepoState`.
+   *
+   * `defer` because the first state is not a change — the resource is fetching
+   * for it already.
+   */
+  createEffect(
+    on(
+      state,
+      (s) => {
+        // This panel has already read the file for this very state. Released
+        // right here: the object is wanted for one comparison, and holding it
+        // would pin a whole `RepoState`, changelists and files, until the panel
+        // is torn down.
+        const quiet = quietState;
+        quietState = null;
+        if (s !== null && s === quiet) return;
+        // Deferred by a microtask, because this effect runs *inside*
+        // `setState(s)` — before `applyState` has finished revising what
+        // pointed into the old state. A mutation that took the shown file out
+        // of the changelists clears the selection a line later, and asking git
+        // for the diff of a path already on its way out is a round trip whose
+        // answer nothing will draw. A microtask lands after the whole of
+        // `applyState`, so the selection read below is the revised one.
+        const scheduled = source();
+        if (!scheduled) return;
+        queueMicrotask(() => {
+          // The reader left for another file inside that microtask: the source
+          // change has already restarted the resource, and re-reading here
+          // would both duplicate that request and be an act upon a file this
+          // invalidation was never about.
+          if (!sameDiffSource(source(), scheduled)) return;
+          dropAccepted();
+          void refetch();
+        });
+      },
+      { defer: true },
+    ),
+  );
 
 
   /**
@@ -627,8 +735,9 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     setEditStale(false);
     // Last, because this is the call that can move the selection: an edit can
     // flip a file's status, and a re-selection landing mid-recompute would look
-    // like a departure and close the editor under the caret.
-    refresh();
+    // like a departure and close the editor under the caret. Quiet, because the
+    // refetch above has already read the file this state describes.
+    refreshQuiet();
   };
 
   /** Leaving the editor: the deferred write is waited for here, because this
@@ -676,7 +785,9 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     setEditStale(false);
     if (editorOpen()) {
       closeEditor();
-      refresh();
+      // Quiet: the source has just changed, so the resource is already fetching
+      // for the new file and there is no stale payload to drop.
+      refreshQuiet();
     }
   });
 

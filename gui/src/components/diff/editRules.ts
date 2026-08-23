@@ -161,3 +161,52 @@ export function clampCurrent(count: number, current: number): number {
 export function mayOverwrite(blocked: EditBlock | null): boolean {
   return blocked === null || blocked === "missing";
 }
+
+/**
+ * The parts of a hunk that decide whether two answers describe the same patch.
+ * `patch` is the hunk's own text, so the lines are compared through it.
+ *
+ * Declared here rather than imported: `FileDiff` from `../../api` satisfies it
+ * structurally, and this module imports nothing (see the header).
+ */
+export interface PatchHunk {
+  header: string;
+  patch: string;
+}
+
+/** Everything a `FileDiff` says about the file, as this rule reads it. */
+export interface PatchPayload {
+  path: string;
+  binary: boolean;
+  oldSize?: number;
+  newSize?: number;
+  mergeFirstParent: boolean;
+  hunks: PatchHunk[];
+}
+
+/**
+ * Do two answers describe the very same patch?
+ *
+ * The panel re-reads the file whenever a fresh `RepoState` says the world may
+ * have moved - a mutation, the refresh button, the window regaining focus - and
+ * most of those answers come back identical. Publishing one anyway is not wrong,
+ * it is expensive: the row list is keyed by reference, so every row is rebuilt
+ * and the reader's scroll position goes with it. Alt-tabbing to a terminal and
+ * back would jump the diff to the top of the file.
+ *
+ * Two absent payloads are *not* the same: "nothing shown" is the state the first
+ * answer has to replace.
+ */
+export function samePayload(a: PatchPayload | null, b: PatchPayload | null): boolean {
+  if (!a || !b) return false;
+  if (
+    a.path !== b.path ||
+    a.binary !== b.binary ||
+    a.oldSize !== b.oldSize ||
+    a.newSize !== b.newSize ||
+    a.mergeFirstParent !== b.mergeFirstParent ||
+    a.hunks.length !== b.hunks.length
+  )
+    return false;
+  return a.hunks.every((h, i) => h.header === b.hunks[i].header && h.patch === b.hunks[i].patch);
+}
