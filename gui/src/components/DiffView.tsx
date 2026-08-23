@@ -27,7 +27,7 @@ import {
   type TextFile,
   type WhitespaceMode,
 } from "../api";
-import { confirmAction, modalOpen, run, selectedPath, state } from "../store";
+import { confirmAction, run, selectedPath, state } from "../store";
 import { d } from "../i18n";
 import { beginDrag } from "./Resizer";
 import { registerHotkey } from "../hotkeys";
@@ -48,8 +48,11 @@ import {
 import {
   clampCurrent,
   countLines,
+  drawRows,
   editAvailability,
+  endsEditSession,
   lineStartOffset,
+  type EditExit,
   samePayload,
   type EditUnavailable,
 } from "./diff/editRules";
@@ -376,12 +379,29 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
   // Keyed on the file and the whitespace mode, not on the whole request: asking
   // for more context is the reader *staying* in this file, and resetting here
   // would throw away the position they widened the context to look at.
-  let shownKey: string | null = null;
-  createEffect(() => {
+  const requestKey = (): string | null => {
     const s = source();
-    const key = s ? `${JSON.stringify(s)}|${ws()}` : null;
+    return s ? `${JSON.stringify(s)}|${ws()}` : null;
+  };
+  let shownKey: string | null = null;
+  /**
+   * The request the payload on screen answers — a signal, unlike `shownKey`,
+   * because the render gate below is the one reader that has to react to it.
+   *
+   * It is what tells a *re-read* from a *departure* while a request is in
+   * flight, and that is the whole difference between keeping the reader's
+   * scroll position and throwing them back to the top of the file.
+   */
+  const [drawnKey, setDrawnKey] = createSignal<string | null>(null);
+  createEffect(() => {
+    const key = requestKey();
     if (key === shownKey) return;
     shownKey = key;
+    // The reader went elsewhere: nothing drawn answers the request now being
+    // made, so the placeholder is the honest thing to show while it travels.
+    // The only place this is cleared — `dropAccepted()` must not, or the
+    // re-reads it exists for would each tear the rows down again.
+    setDrawnKey(null);
     setCurrent(-1);
     setNote("");
     setOpened(new Set<string>());
@@ -417,6 +437,10 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     // screen; re-publishing it would rebuild every row for nothing.
     if (key === acceptedKey && untrack(shown)) return;
     acceptedKey = key;
+    // Set here rather than beside `setShown`: the branch below that keeps the
+    // rows untouched because the answer is identical is *exactly* the case the
+    // render gate is for, and it never reaches a `setShown`.
+    setDrawnKey(shownKey);
     acceptedContext = ctx;
     acceptedRevealed = untrack(revealed);
     drawnLines = got;
@@ -605,8 +629,24 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
    * one-line notice would be a strange thing to draw.
    */
   const editorLeft = () => (hasSideBySide() ? ratio() * 100 : 0);
+  /**
+   * Are the diff rows on screen? The rule is `editRules.drawRows`, where it is
+   * checked; `diff.error` and `diff.loading` are read, never `diff()` — reading
+   * a rejected resource re-throws.
+   *
+   * The same predicate gates the rows and everything positioned against them.
+   * Read in one place and not the other, a re-read would snap the editing
+   * surface from half the panel to all of it and back on every refresh.
+   */
+  const rowsDrawn = () =>
+    drawRows({
+      loading: diff.loading,
+      error: !!diff.error,
+      drawnKey: drawnKey(),
+      requestKey: requestKey(),
+    });
   const hasSideBySide = () =>
-    split() && !diff.loading && !diff.error && !!view() && view()!.hunks.length > 0 && !bigDiff();
+    split() && rowsDrawn() && !!view() && view()!.hunks.length > 0 && !bigDiff();
 
   const labels = createMemo<{ left: SideLabel; right: SideLabel } | null>(() => {
     const s = source();
@@ -751,6 +791,32 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     await recompute();
   };
 
+  /**
+   * Every way out of an editing session, and the only place that decides
+   * whether one is.
+   *
+   * A funnel rather than a call at each site: the policy is
+   * `editRules.endsEditSession`, and a policy consulted by some of the exits
+   * and bypassed by the rest is not a policy. All six values are passed from
+   * here, so changing the rule changes the behaviour.
+   *
+   * What differs between the exits is only how much of the write can be waited
+   * for. A source change cannot be waited out — the panel is already fetching
+   * for the file the reader moved to — so the draft is let go and the write is
+   * issued behind it; every other exit can afford the round trip and takes it.
+   */
+  const exitEdit = (exit: EditExit): void => {
+    if (!endsEditSession(exit) || !editorOpen()) return;
+    if (exit === "source") {
+      closeEditor();
+      // Quiet: the source has just changed, so the resource is already fetching
+      // for the new file and there is no stale payload to drop.
+      refreshQuiet();
+      return;
+    }
+    void leaveEdit();
+  };
+
   const saveExplicit = async () => {
     if (!editorOpen()) return;
     await saveNow();
@@ -783,12 +849,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     editSrc = s;
     if (!left) return;
     setEditStale(false);
-    if (editorOpen()) {
-      closeEditor();
-      // Quiet: the source has just changed, so the resource is already fetching
-      // for the new file and there is no stale payload to drop.
-      refreshQuiet();
-    }
+    exitEdit("source");
   });
 
   // Unmount is a departure too — the window mode switches above the "the user is
@@ -889,7 +950,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
             class="w-20 shrink-0 whitespace-nowrap rounded border border-border px-1.5 py-0.5 text-center hover:bg-bg-muted"
             onClick={() => {
               // Editing is a side-by-side affair; leaving the layout leaves it.
-              if (editing()) void leaveEdit();
+              exitEdit("unified");
               setSplit((v) => !v);
             }}
             title="Side-by-side / unified"
@@ -905,10 +966,14 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
             }}
             disabled={editDisabled() && !editing()}
             title={editTip()}
-            // Without this the textarea loses focus before the click lands, the
-            // blur handler closes the editor, and the click then reopens it.
+            // The caret stays in the draft when this is pressed. Every button
+            // in the window takes the focus off a textarea when it is clicked,
+            // and that used to be enough to close the editor here — the press
+            // would shut it and the click would reopen it. The blur no longer
+            // decides anything (`editRules.endsEditSession`), so this is now
+            // only about not making the reader click back into their text.
             onMouseDown={(e) => e.preventDefault()}
-            onClick={() => void (editing() ? leaveEdit() : enterEdit())}
+            onClick={() => (editing() ? exitEdit("toggle") : void enterEdit())}
           >
             ✎ {d().editToggle()}
           </button>
@@ -944,7 +1009,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
             class="absolute inset-0 overflow-auto font-mono text-xs leading-tight"
           >
             <Show
-              when={!diff.loading && !diff.error}
+              when={rowsDrawn()}
               fallback={
                 <div class="p-3 text-fg-muted">
                   {diff.error ? d().diffUnavailable() : "…"}
@@ -1077,22 +1142,15 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
                 onKeyDown={(e) => {
                   if (e.code !== "Escape") return;
                   e.preventDefault();
-                  void leaveEdit();
+                  exitEdit("escape");
                 }}
                 onFocus={() => setEditorFocused(true)}
                 onBlur={() => {
                   setEditorFocused(false);
-                  // The stale-file question takes the focus and gives it back;
-                  // closing here would answer it against a draft that is gone.
-                  if (modalOpen()) return;
-                  // The window lost focus (Cmd+Tab, clicking the desktop):
-                  // not the user leaving the editor, and closing then reads as
-                  // the panel shutting itself for no reason. Asked of the
-                  // document, not answered from `relatedTarget` — that one is
-                  // null for a click on any *non-focusable* part of the
-                  // application too, which is a departure and must close.
-                  if (!document.hasFocus()) return;
-                  void leaveEdit();
+                  // The caret leaving is not the reader leaving; the window
+                  // going away is not either. Told apart because they are
+                  // different events — `exitEdit` judges both.
+                  exitEdit(document.hasFocus() ? "blur" : "window");
                 }}
               />
             </div>

@@ -210,3 +210,78 @@ export function samePayload(a: PatchPayload | null, b: PatchPayload | null): boo
     return false;
   return a.hunks.every((h, i) => h.header === b.hunks[i].header && h.patch === b.hunks[i].patch);
 }
+
+/**
+ * What the panel knows when it has to decide whether the rows already on screen
+ * may stay there while a new answer is on its way.
+ *
+ * The two keys name a *request* — the source and the whitespace mode — and
+ * deliberately not the context width: widening the context is the reader
+ * staying in this file, so the payload drawn from the narrower answer is still
+ * an answer about the same thing.
+ */
+export interface DrawGate {
+  /** A request is in flight. */
+  loading: boolean;
+  /** The last request failed. */
+  error: boolean;
+  /** Request the drawn payload answers; `null` when nothing is drawn. */
+  drawnKey: string | null;
+  /** Request the panel would ask for as it stands. */
+  requestKey: string | null;
+}
+
+/**
+ * May the diff rows be drawn right now?
+ *
+ * The question exists because a re-read is not a departure. The panel re-reads
+ * the file on every fresh `RepoState` - a staged hunk, the refresh button, the
+ * window regaining focus - and the answer is usually the one already drawn.
+ * Tearing the rows down for the wait empties the scrolling container, so the
+ * browser clamps its `scrollTop` to zero and the reader is thrown back to the
+ * first hunk; the payload comparison that follows cannot undo that, because the
+ * damage is done before the answer arrives. So a reload of the *same* request
+ * keeps drawing what it already drew, and only the wait for a request the drawn
+ * payload does not answer - another file, another base, another whitespace mode
+ * - shows the placeholder.
+ *
+ * A failure hides the rows whatever is drawn: a patch left standing under
+ * "diff unavailable" would be read as current.
+ */
+export function drawRows(g: DrawGate): boolean {
+  if (g.error) return false;
+  if (!g.loading) return true;
+  return g.drawnKey !== null && g.drawnKey === g.requestKey;
+}
+
+/**
+ * How an editing session can be left.
+ *
+ * `blur` is the caret going somewhere else inside the window - another panel, a
+ * toolbar button, a bare patch of background; `window` is the whole application
+ * losing the keyboard.
+ */
+export type EditExit = "escape" | "toggle" | "unified" | "source" | "blur" | "window";
+
+/**
+ * Does this departure end the editing session?
+ *
+ * Only the ones that say so. `escape` and `toggle` are the reader asking;
+ * `unified` and `source` are the editable side ceasing to exist under them.
+ * All six reach here from one funnel (`exitEdit` in `DiffView`), so this is the
+ * whole policy and not a second opinion beside it.
+ *
+ * **Losing the caret is not one of them.** Every button in the window takes the
+ * focus off the textarea when it is pressed - which is why the edit toggle has
+ * to defend itself with `preventDefault` - so treating a blur as a departure
+ * means the refresh button, pressed constantly, drops the reader out of edit
+ * mode. It is also a third detector of something already detected twice:
+ * leaving for another file is `source`, switching the window mode unmounts the
+ * panel and the draft survives on purpose, and anything typed is on disk within
+ * `AUTOSAVE_MS` regardless. `window` is kept apart from `blur` even though both
+ * answer the same today, because they are different events and a future policy
+ * would need to tell them apart.
+ */
+export function endsEditSession(exit: EditExit): boolean {
+  return exit === "escape" || exit === "toggle" || exit === "unified" || exit === "source";
+}

@@ -69,6 +69,8 @@ const {
   clampCurrent,
   mayOverwrite,
   samePayload,
+  drawRows,
+  endsEditSession,
 } = await load("editRules.js");
 
 let failed = 0;
@@ -277,6 +279,70 @@ eq(
   false,
   "the first-parent note is part of what is drawn",
 );
+
+// -- May the rows already drawn stay while a new answer travels? --------------
+// A re-read is not a departure. Tearing the rows down for the wait empties the
+// scrolling container, the browser clamps its scrollTop to zero, and the reader
+// is thrown back to the first hunk - before any payload comparison can help.
+const gate = (over = {}) => ({
+  loading: false,
+  error: false,
+  drawnKey: "a.txt|none",
+  requestKey: "a.txt|none",
+  ...over,
+});
+eq(drawRows(gate()), true, "a settled answer is drawn");
+eq(
+  drawRows(gate({ loading: true })),
+  true,
+  "a re-read of the same request keeps the rows it already drew",
+);
+eq(
+  drawRows(gate({ loading: true, requestKey: "b.txt|none" })),
+  false,
+  "the wait for another file shows the placeholder instead",
+);
+eq(
+  drawRows(gate({ loading: true, requestKey: "a.txt|all" })),
+  false,
+  "...and so does the wait for another whitespace mode",
+);
+eq(
+  drawRows(gate({ loading: true, drawnKey: null })),
+  false,
+  "the very first answer has nothing to keep drawing",
+);
+eq(
+  drawRows(gate({ loading: true, drawnKey: null, requestKey: null })),
+  false,
+  "two absent keys are not a match",
+);
+eq(
+  drawRows(gate({ error: true })),
+  false,
+  "a patch left standing under \"diff unavailable\" would read as current",
+);
+eq(
+  drawRows(gate({ error: true, loading: true })),
+  false,
+  "...including while the next attempt is in flight",
+);
+
+// -- What ends an editing session (prd_03) ------------------------------------
+// Every exit in `DiffView` goes through `exitEdit`, which passes one of these
+// six and does nothing when the answer is false - so each value below is one a
+// real call site hands over, and flipping one of these answers changes what the
+// panel does.
+//
+// Losing the caret is not a departure: every button in the window takes the
+// focus off the textarea when pressed, so a blur that closes the editor means
+// the refresh button drops the reader out of edit mode.
+eq(endsEditSession("escape"), true, "Escape in the textarea saves and closes");
+eq(endsEditSession("toggle"), true, "...and so does a second press of the edit control");
+eq(endsEditSession("unified"), true, "the split/unified button leaves the editable layout");
+eq(endsEditSession("source"), true, "selecting another file ends the session on this one");
+eq(endsEditSession("blur"), false, "the refresh button takes the caret and nothing else");
+eq(endsEditSession("window"), false, "...nor does alt-tabbing out of the window end it");
 
 await rm(out, { recursive: true, force: true });
 console.log(failed === 0 ? `\nall green (${process.env.TZ ?? "local"} time zone)` : `\n${failed} FAILED`);
