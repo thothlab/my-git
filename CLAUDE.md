@@ -43,7 +43,12 @@ CI (`.github/workflows/ci.yml`) гоняет только `terminal` (через
 Tauri) — fmt / clippy / test. GUI в CI не
 проверяется ничем, локальный прогон — единственные ворота. Релизы: тег `v*` собирает TUI
 (`release.yml`), тег `gui-v*` — инсталляторы Graft (`release-gui.yml`), версию бампить
-одновременно в `gui/package.json`, `gui/src-tauri/Cargo.toml` и `gui/src-tauri/tauri.conf.json`.
+одновременно в **пяти** местах, а не в трёх: `gui/package.json`,
+`gui/src-tauri/Cargo.toml`, `gui/src-tauri/tauri.conf.json` — и следом два файла блокировок,
+`gui/package-lock.json` (два вхождения) и `Cargo.lock` (пакет `graft`). Локи перепишут
+`npm install --package-lock-only` и `cargo build`, но если оставить их отставшими, релизная
+сборка стартует с грязным деревом. Комментарий в `.github/workflows/release-gui.yml` до сих
+пор называет только первые три — не он источник правды.
 
 ## Карта каталогов
 
