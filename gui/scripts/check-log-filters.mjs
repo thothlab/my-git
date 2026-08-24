@@ -73,6 +73,7 @@ const {
   endsEditSession,
   readingSpot,
   editorScrollTop,
+  newSideAnchors,
 } = await load("editRules.js");
 
 let failed = 0;
@@ -347,7 +348,8 @@ eq(endsEditSession("blur"), false, "the refresh button takes the caret and nothi
 eq(endsEditSession("window"), false, "...nor does alt-tabbing out of the window end it");
 
 // -- Where the editor opens when the control is pressed -----------------------
-// The rows passed in are the ones that carry a `newNo`, measured against the top
+// The rows passed in are every drawn row, each with the new-version line it
+// stands on (see `newSideAnchors`), measured against the top
 // of the scrolling viewport; a row scrolled past has a negative `top`. The rule
 // picks the topmost one still visible, and the panel puts the caret on that line
 // and scrolls the textarea so it sits at the same height it had in the diff.
@@ -397,6 +399,42 @@ eq(
   0,
   "a line nearer the top than the offset asks for clamps - it is on the first screen anyway",
 );
+
+// -- The line a row stands on in the new version ------------------------------
+// The input is each row's own `newNo`, `null` where the row draws a deletion.
+// Expectations are read off the file the diff describes, not recomputed from the
+// same walk: a deletion belongs to the line that closed over the gap it left.
+eq(
+  newSideAnchors([10, 11, 12]),
+  [10, 11, 12],
+  "rows that have a number keep it",
+);
+eq(
+  newSideAnchors([10, null, 11]),
+  [10, 11, 11],
+  "text taken out between lines 10 and 11 belongs to line 11",
+);
+eq(
+  newSideAnchors([7, null, null, 8]),
+  [7, 8, 8, 8],
+  "two deleted lines in one gap both belong to the line after them",
+);
+eq(
+  newSideAnchors([null, null, 5, 6]),
+  [5, 5, 5, 6],
+  "a hunk opening with deletions reads forward - there is no previous number",
+);
+eq(
+  newSideAnchors([3, null]),
+  [3, 4],
+  "a deletion at the end of the file points one past the last line",
+);
+eq(
+  newSideAnchors([null, null]),
+  [1, 1],
+  "a file deleted whole has only line 1 to point at",
+);
+eq(newSideAnchors([]), [], "nothing drawn, nothing to place");
 
 await rm(out, { recursive: true, force: true });
 console.log(failed === 0 ? `\nall green (${process.env.TZ ?? "local"} time zone)` : `\n${failed} FAILED`);

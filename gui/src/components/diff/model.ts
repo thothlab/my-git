@@ -1,5 +1,6 @@
 import type { DiffBase, DiffLine, FileDiff, Hunk, WhitespaceMode } from "../../api";
 import { WORKING_TREE } from "../../api";
+import { newSideAnchors } from "./editRules";
 
 /**
  * Pure model behind the diff panel: where a comparison comes from, how its
@@ -43,6 +44,14 @@ export type Row = {
   diff: number;
   /** first row of that difference — the anchor navigation scrolls to */
   first: boolean;
+  /**
+   * The line of the new version this row **stands on** — `right.newNo` when the
+   * row draws one, and for a row drawing only a deletion the line the text was
+   * removed from. Every row has one, which is what lets the right-hand column
+   * answer a double-click anywhere and `spotOnScreen` read a place off any row.
+   * See `editRules.newSideAnchors` for the two ends of the run.
+   */
+  newAnchor: number;
 };
 
 export type Item =
@@ -73,7 +82,7 @@ const isChange = (l: DiffLine | undefined) => !!l && l.origin !== " ";
  * "2 differences" and not four.
  */
 export function toRows(lines: DiffLine[], firstDiff: number): { rows: Row[]; count: number } {
-  const rows: Row[] = [];
+  const rows: Omit<Row, "newAnchor">[] = [];
   let dels: DiffLine[] = [];
   let adds: DiffLine[] = [];
   let count = 0;
@@ -96,7 +105,8 @@ export function toRows(lines: DiffLine[], firstDiff: number): { rows: Row[]; cou
     }
   }
   flush();
-  return { rows, count };
+  const anchors = newSideAnchors(rows.map((r) => r.right?.newNo));
+  return { rows: rows.map((r, i) => ({ ...r, newAnchor: anchors[i] })), count };
 }
 
 /** Fold unchanged runs longer than `FOLD_THRESHOLD`, keeping context around them. */

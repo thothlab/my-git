@@ -754,8 +754,10 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
    * has been opened: `openEditor` is awaited, and geometry taken afterwards
    * describes a panel that may already have been redrawn.
    *
-   * Only rows that carry a `newNo` are tagged in the markup, so the query is
-   * the filtering the rule (`editRules.readingSpot`) expects of its caller.
+   * Every row is tagged in the markup — a deletion row with the line it was
+   * removed from — so the query hands `editRules.readingSpot` the whole run in
+   * document order, and a screen topped by deleted lines names the place the
+   * reader is actually looking at instead of one further down.
    *
    * The rows are measured **as the rule asks for them**, not up front: the
    * answer is the first visible one, `querySelectorAll` is in document order,
@@ -1441,10 +1443,13 @@ function lineBg(o: string | undefined) {
 /** One paired row, in either layout. The anchor lands on the row that opens a
  * difference, which is what the previous / next buttons scroll to.
  *
- * `data-new-no` carries the line of the new version this row draws — the one
- * thing `spotOnScreen` needs to say where the reader is in the file. It is left
- * off a row with no right-hand line, which is what makes that query the
- * filtering `editRules.readingSpot` expects of its caller. */
+ * `data-new-no` carries the line of the new version this row **stands on**
+ * (`Row.newAnchor`) — not only the one it draws: a row drawing a deletion
+ * carries the line the text was removed from. Every row has one, so
+ * `spotOnScreen` can read a place off whichever row is topmost, and the
+ * right-hand column has no dead stripe where a double-click does nothing.
+ * Neighbouring rows can repeat a number; the query's only reader takes the
+ * first visible one. */
 function RowView(props: {
   row: Row;
   split: boolean;
@@ -1463,7 +1468,7 @@ function RowView(props: {
     <div
       class="flex"
       classList={{ "ring-1 ring-inset ring-accent": props.active && props.row.first }}
-      data-new-no={props.row.right?.newNo}
+      data-new-no={props.row.newAnchor}
       ref={(el) => {
         if (props.row.first && props.row.diff >= 0) props.anchor(props.row.diff, el);
       }}
@@ -1487,6 +1492,7 @@ function RowView(props: {
           frac={1 - props.ratio}
           highlight={props.highlight}
           segs={segs()?.right}
+          editAt={props.row.newAnchor}
           onEditLine={props.onEditLine}
         />
       </Show>
@@ -1571,6 +1577,10 @@ function Cell(props: {
   frac: number;
   highlight: HighlightMode;
   segs?: Seg[];
+  /** The line of the new version this cell stands on (`Row.newAnchor`), the one
+   *  a double-click opens. Given to the right-hand cell only; the left-hand one
+   *  never opens the editor. */
+  editAt?: number;
   /** Second, equal way into the editor: point at the line and open it there. */
   onEditLine?: (newNo: number, top: number) => void;
 }) {
@@ -1579,8 +1589,12 @@ function Cell(props: {
   // The row's own top goes with the line number: this cell *is* the row the
   // reader pointed at, so its geometry is the height the line has to come back
   // to. Read at the click, before the editor is opened and the panel redrawn.
+  //
+  // `editAt`, not the drawn line's `newNo`: a deletion draws nothing here, and
+  // reading the number off the line left the blank half of the column a dead
+  // stripe between two rows the same gesture did open.
   const editHere = (el: HTMLElement) => {
-    const n = props.line?.newNo;
+    const n = props.editAt;
     if (props.side === "new" && n != null)
       props.onEditLine?.(n, el.getBoundingClientRect().top);
   };

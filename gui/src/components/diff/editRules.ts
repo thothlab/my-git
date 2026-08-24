@@ -300,7 +300,8 @@ export function endsEditSession(exit: EditExit): boolean {
 export interface DrawnRow {
   top: number;
   height: number;
-  /** `newNo` of the row — rows without one are not offered here. */
+  /** The new-version line the row **stands on**: its own `newNo`, or, for a row
+   *  drawing a deletion, the line the text was removed from (`newSideAnchors`). */
   line: number;
 }
 
@@ -322,20 +323,19 @@ export interface ReadingSpot {
  * hand — while the topmost row lands next to the current difference anyway
  * whenever there is one, because jumping to it scrolled it into view.
  *
- * `rows` are the rows that *have* a `newNo`, in document order; the deletion
- * rows in between are simply not passed. Filtering before the scan gives the
- * same answer as scanning and then skipping, because "the bottom edge is below
- * the top of the viewport" is monotone in document order — once true for a row
- * it is true for every row after it.
+ * `rows` are the drawn rows in document order, every one of them: a deletion
+ * row carries the line it was removed from, so it names a place in the file
+ * like any other and no longer has to be skipped. The answer is still the first
+ * row whose bottom edge is below the top of the viewport, which is monotone in
+ * document order — once true for a row it is true for every row after it.
  *
- * **An `Iterable`, not an array, and the scan stops at the answer.** That same
+ * **An `Iterable`, not an array, and the scan stops at the answer.** That
  * monotonicity makes every row after the first visible one irrelevant, and
  * measuring a row is not free: the caller's source measures the DOM lazily, so
  * a diff of thousands of rows costs the handful above the fold rather than a
  * `getBoundingClientRect` per row inside a click handler.
  *
- * `null` when nothing qualifies — an empty diff, a viewport filled entirely by
- * deleted lines, the summary of a big diff. The caller opens the file at its
+ * `null` when nothing qualifies — an empty diff, the summary of a big diff. The caller opens the file at its
  * beginning then; guessing the last line above the viewport would move the
  * reader in the one direction they can already see is wrong.
  */
@@ -367,4 +367,43 @@ export function readingSpot(rows: Iterable<DrawnRow>): ReadingSpot | null {
  */
 export function editorScrollTop(spot: ReadingSpot, lineHeight: number): number {
   return Math.max(0, (spot.line - 1) * lineHeight - spot.offset);
+}
+
+/**
+ * The line of the new version each drawn row **stands on**, for a run of rows
+ * in document order (one hunk's worth). `lines` is each row's own `newNo`, with
+ * `null` where the row draws a deletion and the new version has nothing there.
+ *
+ * A deletion still has a place in the new version: the position the text was
+ * taken *out of*, which is the line that closed over the gap — the next row
+ * that has a number, and equivalently the previous one plus one, because a
+ * hunk numbers the new side without holes. Two neighbouring rows can therefore
+ * answer the same number; that is the truth about the file, not a collision.
+ *
+ * Two ends need saying:
+ *
+ * - a hunk that opens with deletions has no previous number, so the first
+ *   number that appears later in the run is used — the forward reading, which
+ *   the backward one cannot give;
+ * - deletions at the very end of the file, and a run with no numbers at all
+ *   (a file deleted whole), point one past the last line and at line 1
+ *   respectively. Both are lines the file may not have. That is deliberate and
+ *   the callers are built for it: `lineStartOffset` clamps a line past the end
+ *   to the end of the text, which is exactly where the removed text was, and
+ *   `editorScrollTop` is clamped again by the browser against the real height.
+ */
+export function newSideAnchors(lines: (number | null | undefined)[]): number[] {
+  let at = 1;
+  for (const n of lines)
+    if (n != null) {
+      at = n;
+      break;
+    }
+  const out: number[] = [];
+  for (const n of lines) {
+    if (n != null) at = n;
+    out.push(at);
+    if (n != null) at = n + 1;
+  }
+  return out;
 }
