@@ -370,8 +370,14 @@ pub fn update_from_upstream(repo: &Path, name: &str) -> Result<()> {
 }
 
 /// Replay the current branch on top of `name`. Conflicts behave as in [`merge`].
+///
+/// `--autostash`: stash local (tracked) changes before the rebase and pop them
+/// afterwards, so a dirty working tree doesn't block the rebase (matches the
+/// JetBrains "rebase with uncommitted changes" behaviour, and the TUI's
+/// `engine::rebase_onto`). If the pop itself conflicts, git leaves the stash
+/// and reports it — that surfaces as an ordinary `Error::Git` here.
 pub fn rebase_onto(repo: &Path, name: &str) -> Result<()> {
-    git(repo, &["rebase", name])?;
+    git(repo, &["rebase", "--autostash", name])?;
     Ok(())
 }
 
@@ -776,6 +782,34 @@ mod tests {
             crate::model::OperationKind::Rebase,
             "the repository is left in an unfinished rebase"
         );
+    }
+
+    #[test]
+    fn rebase_onto_autostashes_a_dirty_worktree() {
+        let clean = scratch_repo();
+        let p = clean.path();
+        run(p, &["checkout", "-b", "feat"]);
+        std::fs::write(p.join("f.txt"), "f\n").unwrap();
+        run(p, &["add", "f.txt"]);
+        run(p, &["commit", "-m", "feat work"]);
+        run(p, &["checkout", "main"]);
+        std::fs::write(p.join("m.txt"), "m\n").unwrap();
+        run(p, &["add", "m.txt"]);
+        run(p, &["commit", "-m", "main work"]);
+        run(p, &["checkout", "feat"]);
+        // a tracked change we don't want to commit (dirty tree)
+        std::fs::write(p.join("f.txt"), "f\nWIP\n").unwrap();
+
+        // rebase onto main must succeed despite the dirty tree (autostash)
+        rebase_onto(p, "main").unwrap();
+        assert!(p.join("m.txt").exists(), "feat now sits on top of main");
+        assert_eq!(
+            crate::engine::ops::detect_state(p).unwrap().kind,
+            crate::model::OperationKind::None
+        );
+        // and the WIP change is restored to the working tree afterwards
+        let content = std::fs::read_to_string(p.join("f.txt")).unwrap();
+        assert!(content.contains("WIP"), "autostash restored the dirty change");
     }
 
     // ── update a branch from its upstream (История 21b) ──────────────────────
