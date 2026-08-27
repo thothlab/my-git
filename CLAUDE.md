@@ -262,8 +262,8 @@ Git вызывается только как внешний процесс. `gix
   колонок, подсветка. Версионирован (`version: 1`), camelCase, атомарная запись. Отсутствующий
   файл — это состояние по умолчанию, битый файл — тоже: настройки не стоят неработающего
   приложения.
-- `localStorage` — всё, что про окно и не про репозиторий: `viewMode`, `theme`, `locale`,
-  `lastRepo`, `recentRepos`, `showIgnored`, `groupByDir`, `leftPanelWidth`, `logTreeWidth`,
+- `localStorage` — всё, что про окно и не про репозиторий: `viewMode`, `theme`, `fontSize`,
+  `locale`, `lastRepo`, `recentRepos`, `showIgnored`, `groupByDir`, `leftPanelWidth`, `logTreeWidth`,
   `logSplitRatio`, `logDetailsWidth`, `diffSplitRatio`, `diffWhitespace`, `diffHighlight`,
   `logOrder`, `logDimNonMatching`, `branchMenuOptions` (как показывать выпадающий список
   веток), `recentBranches` (недавние ветки по репозиториям).

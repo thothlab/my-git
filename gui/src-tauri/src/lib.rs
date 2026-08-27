@@ -6,6 +6,9 @@ mod model;
 mod uistate;
 
 use commands::AppState;
+use tauri::Emitter;
+#[cfg(target_os = "macos")]
+use tauri::menu::{Menu, MenuItem, MenuItemKind};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -15,6 +18,33 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(AppState::default())
+        // The default macOS app menu's About item opens the native panel
+        // directly and never reaches `on_menu_event`, so it can't show our
+        // own About dialog. Everything else in the default menu (Edit's
+        // clipboard shortcuts, Window, Help) stays untouched — only the
+        // About item is swapped for one with our own id. Position 0 is
+        // where `Menu::default` puts it (see tauri's menu.rs); guarded by
+        // a type check so a future Tauri reshuffling this submenu drops
+        // nothing silently.
+        .menu(|app| {
+            let menu = Menu::default(app)?;
+            #[cfg(target_os = "macos")]
+            if let Some(MenuItemKind::Submenu(app_submenu)) = menu.items()?.first() {
+                let removed = app_submenu.items()?.first().cloned();
+                if let Some(MenuItemKind::Predefined(_)) = removed {
+                    let about_text = format!("About {}", app_submenu.text()?);
+                    let about = MenuItem::with_id(app, "about", about_text, true, None::<&str>)?;
+                    app_submenu.remove_at(0)?;
+                    app_submenu.insert(&about, 0)?;
+                }
+            }
+            Ok(menu)
+        })
+        .on_menu_event(|app, event| {
+            if event.id() == "about" {
+                let _ = app.emit("open-about", ());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::repo_open,
             commands::repo_state,

@@ -69,6 +69,28 @@ export function cycleTheme() {
 }
 applyTheme();
 
+// ── Font size (small / medium / large) ───────────────────────────────────────
+// Scales the root font-size, which every Tailwind text-* rem utility resolves
+// against. "medium" is 16px — the browser default — so a user who never opens
+// this setting sees the app exactly as before.
+
+export type FontSize = "small" | "medium" | "large";
+const FONT_SIZE_PX: Record<FontSize, string> = { small: "14px", medium: "16px", large: "18px" };
+const [fontSize, setFontSizeSignal] = createSignal<FontSize>(
+  (localStorage.getItem("fontSize") as FontSize) || "medium",
+);
+export { fontSize };
+
+function applyFontSize() {
+  document.documentElement.style.fontSize = FONT_SIZE_PX[fontSize()];
+}
+export function setFontSize(f: FontSize) {
+  setFontSizeSignal(f);
+  localStorage.setItem("fontSize", f);
+  applyFontSize();
+}
+applyFontSize();
+
 /**
  * Install a fresh RepoState and re-validate everything that pointed into the old one.
  *

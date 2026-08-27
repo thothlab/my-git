@@ -1,8 +1,17 @@
-import { For, Show, createResource, createSignal, onCleanup } from "solid-js";
+import { For, Show, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { Portal } from "solid-js/web";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getVersion } from "@tauri-apps/api/app";
-import { registerModalSource, setTheme, theme, type Theme } from "../store";
+import { listen } from "@tauri-apps/api/event";
+import {
+  fontSize,
+  registerModalSource,
+  setFontSize,
+  setTheme,
+  theme,
+  type FontSize,
+  type Theme,
+} from "../store";
 import { d, dateLocale, locale, setLocale, type Locale } from "../i18n";
 import {
   checkForUpdatesNow,
@@ -36,6 +45,16 @@ export default function AppMenu() {
   const [open, setOpen] = createSignal(false);
   onCleanup(() => setOpen(false));
 
+  // The macOS app menu's About item (see src-tauri/src/lib.rs) has no dialog
+  // of its own — it emits this event so both entry points open the exact
+  // same modal instead of the native panel diverging from it. Registering
+  // this once relies on AppMenu living in Toolbar, which App mounts
+  // unconditionally — a remounting AppMenu would stack listeners.
+  onMount(() => {
+    const unlisten = listen("open-about", () => setModal("about"));
+    onCleanup(() => void unlisten.then((f) => f()));
+  });
+
   const pick = (fn: () => void) => {
     setOpen(false);
     fn();
@@ -60,7 +79,7 @@ export default function AppMenu() {
                 and a blur would fire before the click they were opened for. */}
             <div class="fixed inset-0 z-30" onClick={() => setOpen(false)} />
             <div class="absolute right-0 top-full z-40 mt-1 w-44 rounded-md border border-border bg-bg py-1 shadow-lg">
-              <MenuItem icon={<GearIcon />} label={d().settings()} onClick={() => pick(() => setModal("settings"))} />
+              <MenuItem icon={<SettingsIcon />} label={d().settings()} onClick={() => pick(() => setModal("settings"))} />
               <MenuItem icon={<BookIcon />} label={d().docs()} onClick={() => pick(() => void openUrl(REPO_URL))} />
               <MenuItem icon={<InfoIcon />} label={d().about()} onClick={() => pick(() => setModal("about"))} />
             </div>
@@ -131,59 +150,156 @@ function ModalShell(props: { title: string; onClose: () => void; children: any }
   );
 }
 
+type SettingsSection = "appearance" | "language";
+
+// Its own shell rather than `ModalShell`: that one is a narrow box with a
+// bottom Close button, sized for About. Settings needs a header with an X,
+// room for a sidebar, and enough width for two-column setting rows.
 function SettingsModal(props: { onClose: () => void }) {
+  const [section, setSection] = createSignal<SettingsSection>("appearance");
+
   return (
-    <ModalShell title={d().settings()} onClose={props.onClose}>
-      <div class="space-y-4">
-        <Segmented
-          label={d().themeLabel()}
-          value={theme()}
-          options={[
-            { v: "auto", label: d().themeAuto() },
-            { v: "light", label: d().themeLight() },
-            { v: "dark", label: d().themeDark() },
-          ]}
-          onPick={(v) => setTheme(v as Theme)}
-        />
-        <Segmented
-          label={d().languageLabel()}
-          value={locale()}
-          options={[
-            { v: "en", label: "English" },
-            { v: "ru", label: "Русский" },
-          ]}
-          onPick={(v) => setLocale(v as Locale)}
-        />
+    <Portal>
+      <div
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+        onClick={props.onClose}
+      >
+        <div
+          class="flex h-[min(28rem,80vh)] w-[min(40rem,90vw)] flex-col overflow-hidden rounded-lg border border-border bg-bg shadow-xl"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div class="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
+            <div class="text-sm font-semibold">{d().settings()}</div>
+            <button
+              class="rounded p-1 text-fg-subtle hover:bg-bg-muted hover:text-fg"
+              title={d().close()}
+              onClick={props.onClose}
+            >
+              <CloseIcon />
+            </button>
+          </div>
+          <div class="flex min-h-0 flex-1">
+            <div class="w-36 shrink-0 space-y-0.5 overflow-auto border-r border-border p-2">
+              <SettingsNavItem
+                label={d().settingsAppearance()}
+                active={section() === "appearance"}
+                onClick={() => setSection("appearance")}
+              />
+              <SettingsNavItem
+                label={d().languageLabel()}
+                active={section() === "language"}
+                onClick={() => setSection("language")}
+              />
+            </div>
+            <div class="flex-1 overflow-auto p-4">
+              <Show when={section() === "appearance"}>
+                <div class="divide-y divide-border">
+                  <SettingRow
+                    label={d().themeLabel()}
+                    description={d().themeDesc()}
+                    control={
+                      <Segmented
+                        value={theme()}
+                        options={[
+                          { v: "auto", label: d().themeAuto() },
+                          { v: "light", label: d().themeLight() },
+                          { v: "dark", label: d().themeDark() },
+                        ]}
+                        onPick={(v) => setTheme(v as Theme)}
+                      />
+                    }
+                  />
+                  <SettingRow
+                    label={d().fontSizeLabel()}
+                    description={d().fontSizeDesc()}
+                    control={
+                      <Segmented
+                        value={fontSize()}
+                        options={[
+                          { v: "small", label: d().fontSizeSmall() },
+                          { v: "medium", label: d().fontSizeMedium() },
+                          { v: "large", label: d().fontSizeLarge() },
+                        ]}
+                        onPick={(v) => setFontSize(v as FontSize)}
+                      />
+                    }
+                  />
+                </div>
+              </Show>
+              <Show when={section() === "language"}>
+                <div class="divide-y divide-border">
+                  <SettingRow
+                    label={d().languageLabel()}
+                    description={d().languageDesc()}
+                    control={
+                      <Segmented
+                        value={locale()}
+                        options={[
+                          { v: "en", label: "English" },
+                          { v: "ru", label: "Русский" },
+                        ]}
+                        onPick={(v) => setLocale(v as Locale)}
+                      />
+                    }
+                  />
+                </div>
+              </Show>
+            </div>
+          </div>
+        </div>
       </div>
-    </ModalShell>
+    </Portal>
+  );
+}
+
+function SettingsNavItem(props: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      class="block w-full rounded px-2 py-1 text-left text-xs"
+      classList={{
+        "bg-bg-muted font-medium text-fg": props.active,
+        "text-fg-subtle hover:bg-bg-muted hover:text-fg": !props.active,
+      }}
+      onClick={props.onClick}
+    >
+      {props.label}
+    </button>
+  );
+}
+
+function SettingRow(props: { label: string; description: string; control: any }) {
+  return (
+    <div class="flex items-center justify-between gap-4 py-3 first:pt-0 last:pb-0">
+      <div class="min-w-0">
+        <div class="text-sm">{props.label}</div>
+        <div class="text-xs text-fg-subtle">{props.description}</div>
+      </div>
+      <div class="shrink-0">{props.control}</div>
+    </div>
   );
 }
 
 function Segmented(props: {
-  label: string;
   value: string;
   options: { v: string; label: string }[];
   onPick: (v: string) => void;
 }) {
   return (
-    <div>
-      <div class="mb-1 text-xs font-medium text-fg-subtle">{props.label}</div>
-      <div class="flex overflow-hidden rounded border border-border">
-        <For each={props.options}>
-          {(o) => (
-            <button
-              class="flex-1 px-2 py-1 text-xs"
-              classList={{
-                "bg-accent text-white": props.value === o.v,
-                "hover:bg-bg-muted": props.value !== o.v,
-              }}
-              onClick={() => props.onPick(o.v)}
-            >
-              {o.label}
-            </button>
-          )}
-        </For>
-      </div>
+    <div class="flex overflow-hidden rounded border border-border">
+      <For each={props.options}>
+        {(o) => (
+          <button
+            class="flex-1 whitespace-nowrap px-2 py-1 text-xs"
+            classList={{
+              "bg-accent text-white": props.value === o.v,
+              "hover:bg-bg-muted": props.value !== o.v,
+            }}
+            onClick={() => props.onPick(o.v)}
+          >
+            {o.label}
+          </button>
+        )}
+      </For>
     </div>
   );
 }
@@ -277,11 +393,13 @@ function AboutModal(props: { onClose: () => void }) {
 
 // ── Icons (lucide-style strokes) ─────────────────────────────────────────────
 
-function GearIcon() {
+function SettingsIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-      <circle cx="12" cy="12" r="3" />
+      <path d="M20 7h-9" />
+      <path d="M14 17H5" />
+      <circle cx="17" cy="17" r="3" />
+      <circle cx="7" cy="7" r="3" />
     </svg>
   );
 }
@@ -299,6 +417,14 @@ function InfoIcon() {
       <circle cx="12" cy="12" r="10" />
       <path d="M12 16v-4" />
       <path d="M12 8h.01" />
+    </svg>
+  );
+}
+function CloseIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M18 6 6 18" />
+      <path d="m6 6 12 12" />
     </svg>
   );
 }
