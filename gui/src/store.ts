@@ -27,7 +27,7 @@ export const [busyLabel, setBusyLabel] = createSignal("");
 export type ViewMode = "changes" | "log";
 const VIEW_MODE_KEY = "viewMode";
 const [viewMode, setViewModeSignal] = createSignal<ViewMode>(
-  localStorage.getItem(VIEW_MODE_KEY) === "log" ? "log" : "changes",
+  localStorage.getItem(VIEW_MODE_KEY) === "changes" ? "changes" : "log",
 );
 export { viewMode };
 export function setViewMode(m: ViewMode) {
