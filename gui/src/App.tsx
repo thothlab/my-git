@@ -74,9 +74,27 @@ export default function App() {
 
     await openInitial();
 
-    // resync on window focus — external git activity between interactions
+    // resync on window focus — external git activity between interactions.
+    //
+    // A macOS permission prompt (e.g. the Documents-folder TCC dialog a repo
+    // under Documents/Desktop/Downloads can trigger) steals focus when it
+    // appears and returns it the instant it's dismissed - which fires this
+    // same handler again. Each such refresh spawns its own `git` processes,
+    // which can trip the *next* prompt, which returns focus again: a
+    // self-sustaining loop with no user action in it, observed re-prompting
+    // every ~1-2s for as long as the window sat there. A cooldown between
+    // focus-triggered refreshes can't make an unsigned build's permission
+    // grant stick (only proper code signing does that - see the comment in
+    // src-tauri/Info.plist), but it does stop this handler from being the
+    // thing that keeps the loop alive: the burst of prompts from opening the
+    // repo still happens once, then goes quiet instead of continuing forever.
+    let lastFocusRefreshAt = 0;
+    const FOCUS_REFRESH_COOLDOWN_MS = 3000;
     const unlisten = await getCurrentWindow().onFocusChanged(({ payload }) => {
       if (!payload) return;
+      const now = Date.now();
+      if (now - lastFocusRefreshAt < FOCUS_REFRESH_COOLDOWN_MS) return;
+      lastFocusRefreshAt = now;
       void refresh();
       void checkForUpdatesNow();
     });
