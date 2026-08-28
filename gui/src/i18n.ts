@@ -96,7 +96,7 @@ const en = {
   about: () => "About",
   // Git console
   gitConsole: () => "Git console",
-  gitConsoleTip: () => "Git console (Cmd/Ctrl+`)",
+  gitConsoleTip: () => "Git console",
   gitConsoleHint: () => "Runs git here, non-interactively — no editor, no credential prompt.",
   gitConsolePlaceholder: () => "git status",
   gitConsoleEmpty: () => "Type a git command and press Enter.",
@@ -535,7 +535,7 @@ const ru: Dict = {
   about: () => "О программе",
   // Git-консоль
   gitConsole: () => "Git-консоль",
-  gitConsoleTip: () => "Git-консоль (Cmd/Ctrl+`)",
+  gitConsoleTip: () => "Git-консоль",
   gitConsoleHint: () => "Выполняет git прямо здесь, без интерактива — без редактора и запроса учётных данных.",
   gitConsolePlaceholder: () => "git status",
   gitConsoleEmpty: () => "Введите git-команду и нажмите Enter.",
