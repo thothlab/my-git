@@ -55,6 +55,18 @@ export default function AppMenu() {
     onCleanup(() => void unlisten.then((f) => f()));
   });
 
+  // Same native-menu wiring for "Check for Updates…" (see src-tauri/src/lib.rs):
+  // the item has no UI of its own, so it opens About - the update controls live
+  // there - and starts a check immediately, matching the platform convention of
+  // Chrome/Slack-style "Check for Updates…" items.
+  onMount(() => {
+    const unlisten = listen("check-for-updates", () => {
+      setModal("about");
+      void checkForUpdatesNow();
+    });
+    onCleanup(() => void unlisten.then((f) => f()));
+  });
+
   const pick = (fn: () => void) => {
     setOpen(false);
     fn();

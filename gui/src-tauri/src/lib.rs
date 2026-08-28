@@ -22,10 +22,12 @@ pub fn run() {
         // directly and never reaches `on_menu_event`, so it can't show our
         // own About dialog. Everything else in the default menu (Edit's
         // clipboard shortcuts, Window, Help) stays untouched — only the
-        // About item is swapped for one with our own id. Position 0 is
-        // where `Menu::default` puts it (see tauri's menu.rs); guarded by
-        // a type check so a future Tauri reshuffling this submenu drops
-        // nothing silently.
+        // About item is swapped for one with our own id, and a "Check for
+        // Updates…" item is inserted right after it (the platform
+        // convention: About, Check for Updates…, then the default
+        // separator ahead of Services). Position 0 is where `Menu::default`
+        // puts About (see tauri's menu.rs); guarded by a type check so a
+        // future Tauri reshuffling this submenu drops nothing silently.
         .menu(|app| {
             let menu = Menu::default(app)?;
             #[cfg(target_os = "macos")]
@@ -36,14 +38,26 @@ pub fn run() {
                     let about = MenuItem::with_id(app, "about", about_text, true, None::<&str>)?;
                     app_submenu.remove_at(0)?;
                     app_submenu.insert(&about, 0)?;
+                    let check_for_updates = MenuItem::with_id(
+                        app,
+                        "check-for-updates",
+                        "Check for Updates…",
+                        true,
+                        None::<&str>,
+                    )?;
+                    app_submenu.insert(&check_for_updates, 1)?;
                 }
             }
             Ok(menu)
         })
-        .on_menu_event(|app, event| {
-            if event.id() == "about" {
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "about" => {
                 let _ = app.emit("open-about", ());
             }
+            "check-for-updates" => {
+                let _ = app.emit("check-for-updates", ());
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::repo_open,
