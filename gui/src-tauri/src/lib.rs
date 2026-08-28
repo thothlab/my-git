@@ -7,8 +7,16 @@ mod uistate;
 
 use commands::AppState;
 use tauri::Emitter;
+// `Menu` is built on every platform (`Menu::default` below runs
+// unconditionally); `MenuItem`/`MenuItemKind` are only reached inside the
+// `#[cfg(target_os = "macos")]` block that customises the app submenu, so
+// only those two stay gated - an ungated `Menu` import that used to sit
+// behind the same `#[cfg(target_os = "macos")]` left `Menu` unresolved on
+// Linux/Windows: `cargo build -p graft` never catches that on a macOS dev
+// machine, only a non-macOS CI leg does.
+use tauri::menu::Menu;
 #[cfg(target_os = "macos")]
-use tauri::menu::{Menu, MenuItem, MenuItemKind};
+use tauri::menu::{MenuItem, MenuItemKind};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
