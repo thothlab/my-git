@@ -37,8 +37,14 @@ await build({
   logLevel: "warning",
 });
 
+// `pathTree.ts` and `gitConsoleCommand.ts` share this directory, so bundling
+// them together keeps a flat common base and both outputs land as flat
+// basenames the loader below can find.
 await build({
-  entryPoints: [join(here, "..", "src", "components", "pathTree.ts")],
+  entryPoints: [
+    join(here, "..", "src", "components", "pathTree.ts"),
+    join(here, "..", "src", "components", "gitConsoleCommand.ts"),
+  ],
   outdir: out,
   format: "esm",
   logLevel: "warning",
@@ -49,14 +55,6 @@ await build({
 // `diff/editRules.js` and the loader below would not find it.
 await build({
   entryPoints: [join(here, "..", "src", "components", "diff", "editRules.ts")],
-  outdir: out,
-  format: "esm",
-  logLevel: "warning",
-});
-
-// Same reasoning as `editRules.ts` above — its own call and its own outdir.
-await build({
-  entryPoints: [join(here, "..", "src", "components", "gitConsoleCommand.ts")],
   outdir: out,
   format: "esm",
   logLevel: "warning",
