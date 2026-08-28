@@ -54,6 +54,14 @@ await build({
   logLevel: "warning",
 });
 
+// Same reasoning as `editRules.ts` above — its own call and its own outdir.
+await build({
+  entryPoints: [join(here, "..", "src", "components", "gitConsoleCommand.ts")],
+  outdir: out,
+  format: "esm",
+  logLevel: "warning",
+});
+
 const load = (name) => import(pathToFileURL(join(out, name)).href);
 const { compilePattern, spansIn, matchesCommit } = await load("searchPattern.js");
 const { asInputDate, dayStart, dayEnd, startOfToday, relativeToRepo, toSlash } =
@@ -75,6 +83,7 @@ const {
   editorScrollTop,
   newSideAnchors,
 } = await load("editRules.js");
+const { splitShellArgs } = await load("gitConsoleCommand.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -435,6 +444,38 @@ eq(
   "a file deleted whole has only line 1 to point at",
 );
 eq(newSideAnchors([]), [], "nothing drawn, nothing to place");
+
+// -- Git console input splitting ----------------------------------------------
+eq(splitShellArgs("status"), { ok: true, args: ["status"] }, "single word");
+eq(
+  splitShellArgs("commit -m fix"),
+  { ok: true, args: ["commit", "-m", "fix"] },
+  "plain whitespace splitting",
+);
+eq(
+  splitShellArgs("git status"),
+  { ok: true, args: ["status"] },
+  "a leading literal 'git' is dropped",
+);
+eq(
+  splitShellArgs('commit -m "fix: two words"'),
+  { ok: true, args: ["commit", "-m", "fix: two words"] },
+  "double-quoted argument keeps its spaces",
+);
+eq(
+  splitShellArgs("commit -m 'fix: two words'"),
+  { ok: true, args: ["commit", "-m", "fix: two words"] },
+  "single-quoted argument keeps its spaces",
+);
+eq(
+  splitShellArgs('log --grep="a \\"quoted\\" word"'),
+  { ok: true, args: ["log", '--grep=a "quoted" word'] },
+  "backslash-escaped quote inside a double-quoted argument",
+);
+eq(splitShellArgs("  status   --short  "), { ok: true, args: ["status", "--short"] }, "extra whitespace is collapsed");
+eq(splitShellArgs(""), { ok: true, args: [] }, "empty input has no arguments");
+eq(splitShellArgs('commit -m "unterminated').ok, false, "an unmatched quote is reported, not silently closed");
+eq(splitShellArgs("git"), { ok: true, args: [] }, "'git' alone is the leading token, not a subcommand");
 
 await rm(out, { recursive: true, force: true });
 console.log(failed === 0 ? `\nall green (${process.env.TZ ?? "local"} time zone)` : `\n${failed} FAILED`);

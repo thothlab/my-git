@@ -412,3 +412,17 @@ pub struct TextFile {
 pub struct FileWritten {
     pub digest: String,
 }
+
+/// What `git_exec` (the git console panel) reports back: both streams and the
+/// exit code of the command the user typed, plus the `RepoState` after running
+/// it — an arbitrary git command can change anything, so this carries the same
+/// full state every other mutation does (see CLAUDE.md "Мутация возвращает
+/// целиком RepoState"), just alongside the output the panel needs to show.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitExecResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub state: RepoState,
+}

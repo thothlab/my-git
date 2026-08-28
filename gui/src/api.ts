@@ -180,6 +180,15 @@ export const push = (mode: PushMode) => invoke<RepoState>("push", { mode });
 export const fetchRemote = () => invoke<RepoState>("fetch");
 export const pull = () => invoke<RepoState>("pull");
 
+/** What `git_exec` (the git console panel) reports back — see model.rs. */
+export interface GitExecResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  state: RepoState;
+}
+export const gitExec = (args: string[]) => invoke<GitExecResult>("git_exec", { args });
+
 // ── Git panel: history (prd_02, task_01) ─────────────────────────────────────
 
 export type WhitespaceMode = "none" | "trailing" | "all";

@@ -15,6 +15,7 @@ import { registerHotkey, startHotkeys } from "./hotkeys";
 import { checkForUpdatesNow, checkForUpdatesOnStartup } from "./updater";
 import { ModalHost } from "./components/Modals";
 import StashPanel from "./components/StashPanel";
+import GitConsolePanel, { openGitConsole } from "./components/GitConsolePanel";
 
 const LEFT_WIDTH_KEY = "leftPanelWidth";
 const TREE_WIDTH_KEY = "logTreeWidth";
@@ -62,6 +63,7 @@ export default function App() {
     onCleanup(startHotkeys());
     registerHotkey("Digit1", () => setViewMode("changes"));
     registerHotkey("Digit2", () => setViewMode("log"));
+    registerHotkey("Backquote", () => openGitConsole());
 
     // Automatic update checks, all silent: only the About button reports an
     // outcome. Once at boot is not enough — this window stays open for days, so
@@ -187,6 +189,7 @@ export default function App() {
         {/* Stashes belong to neither mode: the panel is mounted by the window, so
             the Changes toolbar and the branch menu open the same one. */}
         <StashPanel />
+        <GitConsolePanel />
         <ModalHost />
       </div>
     </ErrorBoundary>

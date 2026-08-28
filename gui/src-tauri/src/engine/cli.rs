@@ -66,6 +66,14 @@ pub struct CliEngine {
     repo: PathBuf,
 }
 
+/// Both streams and the exit code of an arbitrary `git` invocation, captured
+/// regardless of success — see [`CliEngine::exec_raw`].
+pub struct RawOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
 impl CliEngine {
     pub fn new(repo: impl Into<PathBuf>) -> Self {
         Self { repo: repo.into() }
@@ -133,6 +141,39 @@ impl CliEngine {
     /// Run git capturing stdout as UTF-8 text (git errors still carry stderr).
     fn git(&self, args: &[&str]) -> Result<String> {
         Ok(String::from_utf8_lossy(&self.git_bytes(args)?).to_string())
+    }
+
+    /// Run `git -C <repo> <args>` for the git console panel — an arbitrary
+    /// command the user typed, at their own privilege level; this is not a
+    /// sandbox, and no attempt is made to restrict what git is asked to do.
+    ///
+    /// Unlike `git`/`git_bytes`, a non-zero exit is **not** an `Error::Git`: it is
+    /// output the user typed the command to see (`git status` on a bad pathspec,
+    /// `git branch -D` on an unmerged branch), not a failure of this application.
+    /// Only a failure to spawn `git` itself becomes an `Err`.
+    ///
+    /// stdin is `/dev/null` and the environment tells git never to open an
+    /// interactive prompt or editor — `commit` with no `-m`, `rebase -i`,
+    /// `tag -a`, and a credential prompt on `push`/`pull` would otherwise spawn
+    /// something that waits forever for input this process never supplies,
+    /// hanging the whole application on the first such command.
+    pub fn exec_raw(&self, args: &[String]) -> Result<RawOutput> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo)
+            .args(args)
+            .stdin(Stdio::null())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_EDITOR", "false")
+            .env("GIT_SEQUENCE_EDITOR", "false")
+            .env_remove("GIT_ASKPASS")
+            .env_remove("SSH_ASKPASS")
+            .output()?;
+        Ok(RawOutput {
+            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+            exit_code: out.status.code().unwrap_or(-1),
+        })
     }
 
     /// Ignored paths for the "Show Ignored" view. git collapses ignored
@@ -2056,5 +2097,42 @@ pub(crate) mod tests {
         run(other.path(), &["init", "-b", "main"]);
         run(other.path(), &["config", "user.email", "second@example.com"]);
         assert_eq!(user_email(other.path()).as_deref(), Some("second@example.com"));
+    }
+
+    // ---- exec_raw (git console panel) ----
+
+    #[test]
+    fn exec_raw_returns_stdout_on_success() {
+        let dir = scratch_repo();
+        let out = CliEngine::new(dir.path())
+            .exec_raw(&["log".into(), "--oneline".into()])
+            .unwrap();
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("init"), "{}", out.stdout);
+        assert!(out.stderr.is_empty());
+    }
+
+    /// A non-zero exit is data for the user who typed the command, not an
+    /// application error — the call itself still returns `Ok`.
+    #[test]
+    fn exec_raw_reports_a_nonzero_exit_instead_of_erroring() {
+        let dir = scratch_repo();
+        let out = CliEngine::new(dir.path())
+            .exec_raw(&["not-a-real-git-subcommand".into()])
+            .unwrap();
+        assert_ne!(out.exit_code, 0);
+        assert!(!out.stderr.is_empty());
+    }
+
+    /// `commit` with no `-m` normally opens `$EDITOR` and waits. `exec_raw` must
+    /// return instead of hanging the whole application on the first such command.
+    #[test]
+    fn exec_raw_does_not_hang_on_a_command_that_would_open_an_editor() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("b.txt"), "two\n").unwrap();
+        run(p, &["add", "b.txt"]);
+        let out = CliEngine::new(p).exec_raw(&["commit".into()]).unwrap();
+        assert_ne!(out.exit_code, 0, "GIT_EDITOR=false must abort the commit");
     }
 }

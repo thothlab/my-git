@@ -154,6 +154,36 @@ export async function run(p: Promise<RepoState>, label = ""): Promise<void> {
 
 export const refresh = () => run(apiRepoState());
 
+/**
+ * Like `run()`, for a mutation whose result carries more than `RepoState` — the
+ * git console panel's raw output alongside it. Same busy/error/re-read
+ * contract as `run()`; the extra fields are simply handed back to the caller.
+ */
+export async function runWithOutput<T extends { state: RepoState }>(
+  p: Promise<T>,
+  label = "",
+): Promise<T | null> {
+  setBusy(true);
+  setBusyLabel(label);
+  try {
+    const result = await p;
+    applyState(result.state);
+    setError("");
+    return result;
+  } catch (e) {
+    setError(errText(e));
+    try {
+      applyState(await apiRepoState());
+    } catch {
+      // The repository itself is unreadable — the original error already says so.
+    }
+    return null;
+  } finally {
+    setBusy(false);
+    setBusyLabel("");
+  }
+}
+
 const LAST_REPO_KEY = "lastRepo";
 const RECENT_REPOS_KEY = "recentRepos";
 const RECENT_MAX = 10;

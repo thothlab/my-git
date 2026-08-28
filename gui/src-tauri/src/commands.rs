@@ -11,8 +11,8 @@ use crate::error::{Error, Result};
 use crate::engine::{branches, commit as commit_engine, log as log_engine, ops};
 use crate::model::{
     BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, Eol, FileDiff,
-    FileState, FileStatus, FileWritten, LogCursor, LogFilter, LogPage, RepoState, StashEntry,
-    TextFile, UiState,
+    FileState, FileStatus, FileWritten, GitExecResult, LogCursor, LogFilter, LogPage, RepoState,
+    StashEntry, TextFile, UiState,
 };
 use crate::uistate;
 
@@ -312,6 +312,21 @@ pub async fn push(state: State<'_, AppState>, mode: String) -> Result<RepoState>
 pub async fn fetch(state: State<'_, AppState>) -> Result<RepoState> {
     CliEngine::new(state.repo_path()?).fetch()?;
     build_state(&state)
+}
+
+/// The git console panel: run an arbitrary `git <args>` in the open repository.
+/// See `CliEngine::exec_raw` — a non-zero exit is output for the user to read,
+/// not an `Err` here; only a failure to spawn `git` itself is.
+#[tauri::command]
+pub async fn git_exec(state: State<'_, AppState>, args: Vec<String>) -> Result<GitExecResult> {
+    let repo = state.repo_path()?;
+    let out = CliEngine::new(&repo).exec_raw(&args)?;
+    Ok(GitExecResult {
+        stdout: out.stdout,
+        stderr: out.stderr,
+        exit_code: out.exit_code,
+        state: build_state(&state)?,
+    })
 }
 
 #[tauri::command]

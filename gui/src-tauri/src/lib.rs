@@ -92,6 +92,7 @@ pub fn run() {
             commands::push,
             commands::fetch,
             commands::pull,
+            commands::git_exec,
             commands::log_page,
             commands::log_authors,
             commands::commit_details,
