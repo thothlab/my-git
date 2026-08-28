@@ -22,7 +22,6 @@ import {
   updatesSupported,
 } from "../updater";
 import { DISABLED_CLASS } from "./IconButton";
-import { openGitConsole } from "./GitConsolePanel";
 
 const REPO_URL = "https://github.com/thothlab/my-git";
 
@@ -93,7 +92,6 @@ export default function AppMenu() {
             <div class="fixed inset-0 z-30" onClick={() => setOpen(false)} />
             <div class="absolute right-0 top-full z-40 mt-1 w-44 rounded-md border border-border bg-bg py-1 shadow-lg">
               <MenuItem icon={<SettingsIcon />} label={d().settings()} onClick={() => pick(() => setModal("settings"))} />
-              <MenuItem icon={<ConsoleIcon />} label={d().gitConsole()} onClick={() => pick(openGitConsole)} />
               <MenuItem icon={<BookIcon />} label={d().docs()} onClick={() => pick(() => void openUrl(REPO_URL))} />
               <MenuItem icon={<InfoIcon />} label={d().about()} onClick={() => pick(() => setModal("about"))} />
             </div>
@@ -414,14 +412,6 @@ function SettingsIcon() {
       <path d="M14 17H5" />
       <circle cx="17" cy="17" r="3" />
       <circle cx="7" cy="7" r="3" />
-    </svg>
-  );
-}
-function ConsoleIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <polyline points="4 17 10 11 4 5" />
-      <line x1="12" y1="19" x2="20" y2="19" />
     </svg>
   );
 }

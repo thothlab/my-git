@@ -2,10 +2,11 @@ import { Show } from "solid-js";
 import { fetchRemote, pull } from "../api";
 import { busy, run, setViewMode, state, viewMode } from "../store";
 import { d } from "../i18n";
-import { DISABLED_CLASS } from "./IconButton";
+import { DISABLED_CLASS, IconConsole } from "./IconButton";
 import AppMenu from "./AppMenu";
 import BranchMenu from "./BranchMenu";
 import RepoMenu from "./RepoMenu";
+import { openGitConsole } from "./GitConsolePanel";
 import { pushCurrent } from "./log/actions/branchActions";
 
 export default function Toolbar() {
@@ -35,6 +36,14 @@ export default function Toolbar() {
         <ModeBtn mode="changes" label={d().modeChanges()} tip={d().modeChangesTip()} />
         <ModeBtn mode="log" label={d().modeLog()} tip={d().modeLogTip()} />
       </div>
+
+      <button
+        class="flex items-center rounded border border-border px-1.5 py-1 text-fg-subtle hover:bg-bg hover:text-fg"
+        title={d().gitConsoleTip()}
+        onClick={openGitConsole}
+      >
+        <IconConsole />
+      </button>
 
       {/* Settings, Docs and About. They belong to the window, not to one of its
           modes, which is why they no longer hang under the changelist tree. */}

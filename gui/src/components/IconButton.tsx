@@ -189,6 +189,25 @@ export function IconStar(props: { filled?: boolean }) {
   );
 }
 
+/** Prompt chevron + line — the git console. */
+export function IconConsole() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.6"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <path d="M3 4.5l4 3.5-4 3.5" />
+      <path d="M8.5 12.5h4.5" />
+    </svg>
+  );
+}
+
 /** Archive box — stashed changes: put aside, not thrown away. */
 export function IconStash() {
   return (
