@@ -472,3 +472,42 @@ pub struct JournalOutput {
     /// The per-stream limit this entry was kept under.
     pub limit_bytes: u64,
 }
+
+/// What a discard backup was taken for (`engine::discard`). Travels as the
+/// `Graft-Kind` trailer of the backup commits, so `git log refs/graft/discard` says it
+/// in words as well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiscardKind {
+    /// Files rolled back to HEAD (`file_rollback`).
+    Files,
+    /// A whole changelist rolled back to HEAD (`list_rollback`).
+    List,
+    /// One hunk reverted in the working tree (`hunk_revert`).
+    Hunk,
+    /// A backup restored — itself undoable, from the same list.
+    Restore,
+}
+
+/// One restorable backup: the working-tree paths a discard changed, as they were
+/// before it. `id` is the backup's "after" commit under `refs/graft/discard`, the
+/// handle `discard_check` / `discard_restore` take back. `at` is Unix seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscardEntry {
+    pub id: String,
+    pub at: i64,
+    pub kind: DiscardKind,
+    pub paths: Vec<String>,
+}
+
+/// Result of a discard or a restore: the fresh state, as every mutation returns
+/// ("Мутация возвращает целиком RepoState"), plus the backup it took — `None` when
+/// nothing on disk changed, so there is nothing to offer back. The client runs it
+/// through `runWithOutput`, as it does `GitExecResult`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscardOutcome {
+    pub state: RepoState,
+    pub backup: Option<DiscardEntry>,
+}

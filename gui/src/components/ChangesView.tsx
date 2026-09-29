@@ -10,6 +10,7 @@ import {
   type ChangelistView,
   type FileStatus,
 } from "../api";
+import { runDiscard } from "./DiscardPanel";
 import {
   baseName,
   buildFileTree,
@@ -104,7 +105,7 @@ export default function ChangesView() {
     const paths = [...checked()];
     if (paths.length === 0) return;
     if (await confirmAction(d().rollbackConfirm(paths.length))) {
-      await run(fileRollback(paths));
+      await runDiscard(fileRollback(paths));
       setChecked(new Set<string>());
     }
   };
@@ -392,11 +393,11 @@ function ContextMenu() {
 
   const rollbackFile = async (path: string) => {
     if (await confirmAction(d().revertFileConfirm(path)))
-      await run(fileRollback([path]));
+      await runDiscard(fileRollback([path]));
   };
   const rollbackList = async (cl: ChangelistView) => {
     if (cl.files.length && (await confirmAction(d().revertListConfirm(cl.name))))
-      await run(listRollback(cl.id));
+      await runDiscard(listRollback(cl.id));
   };
   const rename = async (cl: ChangelistView) => {
     const name = await promptText(d().renameChangelist(), cl.name);

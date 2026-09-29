@@ -135,11 +135,13 @@ fn filter_args(filter: &LogFilter) -> Vec<String> {
     // graph covers every ref, minus the stash — stash commits are not history the
     // user browses.
     if branch.is_none() {
-        // `--all` means every ref under refs/, which includes the stash and the
-        // notes ref — neither is history the user browses, and both showed up as
-        // phantom commits until excluded.
+        // `--all` means every ref under refs/, which includes the stash, the notes
+        // ref and the rollback backups (`engine::discard`) — none is history the user
+        // browses, and each showed up as phantom commits until excluded. `--exclude`
+        // applies to the *next* `--all`, so it has to come first.
         a.push(s("--exclude=refs/stash"));
         a.push(s("--exclude=refs/notes/*"));
+        a.push(s("--exclude=refs/graft/*"));
         a.push(s("--all"));
     }
     let text = filter.text.as_deref().filter(|t| !t.is_empty());
@@ -825,6 +827,33 @@ mod tests {
         let page = page(p, &LogFilter::default(), None, 20).unwrap();
         let subjects: Vec<&str> = page.commits.iter().map(|c| c.subject.as_str()).collect();
         assert_eq!(subjects, vec!["init"], "only real history: {subjects:?}");
+    }
+
+    /// The backups a rollback writes under `refs/graft/discard` are not history. Had
+    /// they reached the log, every rollback would also move its tip and turn each
+    /// cursor the panel holds stale.
+    #[test]
+    fn discard_backups_stay_out_of_the_log_and_its_authors() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let first = page(p, &LogFilter::default(), None, 20).unwrap();
+        std::fs::write(p.join("a.txt"), "dirty\n").unwrap();
+        let paths = vec!["a.txt".to_string()];
+        crate::engine::discard::with_backup(p, crate::model::DiscardKind::Files, &paths, || {
+            crate::engine::cli::CliEngine::new(p).rollback(&paths)
+        })
+        .unwrap()
+        .expect("the rollback changed a file");
+
+        let now = page(p, &LogFilter::default(), None, 20).unwrap();
+        let subjects: Vec<&str> = now.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, vec!["init"], "only real history: {subjects:?}");
+        assert_eq!(authors(p).unwrap(), vec!["Test".to_string()]);
+        assert_eq!(
+            tip(p, &LogFilter::default()).unwrap(),
+            Some(first.commits[0].hash.clone()),
+            "a backup does not move the history's tip"
+        );
     }
 
     #[test]

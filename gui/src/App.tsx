@@ -1,6 +1,17 @@
 import { ErrorBoundary, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { busy, busyLabel, error, errorJournalId, openInitial, refresh, setViewMode, viewMode } from "./store";
+import {
+  busy,
+  busyLabel,
+  error,
+  errorJournalId,
+  openInitial,
+  refresh,
+  setNotice,
+  setViewMode,
+  viewMode,
+  visibleNotice,
+} from "./store";
 import { d } from "./i18n";
 import Toolbar from "./components/Toolbar";
 import ChangesView from "./components/ChangesView";
@@ -16,6 +27,8 @@ import { checkForUpdatesNow, checkForUpdatesOnStartup } from "./updater";
 import { ModalHost } from "./components/Modals";
 import StashPanel from "./components/StashPanel";
 import GitConsolePanel, { openGitConsole } from "./components/GitConsolePanel";
+import DiscardPanel from "./components/DiscardPanel";
+import { DISABLED_CLASS } from "./components/IconButton";
 
 const LEFT_WIDTH_KEY = "leftPanelWidth";
 const TREE_WIDTH_KEY = "logTreeWidth";
@@ -175,6 +188,36 @@ export default function App() {
           </div>
         </Show>
 
+        {/* Not an error: what an action did, and a way to take it back. */}
+        <Show when={visibleNotice()}>
+          {(n) => (
+            <div class="flex items-center gap-2 border-b border-border bg-accent/10 px-3 py-1 text-xs text-fg">
+              <span class="min-w-0 flex-1 truncate" title={n().text()}>
+                {n().text()}
+              </span>
+              <Show when={n().action}>
+                {(a) => (
+                  <button
+                    class={`shrink-0 rounded border border-border px-2 py-0.5 text-xs text-fg hover:bg-bg-muted ${DISABLED_CLASS}`}
+                    disabled={busy()}
+                    onClick={() => a().run()}
+                  >
+                    {a().label()}
+                  </button>
+                )}
+              </Show>
+              <button
+                class="shrink-0 rounded px-1.5 text-fg-muted hover:bg-bg-muted hover:text-fg"
+                title={d().dismiss()}
+                aria-label={d().dismiss()}
+                onClick={() => setNotice(null)}
+              >
+                ×
+              </button>
+            </div>
+          )}
+        </Show>
+
         <div class="flex min-h-0 flex-1">
           <aside
             class="shrink-0 overflow-hidden border-r border-border"
@@ -205,6 +248,7 @@ export default function App() {
             the Changes toolbar and the branch menu open the same one. */}
         <StashPanel />
         <GitConsolePanel />
+        <DiscardPanel />
         <ModalHost />
       </div>
     </ErrorBoundary>

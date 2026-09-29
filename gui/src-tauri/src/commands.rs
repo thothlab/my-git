@@ -9,9 +9,10 @@ use crate::engine::cli::CliEngine;
 use crate::engine::GitEngine;
 use crate::error::{Error, Result};
 use crate::engine::exec::{self, mask_credentials};
-use crate::engine::{branches, commit as commit_engine, log as log_engine, ops};
+use crate::engine::{branches, commit as commit_engine, discard, log as log_engine, ops};
 use crate::model::{
-    BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, Eol, FileDiff,
+    BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, DiscardEntry,
+    DiscardKind, DiscardOutcome, Eol, FileDiff,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
     LogFilter, LogPage, RepoState, StashEntry, TextFile, UiState,
 };
@@ -169,21 +170,69 @@ pub async fn files_move(
     mutate(&state, |s| changelists::move_files(s, &paths, &to_list_id))
 }
 
+/// Roll files back to HEAD, backing their working-tree copies up first
+/// (`engine::discard`). A backup that cannot be taken stops the rollback.
 #[tauri::command]
-pub async fn file_rollback(state: State<'_, AppState>, paths: Vec<String>) -> Result<RepoState> {
+pub async fn file_rollback(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<DiscardOutcome> {
     let repo = state.repo_path()?;
-    exec::as_user("file_rollback", || CliEngine::new(&repo).rollback(&paths))?;
+    let backup = exec::as_user("file_rollback", || {
+        discard::with_backup(&repo, DiscardKind::Files, &paths, || {
+            CliEngine::new(&repo).rollback(&paths)
+        })
+    })?;
     // reverted files are no longer changed; build_state's sync prunes them
-    build_state(&state)
+    Ok(DiscardOutcome {
+        state: build_state(&state)?,
+        backup,
+    })
 }
 
 #[tauri::command]
-pub async fn list_rollback(state: State<'_, AppState>, id: String) -> Result<RepoState> {
+pub async fn list_rollback(state: State<'_, AppState>, id: String) -> Result<DiscardOutcome> {
     let repo = state.repo_path()?;
     let store = changelists::load(&repo)?;
     let paths = changelists::list_paths(&store, &id);
-    exec::as_user("list_rollback", || CliEngine::new(&repo).rollback(&paths))?;
-    build_state(&state)
+    let backup = exec::as_user("list_rollback", || {
+        discard::with_backup(&repo, DiscardKind::List, &paths, || {
+            CliEngine::new(&repo).rollback(&paths)
+        })
+    })?;
+    Ok(DiscardOutcome {
+        state: build_state(&state)?,
+        backup,
+    })
+}
+
+/// Restorable discard backups, newest first — at most `limit`. Read-only.
+#[tauri::command]
+pub async fn discard_list(state: State<'_, AppState>, limit: u32) -> Result<Vec<DiscardEntry>> {
+    discard::list(&state.repo_path()?, limit as usize)
+}
+
+/// Read-only: the paths of backup `id` changed since the discard. Empty means a
+/// restore overwrites nothing new; otherwise the client asks before forcing.
+#[tauri::command]
+pub async fn discard_check(state: State<'_, AppState>, id: String) -> Result<Vec<String>> {
+    discard::stale_paths(&state.repo_path()?, &id)
+}
+
+/// Put the files of backup `id` back as they were before the discard. Refused with
+/// `stale` over files changed since, unless `force`; the restore is itself backed up.
+#[tauri::command]
+pub async fn discard_restore(
+    state: State<'_, AppState>,
+    id: String,
+    force: bool,
+) -> Result<DiscardOutcome> {
+    let repo = state.repo_path()?;
+    let backup = exec::as_user("discard_restore", || discard::restore(&repo, &id, force))?;
+    Ok(DiscardOutcome {
+        state: build_state(&state)?,
+        backup,
+    })
 }
 
 // ── diff & hunk-level staging (task_04) ──────────────────────────────────────
@@ -246,12 +295,22 @@ pub async fn hunk_unstage(state: State<'_, AppState>, patch: String) -> Result<R
     build_state(&state)
 }
 
+/// Revert one hunk in the working tree, backing the file up first. The path comes
+/// from the patch as git reads it, not from a second client argument that could
+/// disagree with it.
 #[tauri::command]
-pub async fn hunk_revert(state: State<'_, AppState>, patch: String) -> Result<RepoState> {
-    exec::as_user("hunk_revert", || {
-        CliEngine::new(state.repo_path()?).apply_patch(&patch, false, true)
+pub async fn hunk_revert(state: State<'_, AppState>, patch: String) -> Result<DiscardOutcome> {
+    let repo = state.repo_path()?;
+    let backup = exec::as_user("hunk_revert", || {
+        let paths = discard::patch_paths(&repo, &patch)?;
+        discard::with_backup(&repo, DiscardKind::Hunk, &paths, || {
+            CliEngine::new(&repo).apply_patch(&patch, false, true)
+        })
     })?;
-    build_state(&state)
+    Ok(DiscardOutcome {
+        state: build_state(&state)?,
+        backup,
+    })
 }
 
 // ── commit (task_05) ─────────────────────────────────────────────────────────

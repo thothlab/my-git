@@ -4,6 +4,7 @@ use crate::model::RepoSnapshot;
 pub mod branches;
 pub mod cli;
 pub mod commit;
+pub mod discard;
 pub mod exec;
 pub mod log;
 pub mod ops;

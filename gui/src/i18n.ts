@@ -80,7 +80,7 @@ const en = {
   active: () => "active",
   rollbackTip: () => "Rollback selected to HEAD",
   rollbackConfirm: (n: number) =>
-    `Revert ${n} selected file(s) to HEAD? Local changes will be lost.`,
+    `Revert ${n} selected file(s) to HEAD? The files are backed up first and can be restored; what was staged is not.`,
   collapseAll: () => "Collapse all",
   expandAll: () => "Expand all",
   groupByDirTip: () => "Group by directory",
@@ -141,9 +141,9 @@ const en = {
   updInstalling: () => "Installing\u2026",
   updInstallFailed: (message: string) => `Failed to install the update: ${message}`,
   updLastChecked: (time: string) => `Last checked at ${time}`,
-  revertFileConfirm: (path: string) => `Revert ${path} to HEAD? Local changes will be lost.`,
+  revertFileConfirm: (path: string) => `Revert ${path} to HEAD? The files are backed up first and can be restored; what was staged is not.`,
   revertListConfirm: (name: string) =>
-    `Revert all files in "${name}" to HEAD? Local changes will be lost.`,
+    `Revert all files in "${name}" to HEAD? The files are backed up first and can be restored; what was staged is not.`,
   renameChangelist: () => "Rename changelist",
   deleteListConfirm: (name: string) => `Delete list "${name}"? Files will return to Default.`,
   moveTo: () => "Move to",
@@ -160,9 +160,9 @@ const en = {
   diffUnavailable: () => "Diff unavailable for this state.",
   binaryFile: () => "Binary file.",
   noChangesForBase: () => "No changes for this base.",
-  revertHunkConfirm: () => "Revert this hunk in the working tree? Changes will be lost.",
+  revertHunkConfirm: () => "Revert this hunk in the working tree? The file is backed up first and can be restored.",
   revertHunkWideConfirm: () =>
-    "The context is expanded, so this hunk is wider than the region shown before expanding. Revert all of it in the working tree? Changes will be lost.",
+    "The context is expanded, so this hunk is wider than the region shown before expanding. Revert all of it in the working tree? The file is backed up first and can be restored.",
   // StatusBar
   changesCount: (n: number) => `${n} ${n === 1 ? "change" : "changes"}`,
   // Window modes
@@ -440,6 +440,27 @@ const en = {
   stashFilesTitle: () => "Files in the stash",
   stashFilesEmpty: () => "No tracked file changed in this stash.",
   stashFilesNote: () => "Untracked files stashed along are not listed here — git keeps them apart.",
+  // Backups of rolled-back work (refs/graft/discard)
+  dismiss: () => "Dismiss",
+  discardedFiles: (n: number) => `Rolled back ${n} ${n === 1 ? "file" : "files"}`,
+  discardedList: (n: number) => `Rolled back a changelist: ${n} ${n === 1 ? "file" : "files"}`,
+  discardedHunk: (path: string) => `Reverted a hunk in ${path}`,
+  discardedRestore: (n: number) => `Restored ${n} ${n === 1 ? "file" : "files"} from a backup`,
+  discardUndo: () => "Undo",
+  discardStaleConfirm: (paths: string[]) =>
+    `These files changed after the rollback:\n\n${paths.join("\n")}\n\nRestore anyway? Their current versions are backed up first, so this can be undone too.`,
+  phaseDiscardRestore: () => "restore",
+  restoreDiscardedMenu: () => "Restore discarded…",
+  restoreDiscardedNoRepo: () => "Open a repository first",
+  discardsTitle: () => "Discarded changes",
+  discardsEmpty: () => "Nothing has been rolled back in this repository yet.",
+  discardFilesTitle: () => "Files in the backup",
+  discardSelectOne: () => "Select a backup",
+  discardNote: () =>
+    "Only the working tree is restored: what was staged is not staged again. Every restore is backed up as well.",
+  discardKeysHint: () => "↑↓ select · Enter restore · Esc close",
+  discardRestoreBtn: () => "Restore",
+  discardRestoreTip: () => "Put these files back as they were before",
   stashApplyBtn: () => "Apply",
   stashApplyTip: () => "Put the changes back and keep the stash",
   stashPopBtn: () => "Apply and drop",
@@ -531,7 +552,7 @@ const ru: Dict = {
   active: () => "активный",
   rollbackTip: () => "Откатить отмеченные к HEAD",
   rollbackConfirm: (n) =>
-    `Откатить отмеченные файлы (${n}) к HEAD? Локальные правки будут потеряны.`,
+    `Откатить отмеченные файлы (${n}) к HEAD? Файлы сначала сохраняются в копию, их можно будет вернуть; содержимое индекса — нет.`,
   collapseAll: () => "Свернуть всё",
   expandAll: () => "Развернуть всё",
   groupByDirTip: () => "Группировать по каталогам",
@@ -593,9 +614,9 @@ const ru: Dict = {
   updInstallFailed: (message) => `Не удалось установить обновление: ${message}`,
   updLastChecked: (time) => `Последняя проверка в ${time}`,
   revertFileConfirm: (path) =>
-    `Откатить ${path} к HEAD? Локальные правки будут потеряны.`,
+    `Откатить ${path} к HEAD? Файлы сначала сохраняются в копию, их можно будет вернуть; содержимое индекса — нет.`,
   revertListConfirm: (name) =>
-    `Откатить все файлы списка "${name}" к HEAD? Локальные правки будут потеряны.`,
+    `Откатить все файлы списка "${name}" к HEAD? Файлы сначала сохраняются в копию, их можно будет вернуть; содержимое индекса — нет.`,
   renameChangelist: () => "Переименовать changelist",
   deleteListConfirm: (name) =>
     `Удалить список "${name}"? Файлы вернутся в Default.`,
@@ -613,9 +634,9 @@ const ru: Dict = {
   binaryFile: () => "Бинарный файл",
   noChangesForBase: () => "Нет изменений для этой базы.",
   revertHunkConfirm: () =>
-    "Откатить этот hunk в рабочем дереве? Правки будут потеряны.",
+    "Откатить этот hunk в рабочем дереве? Файл сначала сохраняется в копию, его можно будет вернуть.",
   revertHunkWideConfirm: () =>
-    "Контекст расширен, поэтому hunk шире участка, который был виден до разворота. Откатить его целиком в рабочем дереве? Правки будут потеряны.",
+    "Контекст расширен, поэтому hunk шире участка, который был виден до разворота. Откатить его целиком в рабочем дереве? Файл сначала сохраняется в копию, его можно будет вернуть.",
   changesCount: (n) => `${n} ${ruPlural(n, "изменение", "изменения", "изменений")}`,
   modeChanges: () => "Изменения",
   modeLog: () => "Лог",
@@ -888,6 +909,28 @@ const ru: Dict = {
   stashFilesEmpty: () => "В этой записи нет изменённых отслеживаемых файлов.",
   stashFilesNote: () =>
     "Неотслеживаемые файлы, спрятанные вместе с остальными, здесь не перечислены — git хранит их отдельно.",
+  dismiss: () => "Скрыть",
+  discardedFiles: (n) => `Откатано ${n} ${ruPlural(n, "файл", "файла", "файлов")}`,
+  discardedList: (n) =>
+    `Откачен changelist: ${n} ${ruPlural(n, "файл", "файла", "файлов")}`,
+  discardedHunk: (path) => `Откачен фрагмент в ${path}`,
+  discardedRestore: (n) =>
+    `Восстановлено из копии: ${n} ${ruPlural(n, "файл", "файла", "файлов")}`,
+  discardUndo: () => "Вернуть",
+  discardStaleConfirm: (paths) =>
+    `Эти файлы изменились после отката:\n\n${paths.join("\n")}\n\nВсё равно восстановить? Их текущие версии сначала будут сохранены в копию, так что и это можно будет вернуть.`,
+  phaseDiscardRestore: () => "восстановление",
+  restoreDiscardedMenu: () => "Восстановить откаченное…",
+  restoreDiscardedNoRepo: () => "Сначала откройте репозиторий",
+  discardsTitle: () => "Откаченные изменения",
+  discardsEmpty: () => "В этом репозитории ещё ничего не откатывали.",
+  discardFilesTitle: () => "Файлы в копии",
+  discardSelectOne: () => "Выберите копию",
+  discardNote: () =>
+    "Восстанавливается только рабочее дерево: то, что было в индексе, в индекс не возвращается. Каждое восстановление тоже сохраняется в копию.",
+  discardKeysHint: () => "↑↓ выбор · Enter восстановить · Esc закрыть",
+  discardRestoreBtn: () => "Восстановить",
+  discardRestoreTip: () => "Вернуть эти файлы такими, какими они были до отката",
   stashApplyBtn: () => "Применить",
   stashApplyTip: () => "Вернуть изменения, запись оставить",
   stashPopBtn: () => "Применить и снять",

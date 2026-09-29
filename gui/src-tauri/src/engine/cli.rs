@@ -14,7 +14,7 @@ use crate::model::{
 /// automatic save ships the whole text across the Tauri boundary.
 pub const EDIT_SIZE_CEILING: u64 = 2 * 1024 * 1024;
 
-static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// FNV-1a over raw bytes, rendered as sixteen hex digits. The crate's only
 /// implementation: `engine::log` fingerprints a filter's argument list with it and
@@ -318,6 +318,31 @@ impl CliEngine {
                 };
             }
         }
+    }
+
+    /// Resolve a client-supplied path for an operation on the **entry itself** — the
+    /// discard backup (`engine::discard`) reads and writes a symlink as a link, never
+    /// through it.
+    ///
+    /// The escape rule is [`Self::worktree_path`]'s, applied to the parent directory:
+    /// `linkdir/file`, where `linkdir` points outside the repository, is refused, because
+    /// reading or writing that path would touch a file outside. The last component is
+    /// not followed: a committed link to `/usr/bin/tool` is backed up as its target
+    /// text and restored as a link, which leaves the outside alone — refusing it would
+    /// only make that link impossible to roll back. What comes back is the lexical path.
+    pub(crate) fn worktree_entry(&self, rel: &str) -> Result<PathBuf> {
+        use std::path::Component;
+        let candidate = Path::new(rel);
+        if !matches!(candidate.components().next_back(), Some(Component::Normal(_))) {
+            return Err(Error::Rule(format!("{rel} is not a path inside the repository")));
+        }
+        if let Some(parent) = candidate.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let parent = parent
+                .to_str()
+                .ok_or_else(|| Error::Rule(format!("{rel} is not a path inside the repository")))?;
+            self.worktree_path(parent)?;
+        }
+        Ok(self.repo.join(candidate))
     }
 
     /// Read a working-tree file for in-place editing.

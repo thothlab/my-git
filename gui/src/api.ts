@@ -97,12 +97,42 @@ export const changelistSetActive = (id: string) =>
 export const filesMove = (paths: string[], toListId: string) =>
   invoke<RepoState>("files_move", { paths, toListId });
 
-// rollback (task_03)
+// rollback (task_03) — every discard is backed up first under refs/graft/discard
+export type DiscardKind = "files" | "list" | "hunk" | "restore";
+
+/** One restorable backup: the paths a discard changed, as they were before it.
+ * `id` is the handle `discardCheck` / `discardRestore` take; `at` is Unix seconds. */
+export interface DiscardEntry {
+  id: string;
+  at: number;
+  kind: DiscardKind;
+  paths: string[];
+}
+
+/** A discard or a restore: the fresh state plus the backup it took (`null` when
+ * nothing on disk changed). Run through `runWithOutput`, like `gitExec`. */
+export interface DiscardOutcome {
+  state: RepoState;
+  backup: DiscardEntry | null;
+}
+
 export const fileRollback = (paths: string[]) =>
-  invoke<RepoState>("file_rollback", { paths });
+  invoke<DiscardOutcome>("file_rollback", { paths });
 
 export const listRollback = (id: string) =>
-  invoke<RepoState>("list_rollback", { id });
+  invoke<DiscardOutcome>("list_rollback", { id });
+
+/** Restorable backups, newest first. Read-only. */
+export const discardList = (limit: number) =>
+  invoke<DiscardEntry[]>("discard_list", { limit });
+
+/** Read-only: paths of backup `id` changed since the discard (empty: safe to restore). */
+export const discardCheck = (id: string) => invoke<string[]>("discard_check", { id });
+
+/** Put the files of backup `id` back as they were before the discard. Without
+ * `force` the backend refuses (`stale`) over files changed since. */
+export const discardRestore = (id: string, force: boolean) =>
+  invoke<DiscardOutcome>("discard_restore", { id, force });
 
 // diff & hunk staging (task_04)
 export type DiffBase = "worktree" | "index" | "head";
@@ -152,7 +182,7 @@ export const hunkStage = (patch: string) =>
 export const hunkUnstage = (patch: string) =>
   invoke<RepoState>("hunk_unstage", { patch });
 export const hunkRevert = (patch: string) =>
-  invoke<RepoState>("hunk_revert", { patch });
+  invoke<DiscardOutcome>("hunk_revert", { patch });
 
 // commit (task_05)
 export const commitList = (a: {

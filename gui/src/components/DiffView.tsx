@@ -30,6 +30,7 @@ import {
 import { confirmAction, run, scaledPx, selectedPath, state } from "../store";
 import { d } from "../i18n";
 import { beginDrag } from "./Resizer";
+import { runDiscard } from "./DiscardPanel";
 import { registerHotkey } from "../hotkeys";
 import {
   BIG_DIFF_LINES,
@@ -1152,7 +1153,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
                                 ? d().revertHunkWideConfirm()
                                 : d().revertHunkConfirm();
                               if (await confirmAction(ask))
-                                await act(() => hunkRevert(hv.hunk.patch));
+                                await runDiscard(hunkRevert(hv.hunk.patch));
                             }}
                           />
                         </>

@@ -36,6 +36,27 @@ export function reportError(e: unknown): void {
   setErrorSource(id === null ? null : { text, id });
   setError(text);
 }
+/**
+ * A non-error message under the toolbar — "Rolled back 3 files · Undo".
+ *
+ * Not cleared by `run()`: every window focus runs a `refresh()` through it, and the
+ * offer would vanish the moment the reader came back to act on it. It goes when
+ * dismissed, when its action runs, or when the next notice replaces it. `repo`
+ * scopes it: an offer to restore files into one repository is not shown over
+ * another. Text is a function so a language switch re-renders it.
+ */
+export type Notice = {
+  repo: string;
+  text: () => string;
+  action?: { label: () => string; run: () => void };
+};
+export const [notice, setNotice] = createSignal<Notice | null>(null);
+/** The notice, if it belongs to the repository open now. */
+export const visibleNotice = (): Notice | null => {
+  const n = notice();
+  return n && n.repo === state()?.repoPath ? n : null;
+};
+
 export const [busy, setBusy] = createSignal(false);
 /** Name of the operation currently running, shown next to the busy bar. */
 export const [busyLabel, setBusyLabel] = createSignal("");
