@@ -285,10 +285,16 @@ function SettingRow(props: { label: string; description: string; control: any })
 }
 
 /**
- * Applied on every step of the drag, not on release: the reader judges the size
- * by the text it changes, and this dialog is part of that text.
+ * The drag moves only the readout; the size is applied when the slider is let
+ * go (`change`). Applying it on every `input` step is a feedback loop: this
+ * dialog is sized in rem, so each step resizes and re-centres it, the track
+ * slides under a pointer that has not moved, the same pointer now reads as a
+ * different value, and the whole window jitters between two sizes for as long
+ * as the button is held. The keyboard has no pointer to slide under — arrows
+ * fire `change` per press and apply at once.
  */
 function FontSizeSlider() {
+  const [draft, setDraft] = createSignal(fontSize());
   return (
     <div class="flex items-center gap-3">
       <input
@@ -297,12 +303,13 @@ function FontSizeSlider() {
         min={FONT_SIZE_MIN}
         max={FONT_SIZE_MAX}
         step={1}
-        value={fontSize()}
+        value={draft()}
         aria-label={d().fontSizeLabel()}
-        onInput={(e) => setFontSize(e.currentTarget.valueAsNumber)}
+        onInput={(e) => setDraft(e.currentTarget.valueAsNumber)}
+        onChange={(e) => setFontSize(e.currentTarget.valueAsNumber)}
       />
       <span class="w-10 text-right font-mono text-xs tabular-nums">
-        {d().fontSizeValue(fontSize())}
+        {d().fontSizeValue(draft())}
       </span>
     </div>
   );
