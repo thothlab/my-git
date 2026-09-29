@@ -45,11 +45,19 @@ export interface RepoState {
 }
 
 // Error shape returned by Rust commands (see error.rs). Always carries a message;
-// git failures also carry the underlying stderr.
+// git failures also carry the underlying output (credentials masked) and the id of
+// the failed run's entry in the command journal.
 export interface BackendError {
   kind: "git" | "io" | "parse" | "rule" | "stale";
   message: string;
   stderr?: string | null;
+  journalId?: number | null;
+}
+
+/** The journal entry of a failed git run, when the error is one. */
+export function errJournalId(e: unknown): number | null {
+  const be = e as Partial<BackendError> | undefined;
+  return be && typeof be === "object" && typeof be.journalId === "number" ? be.journalId : null;
 }
 
 export function errText(e: unknown): string {
@@ -185,9 +193,54 @@ export interface GitExecResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  /** Journal entry of this run — the console opens it. */
+  journalId: number;
   state: RepoState;
 }
 export const gitExec = (args: string[]) => invoke<GitExecResult>("git_exec", { args });
+
+// ── Command journal (engine/exec.rs) ─────────────────────────────────────────
+
+/** A person's action, or the application reading state for itself. */
+export type JournalOrigin = "user" | "background";
+
+/** One git run, without its output — see `JournalSummary` in model.rs. */
+export interface JournalSummary {
+  /** Monotonic for the life of the process. */
+  id: number;
+  /** The directory git ran in (`-C`). */
+  repo: string;
+  /** Arguments after `git`, credentials masked. */
+  argv: string[];
+  /** Milliseconds since the Unix epoch. */
+  startedAt: number;
+  durationMs: number;
+  /** null: git never started, or was killed by a signal. */
+  exitCode: number | null;
+  origin: JournalOrigin;
+  /** Tauri command a user run belonged to. */
+  action?: string | null;
+}
+
+export interface JournalOutput {
+  id: number;
+  stdout: string;
+  stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  /** Per-stream limit the entry was kept under: 256 KB for a user action or a
+   *  failed run, 16 KB for a successful background read. */
+  limitBytes: number;
+}
+
+/** Entries newer than `after`, oldest first: the user ring when `mine`, else
+ *  both rings (user 1000, background 2000) merged by id. */
+export const journalList = (mine: boolean, after: number | null) =>
+  invoke<JournalSummary[]>("journal_list", { mine, after });
+
+/** Both streams of one entry; null once the ring has dropped it. */
+export const journalOutput = (id: number) =>
+  invoke<JournalOutput | null>("journal_output", { id });
 
 // ── Git panel: history (prd_02, task_01) ─────────────────────────────────────
 

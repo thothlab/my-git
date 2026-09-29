@@ -424,5 +424,51 @@ pub struct GitExecResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    /// The journal entry of this run, so the console can open it (0: not journaled).
+    pub journal_id: u64,
     pub state: RepoState,
+}
+
+/// Who a journaled git run was for: a person's action, or the application reading
+/// state for itself. Declared at the call site, see `engine::exec`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JournalOrigin {
+    User,
+    Background,
+}
+
+/// One git run as `journal_list` reports it — everything but the output, which can
+/// be half a megabyte per entry and is fetched on demand by `journal_output`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalSummary {
+    /// Monotonic for the life of the process; `journal_list(after)` pages on it.
+    pub id: u64,
+    /// The `-C` directory the command ran in — the repository, and its cwd.
+    pub repo: String,
+    /// Arguments after `git -C <repo>`, credentials masked.
+    pub argv: Vec<String>,
+    /// Milliseconds since the Unix epoch.
+    pub started_at: u64,
+    pub duration_ms: u64,
+    /// `None`: git never started, or was ended by a signal.
+    pub exit_code: Option<i32>,
+    pub origin: JournalOrigin,
+    /// The Tauri command a user run belonged to (`branch_rename`, `git_exec`, …).
+    pub action: Option<String>,
+}
+
+/// Both streams of one journal entry, masked and cut at `limit_bytes` each: 256 KB
+/// for a user action or a failed run, 16 KB for a successful background read.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalOutput {
+    pub id: u64,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    /// The per-stream limit this entry was kept under.
+    pub limit_bytes: u64,
 }

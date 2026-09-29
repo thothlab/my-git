@@ -1,5 +1,6 @@
 import { createSignal } from "solid-js";
 import {
+  errJournalId,
   errText,
   openRepo as apiOpenRepo,
   repoState as apiRepoState,
@@ -14,6 +15,27 @@ import {
 
 export const [state, setState] = createSignal<RepoState | null>(null);
 export const [error, setError] = createSignal("");
+/**
+ * The journal entry behind the banner's current error, paired with the text it was
+ * reported with. The pair, not the id alone: a dozen places write `setError`
+ * directly, and an id left over from an earlier failure would otherwise put a
+ * "show output" link under a message it has nothing to do with.
+ */
+const [errorSource, setErrorSource] = createSignal<{ text: string; id: number } | null>(null);
+
+/** Journal id of the git run the banner's error came from, if it did. */
+export const errorJournalId = (): number | null => {
+  const src = errorSource();
+  return src && src.text === error() ? src.id : null;
+};
+
+/** Put a thrown backend error in the banner, keeping its journal link. */
+export function reportError(e: unknown): void {
+  const text = errText(e);
+  const id = errJournalId(e);
+  setErrorSource(id === null ? null : { text, id });
+  setError(text);
+}
 export const [busy, setBusy] = createSignal(false);
 /** Name of the operation currently running, shown next to the busy bar. */
 export const [busyLabel, setBusyLabel] = createSignal("");
@@ -165,7 +187,7 @@ export async function run(p: Promise<RepoState>, label = ""): Promise<void> {
     applyState(await p);
     setError("");
   } catch (e) {
-    setError(errText(e));
+    reportError(e);
     // A refused command is not the same as an unchanged repository. A revert,
     // merge, rebase or cherry-pick that ends in a conflict *fails* — git returns
     // non-zero and prints CONFLICT — and yet leaves the repository mid-operation,
@@ -207,7 +229,7 @@ export async function runWithOutput<T extends { state: RepoState }>(
     setError("");
     return result;
   } catch (e) {
-    setError(errText(e));
+    reportError(e);
     try {
       applyState(await apiRepoState());
     } catch {

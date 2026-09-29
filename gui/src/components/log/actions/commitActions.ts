@@ -4,14 +4,13 @@ import {
   commitReset,
   commitResetLostCount,
   commitRevert,
-  errText,
   tagCreate,
   WORKING_TREE,
   type LogCommit,
   type ResetMode,
 } from "../../../api";
 import { d } from "../../../i18n";
-import { chooseOption, confirmAction, run, setError, state } from "../../../store";
+import { chooseOption, confirmAction, reportError, run, state } from "../../../store";
 import { copyOrReport, newBranchFrom } from "./branchActions";
 import type { MenuEntry } from "./ContextMenu";
 import { setCompareTarget } from "./compareSelection";
@@ -135,7 +134,7 @@ export async function resetToCommit(commit: LogCommit): Promise<void> {
     try {
       [lost, dirty] = await Promise.all([commitResetLostCount(commit.hash), localChangesNow()]);
     } catch (e) {
-      setError(errText(e)); // git's own output, whole
+      reportError(e); // git's own output, whole, with its journal link
       return;
     }
     const ok = await confirmAction(

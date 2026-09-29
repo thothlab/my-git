@@ -64,3 +64,15 @@ export function splitShellArgs(input: string): ShellSplit {
   if (args[0] === "git") args.shift();
   return { ok: true, args };
 }
+
+/**
+ * An argument list as one line the console's own input would split back into the
+ * same list (`splitShellArgs(formatArgv(a))` is `a`): plain words as they are,
+ * anything else single-quoted, with `'` spelled `'\''`. For the journal, where an
+ * argument with a space — a commit message, a `--format` — has to read as one.
+ */
+export function formatArgv(argv: string[]): string {
+  return argv
+    .map((a) => (/^[A-Za-z0-9_@%+=:,./^~{}-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`))
+    .join(" ");
+}

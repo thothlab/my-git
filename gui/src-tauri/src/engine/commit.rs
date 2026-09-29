@@ -9,8 +9,8 @@
 //! `diff-tree --root`, which renders its whole tree as additions.
 
 use std::path::Path;
-use std::process::Command;
 
+use crate::engine::exec;
 use crate::engine::cli::{context_arg, literal, parse_diff, parse_refs, whitespace_args};
 use crate::error::{Error, Result};
 use crate::model::{CommitDetails, CommitFileEntry, FileDiff, FileState};
@@ -22,18 +22,7 @@ const BRANCH_LIMIT: usize = 64;
 
 /// Run `git -C <repo> <args>`, keeping stderr verbatim on failure.
 fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()?;
-    if !out.status.success() {
-        return Err(Error::Git {
-            command: args.join(" "),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        });
-    }
-    Ok(out.stdout)
+    exec::git(repo, args).run()?.checked()
 }
 
 fn git_text(repo: &Path, args: &[&str]) -> Result<String> {
@@ -48,7 +37,7 @@ fn first_parent(repo: &Path, hash: &str) -> Result<Option<String>> {
 
 /// Parent hashes of a commit, oldest-listed first (`%P`).
 fn parents_of(repo: &Path, hash: &str) -> Result<Vec<String>> {
-    let out = git_text(repo, &["log", "-1", "--format=%P", hash, "--"])?;
+    let out = git_text(repo, &["log", "-1", "--format=%P", "--end-of-options", hash, "--"])?;
     Ok(out.split_whitespace().map(str::to_string).collect())
 }
 
@@ -128,7 +117,9 @@ fn parse_name_status(raw: &str) -> Result<Vec<CommitFileEntry>> {
 fn containing_branches(repo: &Path, hash: &str) -> Result<(Vec<String>, bool)> {
     let raw = git_text(
         repo,
-        &["branch", "-a", "--contains", hash, "--format=%(refname)"],
+        // `--contains=<rev>` glued: the option's argument is optional, so a
+        // separate `-x` would be read as another option.
+        &["branch", "-a", &format!("--contains={hash}"), "--format=%(refname)"],
     )?;
     let mut all: Vec<String> = raw
         .lines()
@@ -150,7 +141,7 @@ pub fn details(repo: &Path, hash: &str) -> Result<CommitDetails> {
     // included, so nothing after it needs finding.
     const FMT: &str =
         "--format=%H%x00%P%x00%an%x00%ae%x00%at%x00%cn%x00%ce%x00%ct%x00%D%x00%s%x00%b";
-    let raw = git_text(repo, &["log", "-1", FMT, hash, "--"])?;
+    let raw = git_text(repo, &["log", "-1", FMT, "--end-of-options", hash, "--"])?;
     let f: Vec<&str> = raw.split('\0').collect();
     if f.len() < 11 {
         return Err(Error::Parse(format!(
@@ -189,7 +180,7 @@ pub fn files(repo: &Path, hash: &str) -> Result<Vec<CommitFileEntry>> {
     let raw = match first_parent(repo, hash)? {
         Some(base) => git_text(
             repo,
-            &["diff", "--name-status", "-M", "-z", &base, hash, "--"],
+            &["diff", "--name-status", "-M", "-z", "--end-of-options", &base, hash, "--"],
         )?,
         // No parent: `git diff` has nothing to stand on, and `git show` prints
         // nothing for a root commit either. `diff-tree --root` renders the whole
@@ -204,6 +195,7 @@ pub fn files(repo: &Path, hash: &str) -> Result<Vec<CommitFileEntry>> {
                 "--root",
                 "--no-commit-id",
                 "--name-status",
+                "--end-of-options",
                 hash,
                 "--",
             ],
@@ -215,16 +207,11 @@ pub fn files(repo: &Path, hash: &str) -> Result<Vec<CommitFileEntry>> {
 /// Byte size of a blob at `<rev>:<path>`, or `None` when the file is absent there.
 fn blob_size(repo: &Path, rev: &str, path: &str) -> Option<u64> {
     let spec = format!("{rev}:{path}");
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["cat-file", "-s", &spec])
-        .output()
-        .ok()?;
-    if !out.status.success() {
+    let out = exec::git(repo, &["cat-file", "-s", "--end-of-options", &spec]).run().ok()?;
+    if !out.success() {
         return None;
     }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    out.stdout_text().trim().parse().ok()
 }
 
 /// Byte size of the file as it lies on disk, for a comparison against the working tree.
@@ -272,7 +259,7 @@ pub fn file_diff(
             let mut a = vec!["diff", "-M"];
             a.extend_from_slice(&wsa);
             a.extend_from_slice(&ctx);
-            a.extend_from_slice(&[base.as_str(), hash, "--"]);
+            a.extend_from_slice(&["--end-of-options", base.as_str(), hash, "--"]);
             if let Some(o) = old_spec.as_deref() {
                 a.push(o);
             }
@@ -291,7 +278,7 @@ pub fn file_diff(
             a.extend_from_slice(&wsa);
             a.extend_from_slice(&ctx);
             let spec = literal(path);
-            a.extend_from_slice(&[hash, "--", &spec]);
+            a.extend_from_slice(&["--end-of-options", hash, "--", &spec]);
             let mut d = parse_diff(path, &git_text(repo, &a)?);
             if d.binary {
                 d.new_size = blob_size(repo, hash, path);
@@ -322,9 +309,10 @@ pub fn unreachable_from_head(repo: &Path, hashes: &[String]) -> Result<Vec<Strin
     if hashes.is_empty() {
         return Ok(Vec::new());
     }
-    let mut args: Vec<&str> = vec!["rev-list", "--no-walk"];
+    // `^HEAD`, not `--not HEAD`: after `--end-of-options` a `--not` is a revision.
+    let mut args: Vec<&str> = vec!["rev-list", "--no-walk", "--end-of-options"];
     args.extend(hashes.iter().map(String::as_str));
-    args.extend_from_slice(&["--not", "HEAD"]);
+    args.push("^HEAD");
     Ok(git_text(repo, &args)?
         .split_whitespace()
         .map(str::to_string)
@@ -337,7 +325,7 @@ pub fn unreachable_from_head(repo: &Path, hashes: &[String]) -> Result<Vec<Strin
 /// `git diff <rev>` with one revision is exactly that comparison, so the same pair
 /// of functions serves both cases and the UI only decides what to label the sides.
 pub fn compare(repo: &Path, from: &str, to: &str) -> Result<Vec<CommitFileEntry>> {
-    let mut args = vec!["diff", "--name-status", "-M", "-z", from];
+    let mut args = vec!["diff", "--name-status", "-M", "-z", "--end-of-options", from];
     if !to.is_empty() {
         args.push(to);
     }
@@ -364,6 +352,7 @@ pub fn compare_diff(
     let mut a = vec!["diff", "-M"];
     a.extend_from_slice(&wsa);
     a.extend_from_slice(&ctx);
+    a.push("--end-of-options");
     a.push(from);
     if !to.is_empty() {
         a.push(to);
@@ -986,5 +975,28 @@ mod tests {
         let mut b = d.branches.clone();
         b.sort();
         assert_eq!(b, vec!["(weird)".to_string(), "main".to_string()]);
+    }
+
+    /// Commit reads pass the revision behind `--end-of-options` (and `--contains=`
+    /// glued): a tag named `-t` is a revision, not a flag.
+    #[test]
+    fn commit_reads_take_a_dash_ref_as_a_revision() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("b.txt"), "b\n").unwrap();
+        run(p, &["add", "b.txt"]);
+        run(p, &["commit", "-m", "add b"]);
+        run(p, &["update-ref", "refs/tags/-t", "HEAD"]);
+        run(p, &["update-ref", "refs/tags/-r", "HEAD~1"]);
+
+        let d = details(p, "-t").unwrap();
+        assert_eq!(d.parents.len(), 1);
+        assert_eq!(files(p, "-t").unwrap().len(), 1);
+        assert_eq!(files(p, "-r").unwrap().len(), 1, "root commit via diff-tree");
+        assert!(!file_diff(p, "-t", "b.txt", "none", None).unwrap().hunks.is_empty());
+        assert!(!file_diff(p, "-r", "a.txt", "none", None).unwrap().hunks.is_empty());
+        assert_eq!(compare(p, "-r", "-t").unwrap().len(), 1);
+        assert!(!compare_diff(p, "-r", "-t", "b.txt", "none", None).unwrap().hunks.is_empty());
+        assert!(unreachable_from_head(p, &["-t".to_string()]).unwrap().is_empty());
     }
 }

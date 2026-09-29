@@ -46,7 +46,7 @@ export default function Toolbar() {
       <button
         class="flex items-center rounded border border-border px-1.5 py-1 text-fg-subtle hover:bg-bg hover:text-fg"
         title={d().gitConsoleTip()}
-        onClick={openGitConsole}
+        onClick={() => openGitConsole()}
       >
         <IconConsole />
       </button>

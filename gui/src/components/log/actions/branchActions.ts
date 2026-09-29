@@ -7,13 +7,12 @@ import {
   branchRename,
   branchUnmergedCount,
   branchUpdate,
-  errText,
   fetchRemote,
   push,
   type BranchNode,
 } from "../../../api";
 import { d } from "../../../i18n";
-import { chooseOption, confirmAction, run, setError, state } from "../../../store";
+import { chooseOption, confirmAction, reportError, run, setError, state } from "../../../store";
 import { openStashPanel } from "../../StashPanel";
 import { selectedBranch, setSelectedBranch } from "../branchSelection";
 import { copyText } from "./clipboard";
@@ -131,9 +130,10 @@ export async function deleteBranch(node: BranchNode): Promise<void> {
   try {
     unmerged = await branchUnmergedCount(node.name);
   } catch (e) {
-    // errText, not the message alone: git's whole output is the half that names
-    // the file or the ref, and dropping it is what "операция не удалась" is.
-    setError(errText(e));
+    // errText (inside reportError), not the message alone: git's whole output is
+    // the half that names the file or the ref, and dropping it is what "операция
+    // не удалась" is.
+    reportError(e);
     return;
   }
   const ok = await confirmAction(

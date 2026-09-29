@@ -81,7 +81,7 @@ const {
   editorScrollTop,
   newSideAnchors,
 } = await load("editRules.js");
-const { splitShellArgs } = await load("gitConsoleCommand.js");
+const { splitShellArgs, formatArgv } = await load("gitConsoleCommand.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -474,6 +474,18 @@ eq(splitShellArgs("  status   --short  "), { ok: true, args: ["status", "--short
 eq(splitShellArgs(""), { ok: true, args: [] }, "empty input has no arguments");
 eq(splitShellArgs('commit -m "unterminated').ok, false, "an unmatched quote is reported, not silently closed");
 eq(splitShellArgs("git"), { ok: true, args: [] }, "'git' alone is the leading token, not a subcommand");
+
+// ── formatArgv (the journal's one-line command) ─────────────────────────────
+eq(formatArgv(["log", "--oneline", "-n", "5"]), "log --oneline -n 5", "plain words stay unquoted");
+eq(formatArgv(["commit", "-m", "two words"]), "commit -m 'two words'", "an argument with a space is quoted");
+eq(formatArgv(["tag", ""]), "tag ''", "an empty argument stays visible");
+for (const argv of [
+  ["commit", "-m", "it's \"quoted\""],
+  ["log", "--format=%H%x00%s", "--", ":(literal)a b/c.txt"],
+  ["show", "HEAD~1^{commit}", "$HOME", "a\\b"],
+]) {
+  eq(splitShellArgs(formatArgv(argv)), { ok: true, args: argv }, `round trip ${JSON.stringify(argv)}`);
+}
 
 await rm(out, { recursive: true, force: true });
 console.log(failed === 0 ? `\nall green (${process.env.TZ ?? "local"} time zone)` : `\n${failed} FAILED`);

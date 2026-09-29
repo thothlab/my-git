@@ -6,9 +6,9 @@
 //! `RepoState.operation` is honest from the first task.
 
 use std::path::Path;
-use std::process::Command;
 
 use crate::engine::cli::CliEngine;
+use crate::engine::exec;
 use crate::error::{Error, Result};
 use crate::model::{CommitFileEntry, OperationKind, OperationState, StashEntry};
 
@@ -18,25 +18,9 @@ use crate::model::{CommitFileEntry, OperationKind, OperationState, StashEntry};
 /// partly on stdout ("CONFLICT (content): Merge conflict in a.txt") and partly on
 /// stderr, so a helper keeping stderr alone would drop the very line naming the file.
 /// `Error::Git` has one output field; both streams go into it, in the order git
-/// wrote them (same convention as `engine::branches`).
+/// wrote them (same convention as `engine::branches`, [`exec::both_streams`]).
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git").arg("-C").arg(repo).args(args).output()?;
-    if !out.status.success() {
-        let mut text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let err = String::from_utf8_lossy(&out.stderr);
-        let err = err.trim();
-        if !err.is_empty() {
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(err);
-        }
-        return Err(Error::Git {
-            command: args.join(" "),
-            stderr: text,
-        });
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    exec::git(repo, args).run()?.checked_both()
 }
 
 /// Which multi-step operation, if any, is in progress.
@@ -145,7 +129,7 @@ pub fn reset_mode_flag(mode: &str) -> Result<&'static str> {
 /// A conflict is an error carrying git's output whole; the repository is left in
 /// the revert state, which [`detect_state`] then reports with its conflicted paths.
 pub fn revert(repo: &Path, hash: &str) -> Result<()> {
-    git(repo, &["revert", "--no-edit", hash])?;
+    git(repo, &["revert", "--no-edit", "--end-of-options", hash])?;
     Ok(())
 }
 
@@ -153,7 +137,7 @@ pub fn revert(repo: &Path, hash: &str) -> Result<()> {
 /// The mode is validated at the boundary before any git call.
 pub fn reset(repo: &Path, hash: &str, mode: &str) -> Result<()> {
     let flag = reset_mode_flag(mode)?;
-    git(repo, &["reset", flag, hash])?;
+    git(repo, &["reset", flag, "--end-of-options", hash, "--"])?;
     Ok(())
 }
 
@@ -163,7 +147,7 @@ pub fn reset(repo: &Path, hash: &str, mode: &str) -> Result<()> {
 /// A commit already reachable from `hash` is not lost, so this is exactly
 /// `<hash>..HEAD`. Resetting to HEAD loses nothing and answers 0.
 pub fn commits_after(repo: &Path, hash: &str) -> Result<u32> {
-    let out = git(repo, &["rev-list", "--count", &format!("{hash}..HEAD")])?;
+    let out = git(repo, &["rev-list", "--count", "--end-of-options", &format!("{hash}..HEAD")])?;
     out.trim()
         .parse()
         .map_err(|_| Error::Rule(format!("unexpected rev-list output: {}", out.trim())))
@@ -187,30 +171,35 @@ pub fn has_local_changes(repo: &Path) -> Result<bool> {
 /// hash), which is exactly the case that produces a duplicate; `git cherry`
 /// compares patch ids and catches it. A commit git cannot resolve is an error.
 pub fn contains_commit(repo: &Path, hash: &str) -> Result<bool> {
-    let ancestor = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["merge-base", "--is-ancestor", hash, "HEAD"])
-        .output()?;
-    if ancestor.status.success() {
+    let ancestor = exec::git(
+        repo,
+        &["merge-base", "--is-ancestor", "--end-of-options", hash, "HEAD"],
+    )
+    .run()?;
+    if ancestor.success() {
         return Ok(true);
     }
     // git resolves the commit before answering; an unknown revision is an error,
     // not "not contained".
-    git(repo, &["rev-parse", "--verify", &format!("{hash}^{{commit}}")])?;
+    git(repo, &["rev-parse", "--verify", "--end-of-options", &format!("{hash}^{{commit}}")])?;
 
     let parent = format!("{hash}^");
-    let limited = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["rev-parse", "--verify", "--quiet", &format!("{parent}^{{commit}}")])
-        .output()?
-        .status
-        .success();
+    let limited = exec::git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &format!("{parent}^{{commit}}"),
+        ],
+    )
+    .run()?
+    .success();
     let listing = if limited {
-        git(repo, &["cherry", "HEAD", hash, &parent])?
+        git(repo, &["cherry", "--end-of-options", "HEAD", hash, &parent])?
     } else {
-        git(repo, &["cherry", "HEAD", hash])?
+        git(repo, &["cherry", "--end-of-options", "HEAD", hash])?
     };
     // `+` marks a commit whose patch is not in HEAD; `-` marks one that is.
     Ok(!listing.lines().any(|l| l.starts_with('+')))
@@ -227,7 +216,7 @@ pub fn cherry_pick(repo: &Path, hash: &str) -> Result<()> {
             "commit {hash} is already contained in the current branch"
         )));
     }
-    git(repo, &["cherry-pick", hash])?;
+    git(repo, &["cherry-pick", "--end-of-options", hash])?;
     Ok(())
 }
 
@@ -237,17 +226,19 @@ pub fn cherry_pick(repo: &Path, hash: &str) -> Result<()> {
 /// would quietly check the branch out instead, and the dialog has just promised
 /// the user a detached HEAD.
 pub fn checkout_rev(repo: &Path, hash: &str) -> Result<()> {
-    git(repo, &["checkout", "--detach", hash])?;
+    git(repo, &["checkout", "--detach", "--end-of-options", hash, "--"])?;
     Ok(())
 }
 
 /// История 54 / R24i.3: tag a commit — lightweight without a message, annotated
 /// with one. Moving an existing tag is not offered: `git tag` refuses, and the
-/// refusal reaches the user rather than a silently relocated tag.
+/// refusal reaches the user rather than a silently relocated tag. An invalid name is
+/// refused before tagging ([`crate::engine::cli::check_tag_name`]).
 pub fn tag_create(repo: &Path, hash: &str, name: &str, message: Option<&str>) -> Result<()> {
+    crate::engine::cli::check_tag_name(repo, name)?;
     match message {
-        Some(m) => git(repo, &["tag", "-a", "-m", m, name, hash])?,
-        None => git(repo, &["tag", name, hash])?,
+        Some(m) => git(repo, &["tag", "-a", "-m", m, "--", name, hash])?,
+        None => git(repo, &["tag", "--", name, hash])?,
     };
     Ok(())
 }
@@ -271,29 +262,10 @@ fn in_progress_command(repo: &Path) -> Result<&'static str> {
 /// confirm the message and hang a GUI process forever. `true` exits 0 without
 /// touching the file, which keeps the message git already prepared.
 fn drive(repo: &Path, op: &str, flag: &str) -> Result<()> {
-    let args = [op, flag];
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .env("GIT_EDITOR", "true")
-        .env("GIT_SEQUENCE_EDITOR", "true")
-        .output()?;
-    if !out.status.success() {
-        let mut text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let err = String::from_utf8_lossy(&out.stderr);
-        let err = err.trim();
-        if !err.is_empty() {
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(err);
-        }
-        return Err(Error::Git {
-            command: args.join(" "),
-            stderr: text,
-        });
-    }
+    exec::git(repo, &[op, flag])
+        .env(&[("GIT_EDITOR", "true"), ("GIT_SEQUENCE_EDITOR", "true")])
+        .run()?
+        .checked_both()?;
     Ok(())
 }
 
@@ -1312,5 +1284,56 @@ mod tests {
                 other => panic!("expected a domain refusal: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn tag_create_refuses_an_invalid_name_before_tagging() {
+        let (dir, first) = repo_with_three_commits();
+        let p = dir.path();
+        for name in ["a..b", "has space", "-x", "--delete", "x.lock", ""] {
+            match tag_create(p, &first, name, None) {
+                Err(Error::Rule(m)) => assert!(m.contains("tag name"), "{name}: {m}"),
+                other => panic!("{name:?}: expected a domain refusal, got {other:?}"),
+            }
+        }
+        assert_eq!(git(p, &["tag", "-l"]), "", "no tag was created");
+        tag_create(p, &first, "v1.0", Some("release")).unwrap();
+        assert_eq!(git(p, &["rev-parse", "v1.0^{commit}"]), first);
+    }
+
+    /// Revisions reach git behind `--end-of-options`: a tag `-t` and a branch `-x`
+    /// (both made by `update-ref`) are revisions, not flags.
+    #[test]
+    fn history_operations_take_a_dash_ref_as_a_revision() {
+        let (dir, first) = repo_with_three_commits();
+        let p = dir.path();
+        git(p, &["update-ref", "refs/tags/-t", &first]);
+        // A commit off to the side, to cherry-pick.
+        git(p, &["checkout", "-q", "--detach", &first]);
+        std::fs::write(p.join("side.txt"), "side\n").unwrap();
+        git(p, &["add", "side.txt"]);
+        git(p, &["commit", "-m", "side"]);
+        git(p, &["update-ref", "refs/tags/-c", "HEAD"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["update-ref", "refs/heads/-x", "HEAD~1"]);
+
+        assert_eq!(commits_after(p, "-t").unwrap(), 2);
+        assert!(contains_commit(p, "-x").unwrap());
+        assert!(!contains_commit(p, "-c").unwrap());
+
+        checkout_rev(p, "-t").unwrap();
+        assert_eq!(git(p, &["rev-parse", "HEAD"]), first);
+        git(p, &["checkout", "-q", "main"]);
+
+        reset(p, "-x", "hard").unwrap();
+        assert_eq!(git(p, &["rev-parse", "HEAD"]), git(p, &["rev-parse", "refs/heads/-x"]));
+
+        cherry_pick(p, "-c").unwrap();
+        assert!(p.join("side.txt").exists());
+        revert(p, "-x").unwrap();
+        assert_eq!(git(p, &["log", "-1", "--format=%s"]), "Revert \"second\"");
+
+        tag_create(p, "-t", "on-dash", None).unwrap();
+        assert_eq!(git(p, &["rev-parse", "on-dash^{commit}"]), first);
     }
 }

@@ -7,9 +7,9 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 
 use crate::engine::cli::parse_refs;
+use crate::engine::exec;
 use crate::error::{Error, Result};
 use crate::model::{
     LaneEdge, LaneEdgeKind, LogCommit, LogCursor, LogFilter, LogOrder, LogPage,
@@ -39,14 +39,7 @@ const LANE_BUDGET: usize = 12;
 /// Run `git -C <repo> <args>` and hand back raw stdout. A git failure keeps its
 /// command and stderr verbatim — the reason reaches the UI unfolded.
 fn git(repo: &Path, args: &[String]) -> Result<Vec<u8>> {
-    let out = Command::new("git").arg("-C").arg(repo).args(args).output()?;
-    if !out.status.success() {
-        return Err(Error::Git {
-            command: args.join(" "),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        });
-    }
-    Ok(out.stdout)
+    exec::git(repo, args).run()?.checked()
 }
 
 fn git_text(repo: &Path, args: &[String]) -> Result<String> {
@@ -136,18 +129,18 @@ fn filter_args(filter: &LogFilter) -> Vec<String> {
         LogOrder::Date => s("--date-order"),
         LogOrder::Topo => s("--topo-order"),
     });
-    match &filter.branch {
-        // A named branch is a single starting point; without one the graph covers
-        // every ref, minus the stash — stash commits are not history the user browses.
-        Some(b) if !b.trim().is_empty() => a.push(b.trim().to_string()),
-        _ => {
-            // `--all` means every ref under refs/, which includes the stash and the
-            // notes ref — neither is history the user browses, and both showed up
-            // as phantom commits until excluded.
-            a.push(s("--exclude=refs/stash"));
-            a.push(s("--exclude=refs/notes/*"));
-            a.push(s("--all"));
-        }
+    let branch = filter.branch.as_deref().map(str::trim).filter(|b| !b.is_empty());
+    // A named branch is a single starting point, placed after every option below
+    // behind `--end-of-options` — a branch named `-x` is not a flag; without one the
+    // graph covers every ref, minus the stash — stash commits are not history the
+    // user browses.
+    if branch.is_none() {
+        // `--all` means every ref under refs/, which includes the stash and the
+        // notes ref — neither is history the user browses, and both showed up as
+        // phantom commits until excluded.
+        a.push(s("--exclude=refs/stash"));
+        a.push(s("--exclude=refs/notes/*"));
+        a.push(s("--all"));
     }
     let text = filter.text.as_deref().filter(|t| !t.is_empty());
     // Repeated `--author` is git's own OR: a commit is kept if any of them
@@ -186,6 +179,10 @@ fn filter_args(filter: &LogFilter) -> Vec<String> {
     }
     if let Some(until) = filter.until {
         a.push(format!("--until=@{until}"));
+    }
+    if let Some(b) = branch {
+        a.push(s("--end-of-options"));
+        a.push(b.to_string());
     }
     if !filter.paths.is_empty() {
         a.push(s("--"));
@@ -431,16 +428,21 @@ pub fn page(repo: &Path, filter: &LogFilter, cursor: Option<&LogCursor>, limit: 
 /// second case is an error — folding it into `None` would show a typo where the
 /// repository is broken.
 fn commit_by_hash(repo: &Path, rev: &str) -> Result<Option<Row>> {
-    let args = ["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")];
-    let out = Command::new("git").arg("-C").arg(repo).args(args).output()?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        if stderr.is_empty() {
+    let args = [
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        &format!("{rev}^{{commit}}"),
+    ];
+    let out = exec::git(repo, &args).run()?;
+    if !out.success() {
+        if String::from_utf8_lossy(&out.stderr).trim().is_empty() {
             return Ok(None);
         }
-        return Err(Error::Git { command: args.join(" "), stderr });
+        return Err(out.fail_stderr());
     }
-    let full = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let full = out.stdout_text().trim().to_string();
     if full.is_empty() {
         return Ok(None);
     }
@@ -657,7 +659,7 @@ mod tests {
         let dir = scratch_repo();
         let f = LogFilter { text: Some("(unclosed".into()), regex: true, ..Default::default() };
         match page(dir.path(), &f, None, 10) {
-            Err(Error::Git { command, stderr }) => {
+            Err(Error::Git { command, stderr, .. }) => {
                 assert!(command.contains("--grep=(unclosed"), "the failing command is named: {command}");
                 assert!(!stderr.is_empty(), "git's own reason reaches the UI");
             }
@@ -923,5 +925,19 @@ mod tests {
 
         assert!(page.next_cursor.is_none(), "3 commits under a limit of 10 end the log");
         assert!(!page.lane_overflow);
+    }
+
+    /// The branch filter goes after every option, behind `--end-of-options`: a
+    /// branch named `-x` selects its history instead of being read as a flag.
+    #[test]
+    fn a_dash_branch_filter_is_a_revision() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        run(p, &["update-ref", "refs/heads/-x", "HEAD"]);
+        commit(p, "b.txt", "b\n", "only on main");
+        let f = LogFilter { branch: Some("-x".into()), text: Some("init".into()), ..Default::default() };
+        let pg = page(p, &f, None, 10).unwrap();
+        let subjects: Vec<&str> = pg.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, vec!["init"]);
     }
 }

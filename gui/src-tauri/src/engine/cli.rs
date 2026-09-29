@@ -1,8 +1,7 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
+use super::exec;
 use super::GitEngine;
 use crate::error::{Error, Result};
 use crate::model::{
@@ -45,6 +44,66 @@ pub(crate) fn literal(path: &str) -> String {
     format!(":(literal){path}")
 }
 
+/// Refuse a new branch name git would not accept, **before** anything is changed.
+///
+/// Asked of `git check-ref-format --branch` rather than re-implemented: git's rules
+/// are the ones that matter, and they move between versions. Three things on top:
+///
+/// * A leading `-` is refused before git is run at all — the name would be read as
+///   an option by the very command that checks it.
+/// * `--branch` *expands* `@{-1}` to the previously checked-out branch and exits 0,
+///   so an echo that differs from the input is a refusal too: the name would create
+///   or rename to something other than what was typed.
+/// * A bare `@` passes the check and makes a branch that shadows `HEAD`'s shorthand.
+///
+/// Any non-zero exit is a refusal (`Error::Rule`): `--branch` dies with 128 on an
+/// invalid name and reads no repository state but the reflog for `@{-N}`, so there
+/// is no second failure mode for it to be confused with.
+pub(crate) fn check_branch_name(repo: &Path, name: &str) -> Result<()> {
+    let refuse =
+        |why: &str| Err(Error::Rule(format!("\"{name}\" is not a valid branch name{why}")));
+    if name.is_empty() {
+        return Err(Error::Rule("branch name is empty".into()));
+    }
+    if name.starts_with('-') {
+        return refuse(": it cannot start with \"-\"");
+    }
+    if name == "@" {
+        return refuse(": \"@\" is git's shorthand for HEAD");
+    }
+    let out = exec::git(repo, &["check-ref-format", "--branch", name]).run()?;
+    if !out.success() {
+        return refuse("");
+    }
+    if out.stdout_text().trim_end_matches(['\n', '\r']) != name {
+        return refuse(": git reads it as a reference to another branch");
+    }
+    Ok(())
+}
+
+/// Refuse a new tag name git would not accept, before anything is changed — the
+/// counterpart of [`check_branch_name`], checked as the full ref `refs/tags/<name>`.
+///
+/// Here the exit code *is* tri-state: 1 is "invalid", anything else non-zero is a
+/// question git failed to answer and stays an `Error::Git` (докблок `error.rs`).
+pub(crate) fn check_tag_name(repo: &Path, name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(Error::Rule("tag name is empty".into()));
+    }
+    if name.starts_with('-') {
+        return Err(Error::Rule(format!(
+            "\"{name}\" is not a valid tag name: it cannot start with \"-\""
+        )));
+    }
+    let full = format!("refs/tags/{name}");
+    let out = exec::git(repo, &["check-ref-format", full.as_str()]).run()?;
+    match out.code {
+        Some(0) => Ok(()),
+        Some(1) => Err(Error::Rule(format!("\"{name}\" is not a valid tag name"))),
+        _ => Err(out.fail_stderr()),
+    }
+}
+
 /// Take back the directories a write made for itself, after that write failed.
 ///
 /// **Only empty ones, from the deepest up, stopping at the first that will not go.**
@@ -84,6 +143,8 @@ pub struct RawOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    /// Journal entry id of this run.
+    pub journal: u64,
 }
 
 impl CliEngine {
@@ -117,37 +178,17 @@ impl CliEngine {
                 _ => Error::Io(format!("{shown}: {e}")),
             });
         }
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .args(["rev-parse", "--show-toplevel"])
-            .output()?;
-        if !out.status.success() {
-            return Err(Error::Git {
-                command: "rev-parse --show-toplevel".into(),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            });
+        let out = exec::git(path, &["rev-parse", "--show-toplevel"]).run()?;
+        if !out.success() {
+            return Err(out.fail_stderr());
         }
-        Ok(PathBuf::from(
-            String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        ))
+        Ok(PathBuf::from(out.stdout_text().trim().to_string()))
     }
 
     /// Run `git -C <repo> <args>` capturing raw stdout bytes. On failure produce
     /// `Error::Git` carrying the command and its stderr verbatim.
     fn git_bytes(&self, args: &[&str]) -> Result<Vec<u8>> {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&self.repo)
-            .args(args)
-            .output()?;
-        if !out.status.success() {
-            return Err(Error::Git {
-                command: args.join(" "),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            });
-        }
-        Ok(out.stdout)
+        exec::git(&self.repo, args).run()?.checked()
     }
 
     /// Run git capturing stdout as UTF-8 text (git errors still carry stderr).
@@ -170,21 +211,19 @@ impl CliEngine {
     /// something that waits forever for input this process never supplies,
     /// hanging the whole application on the first such command.
     pub fn exec_raw(&self, args: &[String]) -> Result<RawOutput> {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&self.repo)
-            .args(args)
-            .stdin(Stdio::null())
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_EDITOR", "false")
-            .env("GIT_SEQUENCE_EDITOR", "false")
-            .env_remove("GIT_ASKPASS")
-            .env_remove("SSH_ASKPASS")
-            .output()?;
+        let out = exec::git(&self.repo, args)
+            .env(&[
+                ("GIT_TERMINAL_PROMPT", "0"),
+                ("GIT_EDITOR", "false"),
+                ("GIT_SEQUENCE_EDITOR", "false"),
+            ])
+            .env_remove(&["GIT_ASKPASS", "SSH_ASKPASS"])
+            .run()?;
         Ok(RawOutput {
             stdout: String::from_utf8_lossy(&out.stdout).to_string(),
             stderr: String::from_utf8_lossy(&out.stderr).to_string(),
-            exit_code: out.status.code().unwrap_or(-1),
+            exit_code: out.code.unwrap_or(-1),
+            journal: out.journal,
         })
     }
 
@@ -492,40 +531,16 @@ impl CliEngine {
 
     /// Run git feeding `input` on stdin (used by `git apply`).
     fn git_stdin(&self, args: &[&str], input: &[u8]) -> Result<()> {
-        let mut child = Command::new("git")
-            .arg("-C")
-            .arg(&self.repo)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        {
-            let mut si = child
-                .stdin
-                .take()
-                .ok_or_else(|| Error::Io("no stdin".into()))?;
-            si.write_all(input).map_err(|e| Error::Io(e.to_string()))?;
-        } // drop stdin ⇒ EOF
-        let out = child.wait_with_output()?;
-        if !out.status.success() {
-            return Err(Error::Git {
-                command: args.join(" "),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            });
-        }
+        exec::git(&self.repo, args).input(input).run()?.checked()?;
         Ok(())
     }
 
     /// Run git, returning stdout and ignoring a non-zero exit (for `diff --no-index`,
     /// which exits 1 precisely when there is a difference to show).
     fn git_allow_fail(&self, args: &[&str]) -> String {
-        Command::new("git")
-            .arg("-C")
-            .arg(&self.repo)
-            .args(args)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        exec::git(&self.repo, args)
+            .run()
+            .map(|o| o.stdout_text())
             .unwrap_or_default()
     }
 
@@ -722,12 +737,17 @@ impl CliEngine {
         Ok(v)
     }
 
-    /// Create a branch from HEAD (or `from`) and switch to it.
+    /// Create a branch from HEAD (or `from`) and switch to it. The name is checked
+    /// first ([`check_branch_name`]); `--end-of-options` keeps a `from` that starts
+    /// with `-` a revision, and the trailing `--` keeps it from being read as a path.
     pub fn create_branch(&self, name: &str, from: Option<&str>) -> Result<()> {
+        check_branch_name(&self.repo, name)?;
         let mut args = vec!["checkout", "-b", name];
         if let Some(f) = from {
+            args.push("--end-of-options");
             args.push(f);
         }
+        args.push("--");
         self.git(&args)?;
         Ok(())
     }
@@ -744,7 +764,9 @@ impl CliEngine {
                 &format!("mygit: switching to {name}"),
             ])?;
         }
-        self.git(&["checkout", name])?;
+        // `--end-of-options`: a branch named `-x` exists (update-ref makes one) and
+        // is not an option; `--`: a branch that is also a file name stays a branch.
+        self.git(&["checkout", "--end-of-options", name, "--"])?;
         Ok(())
     }
 
@@ -763,7 +785,7 @@ impl CliEngine {
         match mode {
             "upstream" => {
                 let br = self.current_branch()?;
-                self.git(&["push", "-u", "origin", &br])?;
+                self.git(&["push", "-u", "--end-of-options", "origin", &br])?;
             }
             "force" => {
                 self.git(&["push", "--force-with-lease"])?;
@@ -995,16 +1017,11 @@ pub fn user_email(repo: &Path) -> Option<String> {
 }
 
 fn read_user_email(repo: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["config", "--get", "user.email"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
+    let out = exec::git(repo, &["config", "--get", "user.email"]).run().ok()?;
+    if !out.success() {
         return None;
     }
-    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let v = out.stdout_text().trim().to_string();
     if v.is_empty() {
         None
     } else {
@@ -1145,6 +1162,7 @@ impl GitEngine for CliEngine {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::process::Command;
 
     fn run(dir: &Path, args: &[&str]) {
         let out = Command::new("git")
@@ -2204,5 +2222,91 @@ pub(crate) mod tests {
         run(p, &["add", "b.txt"]);
         let out = CliEngine::new(p).exec_raw(&["commit".into()]).unwrap();
         assert_ne!(out.exit_code, 0, "GIT_EDITOR=false must abort the commit");
+    }
+
+    fn branch_list(p: &Path) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(p)
+            .args(["for-each-ref", "--format=%(refname)", "refs/heads"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    /// An invalid name is a domain refusal stated before any mutation — not a
+    /// `git checkout` failure after one, and never an option smuggled in by `-`.
+    #[test]
+    fn create_branch_refuses_an_invalid_name_before_changing_anything() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let eng = CliEngine::new(p);
+        let before = branch_list(p);
+        for name in ["a..b", "has space", "-x", "--orphan", "x.lock", "feature/", "@", ""] {
+            match eng.create_branch(name, None) {
+                Err(Error::Rule(m)) => assert!(m.contains("branch name"), "{name}: {m}"),
+                other => panic!("{name:?}: expected a domain refusal, got {other:?}"),
+            }
+        }
+        assert_eq!(branch_list(p), before, "no branch was created");
+        assert_eq!(eng.current_branch().unwrap(), "main", "HEAD did not move");
+    }
+
+    /// `check-ref-format --branch` expands `@{-1}` to the previous branch and exits
+    /// 0; taking its word would create a branch under a name nobody typed.
+    #[test]
+    fn create_branch_refuses_a_name_git_would_expand() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        run(p, &["checkout", "-q", "-b", "side"]);
+        run(p, &["checkout", "-q", "main"]);
+        match CliEngine::new(p).create_branch("@{-1}", None) {
+            Err(Error::Rule(m)) => assert!(m.contains("another branch"), "{m}"),
+            other => panic!("expected a domain refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_branch_accepts_a_valid_name_with_and_without_a_start_point() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let eng = CliEngine::new(p);
+        eng.create_branch("feat/one", None).unwrap();
+        assert_eq!(eng.current_branch().unwrap(), "feat/one");
+        eng.create_branch("two", Some("main")).unwrap();
+        assert_eq!(eng.current_branch().unwrap(), "two");
+    }
+
+    fn dash_out(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// `git branch -x` refuses the name, `update-ref` does not — so a branch
+    /// starting with `-` can exist, and switching to it must neither read it as an
+    /// option nor, when a file has the same name, as a path to restore.
+    #[test]
+    fn checkout_takes_a_dash_branch_as_a_branch_not_an_option_or_a_path() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("-x"), "one\n").unwrap();
+        run(p, &["add", "--", "-x"]);
+        run(p, &["commit", "-m", "file named -x"]);
+        run(p, &["update-ref", "refs/heads/-x", "HEAD"]);
+        // An edit a path checkout would throw away.
+        std::fs::write(p.join("-x"), "edited\n").unwrap();
+
+        let eng = CliEngine::new(p);
+        eng.checkout("-x", false).unwrap();
+        assert_eq!(dash_out(p, &["symbolic-ref", "HEAD"]), "refs/heads/-x");
+        assert_eq!(std::fs::read_to_string(p.join("-x")).unwrap(), "edited\n");
+
+        eng.create_branch("from-dash", Some("-x")).unwrap();
+        assert_eq!(dash_out(p, &["symbolic-ref", "HEAD"]), "refs/heads/from-dash");
+        assert_eq!(
+            dash_out(p, &["rev-parse", "HEAD"]),
+            dash_out(p, &["rev-parse", "refs/heads/-x"])
+        );
     }
 }

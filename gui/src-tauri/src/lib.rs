@@ -129,6 +129,8 @@ pub fn run() {
             commands::branch_update,
             commands::ui_state_get,
             commands::ui_state_set,
+            commands::journal_list,
+            commands::journal_output,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

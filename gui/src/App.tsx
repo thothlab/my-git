@@ -1,6 +1,6 @@
 import { ErrorBoundary, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { busy, busyLabel, error, openInitial, refresh, setViewMode, viewMode } from "./store";
+import { busy, busyLabel, error, errorJournalId, openInitial, refresh, setViewMode, viewMode } from "./store";
 import { d } from "./i18n";
 import Toolbar from "./components/Toolbar";
 import ChangesView from "./components/ChangesView";
@@ -155,9 +155,24 @@ export default function App() {
         <OperationBar />
 
         <Show when={error()}>
-          <pre class="max-h-32 overflow-auto whitespace-pre-wrap border-b border-border bg-danger/10 px-3 py-2 font-mono text-xs text-danger">
-            {error()}
-          </pre>
+          <div class="flex items-start gap-2 border-b border-border bg-danger/10 px-3 py-2">
+            <pre class="max-h-32 min-w-0 flex-1 overflow-auto whitespace-pre-wrap font-mono text-xs text-danger">
+              {error()}
+            </pre>
+            {/* A failed git run names its journal entry: the whole output (the
+                banner shows git's message, the entry also the command line, the
+                directory and both streams) is one click away. */}
+            <Show when={errorJournalId()}>
+              {(id) => (
+                <button
+                  class="shrink-0 rounded border border-border px-2 py-0.5 text-xs text-fg hover:bg-bg-muted"
+                  onClick={() => openGitConsole(id())}
+                >
+                  {d().showOutput()}
+                </button>
+              )}
+            </Show>
+          </div>
         </Show>
 
         <div class="flex min-h-0 flex-1">

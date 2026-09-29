@@ -11,8 +11,8 @@
 //!   and are applied by the tree component, not by git.
 
 use std::path::Path;
-use std::process::Command;
 
+use crate::engine::exec;
 use crate::error::{Error, Result};
 use crate::model::BranchNode;
 
@@ -28,29 +28,10 @@ const REF_FIELDS: usize = 6;
 /// `git merge` and `git rebase` announce a conflict partly on stdout ("CONFLICT
 /// (content): Merge conflict in f.txt") and partly on stderr, so a helper that kept
 /// stderr alone would drop the very line naming the file. `Error::Git` has one
-/// output field; both streams go into it, in the order git wrote them.
-fn both_streams(stdout: &[u8], stderr: &[u8]) -> String {
-    let mut text = String::from_utf8_lossy(stdout).trim().to_string();
-    let err = String::from_utf8_lossy(stderr);
-    let err = err.trim();
-    if !err.is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(err);
-    }
-    text
-}
-
+/// output field; both streams go into it, in the order git wrote them
+/// ([`exec::both_streams`]).
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git").arg("-C").arg(repo).args(args).output()?;
-    if !out.status.success() {
-        return Err(Error::Git {
-            command: args.join(" "),
-            stderr: both_streams(&out.stdout, &out.stderr),
-        });
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    exec::git(repo, args).run()?.checked_both()
 }
 
 /// `%(upstream:track)` → ahead / behind.
@@ -183,32 +164,22 @@ fn detached_head(repo: &Path) -> Result<Option<BranchNode>> {
 fn ref_exists(repo: &Path, name: &str, local: bool) -> Result<bool> {
     let prefix = if local { "refs/heads/" } else { "refs/remotes/" };
     let full = format!("{prefix}{name}");
-    let args = ["show-ref", "--verify", "--quiet", full.as_str()];
-    let out = Command::new("git").arg("-C").arg(repo).args(args).output()?;
-    match out.status.code() {
+    let out = exec::git(repo, &["show-ref", "--verify", "--quiet", full.as_str()]).run()?;
+    match out.code {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
-        _ => Err(Error::Git {
-            command: args.join(" "),
-            stderr: both_streams(&out.stdout, &out.stderr),
-        }),
+        _ => Err(out.fail_both()),
     }
 }
 
 /// Short name of the checked-out branch, or `None` in detached HEAD. A git that
 /// failed to answer is an error, never a silent "not the current branch".
 fn current_branch(repo: &Path) -> Result<Option<String>> {
-    let args = ["symbolic-ref", "--short", "-q", "HEAD"];
-    let out = Command::new("git").arg("-C").arg(repo).args(args).output()?;
-    match out.status.code() {
-        Some(0) => Ok(Some(
-            String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        )),
+    let out = exec::git(repo, &["symbolic-ref", "--short", "-q", "HEAD"]).run()?;
+    match out.code {
+        Some(0) => Ok(Some(out.stdout_text().trim().to_string())),
         Some(1) => Ok(None),
-        _ => Err(Error::Git {
-            command: args.join(" "),
-            stderr: both_streams(&out.stdout, &out.stderr),
-        }),
+        _ => Err(out.fail_both()),
     }
 }
 
@@ -216,28 +187,33 @@ fn current_branch(repo: &Path) -> Result<Option<String>> {
 /// nothing — that is git's own answer (a non-zero exit), not a hidden failure.
 fn upstream_of(repo: &Path, name: &str) -> Result<Option<String>> {
     let spec = format!("{name}@{{upstream}}");
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["rev-parse", "--abbrev-ref", spec.as_str()])
-        .output()?;
-    if !out.status.success() {
+    // `--verify`: without it `rev-parse` echoes an unparseable argument back — a
+    // branch named `-x` would report the upstream "-x@{upstream}" — and it is also
+    // what makes `--end-of-options` stop being echoed as a line of output.
+    let out = exec::git(
+        repo,
+        &["rev-parse", "--abbrev-ref", "--verify", "--quiet", "--end-of-options", spec.as_str()],
+    )
+    .run()?;
+    if !out.success() {
         return Ok(None);
     }
-    let up = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let up = out.stdout_text().trim().to_string();
     Ok((!up.is_empty()).then_some(up))
 }
 
 /// Rename a local branch. git carries `branch.<name>.remote/merge` across, so the
 /// upstream survives. A remote-tracking branch has no local name to move and is
-/// refused before git is called (спека branches: «Remote branch cannot be renamed»).
+/// refused before git is called (спека branches: «Remote branch cannot be renamed»),
+/// and so is a new name git would not accept ([`crate::engine::cli::check_branch_name`]).
 pub fn rename(repo: &Path, from: &str, to: &str) -> Result<()> {
     if !ref_exists(repo, from, true)? && ref_exists(repo, from, false)? {
         return Err(Error::Rule(format!(
             "{from} is a remote branch; only local branches can be renamed"
         )));
     }
-    git(repo, &["branch", "-m", from, to])?;
+    crate::engine::cli::check_branch_name(repo, to)?;
+    git(repo, &["branch", "-m", "--", from, to])?;
     Ok(())
 }
 
@@ -250,12 +226,13 @@ pub fn rename(repo: &Path, from: &str, to: &str) -> Result<()> {
 /// instead of the confirmation dialog the guard exists to feed. The wider reading
 /// ("merged into some other branch") was dropped for that reason.
 pub fn unmerged_count(repo: &Path, name: &str) -> Result<u32> {
-    let mut args: Vec<String> = ["rev-list", "--count", name, "--not", "HEAD"]
+    // `^rev`, not `--not rev`: after `--end-of-options` a `--not` would be a revision.
+    let mut args: Vec<String> = ["rev-list", "--count", "--end-of-options", name, "^HEAD"]
         .iter()
         .map(|s| s.to_string())
         .collect();
     if let Some(up) = upstream_of(repo, name)? {
-        args.push(up);
+        args.push(format!("^{up}"));
     }
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = git(repo, &borrowed)?;
@@ -276,7 +253,7 @@ pub fn delete(repo: &Path, name: &str, remote: bool, force: bool) -> Result<()> 
                 "{name} is not a remote branch name (expected <remote>/<branch>)"
             ))
         })?;
-        git(repo, &["push", remote_name, "--delete", branch])?;
+        git(repo, &["push", "--delete", "--end-of-options", remote_name, branch])?;
         return Ok(());
     }
     if current_branch(repo)?.as_deref() == Some(name) {
@@ -292,7 +269,7 @@ pub fn delete(repo: &Path, name: &str, remote: bool, force: bool) -> Result<()> 
             )));
         }
     }
-    git(repo, &["branch", if force { "-D" } else { "-d" }, name])?;
+    git(repo, &["branch", if force { "-D" } else { "-d" }, "--end-of-options", name])?;
     Ok(())
 }
 
@@ -300,22 +277,22 @@ pub fn delete(repo: &Path, name: &str, remote: bool, force: bool) -> Result<()> 
 /// (both streams) reaches the caller whole, and leaves the repository in the
 /// unfinished merge that `ops::detect_state` reports.
 pub fn merge(repo: &Path, name: &str) -> Result<()> {
-    git(repo, &["merge", "--no-edit", name])?;
+    git(repo, &["merge", "--no-edit", "--end-of-options", name])?;
     Ok(())
 }
 
 /// Is `ancestor` reachable from `descendant`? git answers by exit code — 0 yes,
 /// 1 no — and anything else is a failed question, not a "no" (as in [`ref_exists`]).
 fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
-    let args = ["merge-base", "--is-ancestor", ancestor, descendant];
-    let out = Command::new("git").arg("-C").arg(repo).args(args).output()?;
-    match out.status.code() {
+    let out = exec::git(
+        repo,
+        &["merge-base", "--is-ancestor", "--end-of-options", ancestor, descendant],
+    )
+    .run()?;
+    match out.code {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
-        _ => Err(Error::Git {
-            command: args.join(" "),
-            stderr: both_streams(&out.stdout, &out.stderr),
-        }),
+        _ => Err(out.fail_both()),
     }
 }
 
@@ -365,7 +342,7 @@ pub fn update_from_upstream(repo: &Path, name: &str) -> Result<()> {
             "{name} has commits {upstream} does not; check it out and merge or rebase"
         )));
     }
-    git(repo, &["branch", "-f", name, &upstream])?;
+    git(repo, &["branch", "-f", "--end-of-options", name, &upstream])?;
     Ok(())
 }
 
@@ -377,7 +354,7 @@ pub fn update_from_upstream(repo: &Path, name: &str) -> Result<()> {
 /// `engine::rebase_onto`). If the pop itself conflicts, git leaves the stash
 /// and reports it — that surfaces as an ordinary `Error::Git` here.
 pub fn rebase_onto(repo: &Path, name: &str) -> Result<()> {
-    git(repo, &["rebase", "--autostash", name])?;
+    git(repo, &["rebase", "--autostash", "--end-of-options", name])?;
     Ok(())
 }
 
@@ -915,5 +892,68 @@ mod tests {
             Err(Error::Rule(m)) => assert!(m.contains("remote branch"), "{m}"),
             other => panic!("expected a domain refusal: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rename_refuses_an_invalid_new_name_and_keeps_the_branch() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        run(p, &["branch", "side"]);
+        for to in ["a..b", "-x", "has space", "@"] {
+            match rename(p, "side", to) {
+                Err(Error::Rule(m)) => assert!(m.contains("branch name"), "{to}: {m}"),
+                other => panic!("{to:?}: expected a domain refusal, got {other:?}"),
+            }
+        }
+        assert!(ref_exists(p, "side", true).unwrap(), "the branch kept its name");
+        rename(p, "side", "side-2").unwrap();
+        assert!(ref_exists(p, "side-2", true).unwrap());
+    }
+
+    /// Every branch operation passes an existing name behind `--end-of-options`: a
+    /// branch named `-x` (made by `update-ref`; `git branch` refuses the name) is a
+    /// revision, never a flag. Before, `upstream_of` answered "-x@{upstream}" — git
+    /// echoed the unparsed argument back — and the rest failed as unknown switches.
+    #[test]
+    fn branch_operations_take_a_dash_name_as_a_revision() {
+        let (work, bare) = repo_with_origin();
+        let p = work.path();
+        run(p, &["update-ref", "refs/heads/-x", "HEAD"]);
+        run(p, &["config", "branch.-x.remote", "origin"]);
+        run(p, &["config", "branch.-x.merge", "refs/heads/main"]);
+
+        assert_eq!(upstream_of(p, "-x").unwrap().as_deref(), Some("origin/main"));
+        assert_eq!(unmerged_count(p, "-x").unwrap(), 0);
+        assert!(is_ancestor(p, "-x", "HEAD").unwrap());
+
+        // origin/main moves ahead. Fast-forwarding `-x` in place is `branch -f`, and
+        // git refuses that for a name it would not create — that refusal is git's
+        // own answer about the *name*, reached through `--end-of-options`, not an
+        // "unknown switch" about a flag.
+        std::fs::write(p.join("a.txt"), "two\n").unwrap();
+        run(p, &["commit", "-am", "two"]);
+        run(p, &["push", "origin", "main"]);
+        match update_from_upstream(p, "-x") {
+            Err(Error::Git { command, stderr, .. }) => {
+                assert!(command.contains("--end-of-options -x"), "{command}");
+                assert!(!stderr.contains("unknown switch"), "{stderr}");
+            }
+            other => panic!("expected git to refuse the name, got {other:?}"),
+        }
+
+        merge(p, "-x").unwrap();
+        rebase_onto(p, "-x").unwrap();
+
+        rename(p, "-x", "was-dash").unwrap();
+        assert!(ref_exists(p, "was-dash", true).unwrap());
+        assert!(!ref_exists(p, "-x", true).unwrap());
+
+        run(p, &["update-ref", "refs/heads/-y", "HEAD"]);
+        delete(p, "-y", false, false).unwrap();
+        assert!(!ref_exists(p, "-y", true).unwrap());
+
+        run(p, &["push", "origin", "refs/heads/main:refs/heads/-z"]);
+        delete(p, "origin/-z", true, false).unwrap();
+        assert!(!ref_exists(bare.path(), "-z", true).unwrap());
     }
 }

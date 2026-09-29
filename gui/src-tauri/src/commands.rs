@@ -8,11 +8,12 @@ use crate::changelists::{self, Store};
 use crate::engine::cli::CliEngine;
 use crate::engine::GitEngine;
 use crate::error::{Error, Result};
+use crate::engine::exec::{self, mask_credentials};
 use crate::engine::{branches, commit as commit_engine, log as log_engine, ops};
 use crate::model::{
     BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, Eol, FileDiff,
-    FileState, FileStatus, FileWritten, GitExecResult, LogCursor, LogFilter, LogPage, RepoState,
-    StashEntry, TextFile, UiState,
+    FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
+    LogFilter, LogPage, RepoState, StashEntry, TextFile, UiState,
 };
 use crate::uistate;
 
@@ -171,7 +172,7 @@ pub async fn files_move(
 #[tauri::command]
 pub async fn file_rollback(state: State<'_, AppState>, paths: Vec<String>) -> Result<RepoState> {
     let repo = state.repo_path()?;
-    CliEngine::new(&repo).rollback(&paths)?;
+    exec::as_user("file_rollback", || CliEngine::new(&repo).rollback(&paths))?;
     // reverted files are no longer changed; build_state's sync prunes them
     build_state(&state)
 }
@@ -181,7 +182,7 @@ pub async fn list_rollback(state: State<'_, AppState>, id: String) -> Result<Rep
     let repo = state.repo_path()?;
     let store = changelists::load(&repo)?;
     let paths = changelists::list_paths(&store, &id);
-    CliEngine::new(&repo).rollback(&paths)?;
+    exec::as_user("list_rollback", || CliEngine::new(&repo).rollback(&paths))?;
     build_state(&state)
 }
 
@@ -231,19 +232,25 @@ pub async fn file_write(
 
 #[tauri::command]
 pub async fn hunk_stage(state: State<'_, AppState>, patch: String) -> Result<RepoState> {
-    CliEngine::new(state.repo_path()?).apply_patch(&patch, true, false)?;
+    exec::as_user("hunk_stage", || {
+        CliEngine::new(state.repo_path()?).apply_patch(&patch, true, false)
+    })?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn hunk_unstage(state: State<'_, AppState>, patch: String) -> Result<RepoState> {
-    CliEngine::new(state.repo_path()?).apply_patch(&patch, true, true)?;
+    exec::as_user("hunk_unstage", || {
+        CliEngine::new(state.repo_path()?).apply_patch(&patch, true, true)
+    })?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn hunk_revert(state: State<'_, AppState>, patch: String) -> Result<RepoState> {
-    CliEngine::new(state.repo_path()?).apply_patch(&patch, false, true)?;
+    exec::as_user("hunk_revert", || {
+        CliEngine::new(state.repo_path()?).apply_patch(&patch, false, true)
+    })?;
     build_state(&state)
 }
 
@@ -271,7 +278,7 @@ pub async fn commit_list(
     if paths.is_empty() {
         return Err(Error::Rule("no files to commit".into()));
     }
-    CliEngine::new(&repo).commit_paths(&paths, &message, amend)?;
+    exec::as_user("commit_list", || CliEngine::new(&repo).commit_paths(&paths, &message, amend))?;
     build_state(&state)
 }
 
@@ -288,7 +295,9 @@ pub async fn branch_create(
     name: String,
     from: Option<String>,
 ) -> Result<RepoState> {
-    CliEngine::new(state.repo_path()?).create_branch(&name, from.as_deref())?;
+    exec::as_user("branch_create", || {
+        CliEngine::new(state.repo_path()?).create_branch(&name, from.as_deref())
+    })?;
     build_state(&state)
 }
 
@@ -298,19 +307,19 @@ pub async fn branch_checkout(
     name: String,
     stash: bool,
 ) -> Result<RepoState> {
-    CliEngine::new(state.repo_path()?).checkout(&name, stash)?;
+    exec::as_user("branch_checkout", || CliEngine::new(state.repo_path()?).checkout(&name, stash))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn push(state: State<'_, AppState>, mode: String) -> Result<RepoState> {
-    CliEngine::new(state.repo_path()?).push(&mode)?;
+    exec::as_user("push", || CliEngine::new(state.repo_path()?).push(&mode))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn fetch(state: State<'_, AppState>) -> Result<RepoState> {
-    CliEngine::new(state.repo_path()?).fetch()?;
+    exec::as_user("fetch", || CliEngine::new(state.repo_path()?).fetch())?;
     build_state(&state)
 }
 
@@ -320,18 +329,19 @@ pub async fn fetch(state: State<'_, AppState>) -> Result<RepoState> {
 #[tauri::command]
 pub async fn git_exec(state: State<'_, AppState>, args: Vec<String>) -> Result<GitExecResult> {
     let repo = state.repo_path()?;
-    let out = CliEngine::new(&repo).exec_raw(&args)?;
+    let out = exec::as_user("git_exec", || CliEngine::new(&repo).exec_raw(&args))?;
     Ok(GitExecResult {
-        stdout: out.stdout,
-        stderr: out.stderr,
+        stdout: mask_credentials(&out.stdout).into_owned(),
+        stderr: mask_credentials(&out.stderr).into_owned(),
         exit_code: out.exit_code,
+        journal_id: out.journal,
         state: build_state(&state)?,
     })
 }
 
 #[tauri::command]
 pub async fn pull(state: State<'_, AppState>) -> Result<RepoState> {
-    CliEngine::new(state.repo_path()?).pull()?;
+    exec::as_user("pull", || CliEngine::new(state.repo_path()?).pull())?;
     build_state(&state)
 }
 
@@ -422,7 +432,7 @@ pub async fn branch_rename(
     from: String,
     to: String,
 ) -> Result<RepoState> {
-    branches::rename(&state.repo_path()?, &from, &to)?;
+    exec::as_user("branch_rename", || branches::rename(&state.repo_path()?, &from, &to))?;
     build_state(&state)
 }
 
@@ -433,7 +443,7 @@ pub async fn branch_delete(
     remote: bool,
     force: bool,
 ) -> Result<RepoState> {
-    branches::delete(&state.repo_path()?, &name, remote, force)?;
+    exec::as_user("branch_delete", || branches::delete(&state.repo_path()?, &name, remote, force))?;
     build_state(&state)
 }
 
@@ -447,13 +457,13 @@ pub async fn branch_unmerged_count(state: State<'_, AppState>, name: String) -> 
 
 #[tauri::command]
 pub async fn branch_merge(state: State<'_, AppState>, name: String) -> Result<RepoState> {
-    branches::merge(&state.repo_path()?, &name)?;
+    exec::as_user("branch_merge", || branches::merge(&state.repo_path()?, &name))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn branch_rebase_onto(state: State<'_, AppState>, name: String) -> Result<RepoState> {
-    branches::rebase_onto(&state.repo_path()?, &name)?;
+    exec::as_user("branch_rebase_onto", || branches::rebase_onto(&state.repo_path()?, &name))?;
     build_state(&state)
 }
 
@@ -461,7 +471,7 @@ pub async fn branch_rebase_onto(state: State<'_, AppState>, name: String) -> Res
 
 #[tauri::command]
 pub async fn commit_revert(state: State<'_, AppState>, hash: String) -> Result<RepoState> {
-    ops::revert(&state.repo_path()?, &hash)?;
+    exec::as_user("commit_revert", || ops::revert(&state.repo_path()?, &hash))?;
     build_state(&state)
 }
 
@@ -471,13 +481,13 @@ pub async fn commit_reset(
     hash: String,
     mode: String,
 ) -> Result<RepoState> {
-    ops::reset(&state.repo_path()?, &hash, &mode)?;
+    exec::as_user("commit_reset", || ops::reset(&state.repo_path()?, &hash, &mode))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn commit_cherry_pick(state: State<'_, AppState>, hash: String) -> Result<RepoState> {
-    ops::cherry_pick(&state.repo_path()?, &hash)?;
+    exec::as_user("commit_cherry_pick", || ops::cherry_pick(&state.repo_path()?, &hash))?;
     build_state(&state)
 }
 
@@ -505,7 +515,7 @@ pub async fn repo_local_changes(state: State<'_, AppState>) -> Result<bool> {
 
 #[tauri::command]
 pub async fn commit_checkout(state: State<'_, AppState>, hash: String) -> Result<RepoState> {
-    ops::checkout_rev(&state.repo_path()?, &hash)?;
+    exec::as_user("commit_checkout", || ops::checkout_rev(&state.repo_path()?, &hash))?;
     build_state(&state)
 }
 
@@ -516,25 +526,27 @@ pub async fn tag_create(
     name: String,
     message: Option<String>,
 ) -> Result<RepoState> {
-    ops::tag_create(&state.repo_path()?, &hash, &name, message.as_deref())?;
+    exec::as_user("tag_create", || {
+        ops::tag_create(&state.repo_path()?, &hash, &name, message.as_deref())
+    })?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn op_continue(state: State<'_, AppState>) -> Result<RepoState> {
-    ops::op_continue(&state.repo_path()?)?;
+    exec::as_user("op_continue", || ops::op_continue(&state.repo_path()?))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn op_abort(state: State<'_, AppState>) -> Result<RepoState> {
-    ops::op_abort(&state.repo_path()?)?;
+    exec::as_user("op_abort", || ops::op_abort(&state.repo_path()?))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn op_skip(state: State<'_, AppState>) -> Result<RepoState> {
-    ops::op_skip(&state.repo_path()?)?;
+    exec::as_user("op_skip", || ops::op_skip(&state.repo_path()?))?;
     build_state(&state)
 }
 
@@ -545,7 +557,7 @@ pub async fn stash_list_app(state: State<'_, AppState>) -> Result<Vec<String>> {
 
 #[tauri::command]
 pub async fn stash_restore(state: State<'_, AppState>, name: String) -> Result<RepoState> {
-    ops::stash_restore(&state.repo_path()?, &name)?;
+    exec::as_user("stash_restore", || ops::stash_restore(&state.repo_path()?, &name))?;
     build_state(&state)
 }
 
@@ -565,7 +577,7 @@ pub async fn stash_apply(
     name: String,
     hash: Option<String>,
 ) -> Result<RepoState> {
-    ops::stash_apply(&state.repo_path()?, &name, hash.as_deref())?;
+    exec::as_user("stash_apply", || ops::stash_apply(&state.repo_path()?, &name, hash.as_deref()))?;
     build_state(&state)
 }
 
@@ -576,7 +588,7 @@ pub async fn stash_pop(
     name: String,
     hash: Option<String>,
 ) -> Result<RepoState> {
-    ops::stash_pop(&state.repo_path()?, &name, hash.as_deref())?;
+    exec::as_user("stash_pop", || ops::stash_pop(&state.repo_path()?, &name, hash.as_deref()))?;
     build_state(&state)
 }
 
@@ -587,7 +599,7 @@ pub async fn stash_drop(
     name: String,
     hash: Option<String>,
 ) -> Result<RepoState> {
-    ops::stash_drop(&state.repo_path()?, &name, hash.as_deref())?;
+    exec::as_user("stash_drop", || ops::stash_drop(&state.repo_path()?, &name, hash.as_deref()))?;
     build_state(&state)
 }
 
@@ -606,7 +618,7 @@ pub async fn stash_push(
     state: State<'_, AppState>,
     message: Option<String>,
 ) -> Result<RepoState> {
-    ops::stash_push(&state.repo_path()?, message.as_deref())?;
+    exec::as_user("stash_push", || ops::stash_push(&state.repo_path()?, message.as_deref()))?;
     build_state(&state)
 }
 
@@ -615,7 +627,7 @@ pub async fn stash_push(
 /// domain refusals stating the reason.
 #[tauri::command]
 pub async fn branch_update(state: State<'_, AppState>, name: String) -> Result<RepoState> {
-    branches::update_from_upstream(&state.repo_path()?, &name)?;
+    exec::as_user("branch_update", || branches::update_from_upstream(&state.repo_path()?, &name))?;
     build_state(&state)
 }
 
@@ -631,4 +643,24 @@ pub async fn ui_state_set(state: State<'_, AppState>, ui: UiState) -> Result<UiS
     let repo = state.repo_path()?;
     uistate::set(&repo, &ui)?;
     uistate::get(&repo)
+}
+
+// ── command journal ──────────────────────────────────────────────────────────
+
+/// Every git run of this process, oldest first, without outputs (`journal_output`).
+///
+/// `mine` reads the user ring (1000 actions) alone; otherwise the user and background
+/// (2000 reads) rings come merged by id; `after` returns entries newer than that id, so a
+/// client polling while its panel is open receives only what is new. Reads process
+/// memory only: no git, no open repository needed — which is also why polling it can
+/// never feed the journal it reads.
+#[tauri::command]
+pub async fn journal_list(mine: bool, after: Option<u64>) -> Result<Vec<JournalSummary>> {
+    Ok(exec::journal_list(mine, after))
+}
+
+/// Both streams of one journal entry; `null` once the ring has dropped it.
+#[tauri::command]
+pub async fn journal_output(id: u64) -> Result<Option<JournalOutput>> {
+    Ok(exec::journal_output(id))
 }
