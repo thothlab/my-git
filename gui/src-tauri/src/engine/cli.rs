@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 
 use super::commit::parse_name_status;
 use super::exec;
+use super::patch::{self, Kind, Pick};
 use super::GitEngine;
 use crate::error::{Error, Result};
 use crate::model::{
     BranchInfo, CommitFileEntry, DiffLine, EditBlock, Eol, FileDiff, FileState, FileStatus, Hunk,
-    RefKind, RefLabel, RepoSnapshot, TextFile,
+    HunkPick, LinePick, RefKind, RefLabel, RepoSnapshot, TextFile,
 };
 
 /// Largest working-tree file offered for in-place editing: 2 MiB. Craft, not a
@@ -741,61 +742,124 @@ impl CliEngine {
         whitespace: &str,
         context: Option<u32>,
     ) -> Result<FileDiff> {
+        let raw = self.raw_diff(path, against, whitespace, context)?;
+        let mut d = parse_diff(path, &String::from_utf8_lossy(&raw));
+        d.digest = fnv1a(&raw);
+        Ok(d)
+    }
+
+    /// The bytes git prints for [`CliEngine::diff_file`] — what the panel draws and
+    /// what a line action rebuilds its patch from, so the two are one call.
+    ///
+    /// Pinned against configuration that would make the text unappliable or change
+    /// its spelling: `--no-ext-diff` / `--no-textconv` (an external or converted diff
+    /// is for reading, `git apply` refuses it), `--no-color`, and the `a/` / `b/`
+    /// prefixes (`diff.noprefix` and `diff.mnemonicPrefix` would move the path under
+    /// `git apply -p1`).
+    fn raw_diff(
+        &self,
+        path: &str,
+        against: &str,
+        whitespace: &str,
+        context: Option<u32>,
+    ) -> Result<Vec<u8>> {
         let ws = whitespace_args(whitespace)?;
         let ctx = context_arg(context);
         let ctx: Vec<&str> = ctx.iter().map(String::as_str).collect();
         let spec = literal(path);
-        let raw = match against {
-            "index" => {
-                let mut a = vec!["diff", "--cached"];
-                a.extend_from_slice(&ws);
-                a.extend_from_slice(&ctx);
-                a.extend_from_slice(&["--", &spec]);
-                self.git(&a)?
-            }
-            "head" => {
-                let mut a = vec!["diff", "HEAD"];
-                a.extend_from_slice(&ws);
-                a.extend_from_slice(&ctx);
-                a.extend_from_slice(&["--", &spec]);
-                self.git(&a)?
-            }
-            _ => {
-                let mut a = vec!["diff"];
-                a.extend_from_slice(&ws);
-                a.extend_from_slice(&ctx);
-                a.extend_from_slice(&["--", &spec]);
-                let d = self.git(&a)?;
-                // "Empty diff ⇒ untracked file" is exactly right while nothing is
-                // ignored, and that is the behaviour `none` must keep. Only when a
-                // whitespace mode is active can an empty diff also mean "the change
-                // is whitespace-only" — there, and only there, ask git whether it
-                // knows the path, so a whitespace-only change is not re-rendered as
-                // an all-add diff of the whole file.
-                let empty_means_untracked = ws.is_empty() || !self.is_tracked(path);
-                if d.trim().is_empty() && empty_means_untracked {
-                    // untracked/new file: synthesize an all-add diff (view only)
-                    let mut a = vec!["diff", "--no-index"];
-                    a.extend_from_slice(&ws);
-                    a.extend_from_slice(&ctx);
-                    a.extend_from_slice(&["--", "/dev/null", path]);
-                    self.git_allow_fail(&a)
-                } else {
-                    d
-                }
-            }
+        let pinned = [
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+        ];
+        let mut a: Vec<&str> = match against {
+            "index" => vec!["diff", "--cached"],
+            "head" => vec!["diff", "HEAD"],
+            _ => vec!["diff"],
         };
-        Ok(parse_diff(path, &raw))
+        a.extend_from_slice(&pinned);
+        a.extend_from_slice(&ws);
+        a.extend_from_slice(&ctx);
+        a.extend_from_slice(&["--", &spec]);
+        let d = self.git_bytes(&a)?;
+        if against == "index" || against == "head" {
+            return Ok(d);
+        }
+        // "Empty diff ⇒ untracked file" is exactly right while nothing is
+        // ignored, and that is the behaviour `none` must keep. Only when a
+        // whitespace mode is active can an empty diff also mean "the change
+        // is whitespace-only" — there, and only there, ask git whether it
+        // knows the path, so a whitespace-only change is not re-rendered as
+        // an all-add diff of the whole file.
+        let empty_means_untracked = ws.is_empty() || !self.is_tracked(path);
+        if !d.iter().all(u8::is_ascii_whitespace) || !empty_means_untracked {
+            return Ok(d);
+        }
+        // Untracked: an all-add diff against nothing. `--no-index` exits 1 exactly
+        // when there is a difference, so the exit code says nothing here.
+        let mut a = vec!["diff", "--no-index"];
+        a.extend_from_slice(&pinned);
+        a.extend_from_slice(&ws);
+        a.extend_from_slice(&ctx);
+        a.extend_from_slice(&["--", "/dev/null", path]);
+        Ok(exec::git(&self.repo, &a)
+            .run()
+            .map(|o| o.stdout)
+            .unwrap_or_default())
     }
 
-    /// Apply a single-hunk patch to the index (`cached`) or worktree, forward or
-    /// reversed. This is the whole mechanism behind hunk-level stage (cached,
-    /// forward), unstage (cached, reverse) and revert (worktree, reverse) — the index
-    /// is touched only by the exact hunk, never by `git add -A`/`git add <dir>`
+    /// The patch that applies the chosen lines of this file's diff (`engine::patch`).
+    ///
+    /// `against` is the diff the reader was shown — `worktree` for stage and revert,
+    /// `index` for unstage — read again here with the same `context`, never with a
+    /// whitespace mode: a diff with whitespace ignored does not apply. `digest` is the
+    /// fingerprint that diff was drawn with; a different one is `Error::Stale`, because
+    /// hunk and line indexes point into the drawn diff and would name other lines in
+    /// this one.
+    pub fn selection_patch(
+        &self,
+        path: &str,
+        against: &str,
+        picks: &[HunkPick],
+        digest: &str,
+        context: Option<u32>,
+        reverse: bool,
+    ) -> Result<Vec<u8>> {
+        if context == Some(0) {
+            return Err(Error::Rule(
+                "a diff without context lines cannot be applied line by line".into(),
+            ));
+        }
+        let raw = self.raw_diff(path, against, "none", context)?;
+        if fnv1a(&raw) != digest {
+            return Err(Error::Stale(format!(
+                "{path} changed since its diff was shown; look at it again and choose anew"
+            )));
+        }
+        let picks: Vec<(usize, Pick)> = picks
+            .iter()
+            .map(|p| {
+                let pick = match &p.lines {
+                    LinePick::All(_) => Pick::All,
+                    LinePick::Lines(v) => Pick::Lines(v.clone()),
+                };
+                (p.hunk, pick)
+            })
+            .collect();
+        patch::build(&raw, &picks, reverse)?
+            .ok_or_else(|| Error::Rule("no added or removed line is chosen".into()))
+    }
+
+    /// Apply a patch built by [`CliEngine::selection_patch`] to the index (`cached`)
+    /// or worktree, forward or reversed. This is the whole mechanism behind line and
+    /// hunk stage (cached, forward), unstage (cached, reverse) and revert (worktree,
+    /// reverse) — the index is touched only by the chosen lines, never by `git add -A`/`git add <dir>`
     /// (which would over-stage other lists; cf. commit staging discipline, Правка
     /// `ad8c42e`). A hunk staged here is what [`CliEngine::commit_paths`] later
     /// commits for that file — the index wins.
-    pub fn apply_patch(&self, patch: &str, cached: bool, reverse: bool) -> Result<()> {
+    pub fn apply_patch(&self, patch: &[u8], cached: bool, reverse: bool) -> Result<()> {
         let mut args = vec!["apply", "--whitespace=nowarn"];
         if cached {
             args.push("--cached");
@@ -803,7 +867,7 @@ impl CliEngine {
         if reverse {
             args.push("-R");
         }
-        self.git_stdin(&args, patch.as_bytes())
+        self.git_stdin(&args, patch)
     }
 
     /// Stage EXACTLY these paths. Existing files are `git add`ed; worktree deletions
@@ -1145,21 +1209,11 @@ impl CliEngine {
     }
 }
 
-fn parse_hunk_header(h: &str) -> (u32, u32) {
-    // "@@ -a,b +c,d @@ section"
-    let (mut old_no, mut new_no) = (1u32, 1u32);
-    for tok in h.split_whitespace() {
-        if let Some(r) = tok.strip_prefix('-') {
-            old_no = r.split(',').next().unwrap_or("1").parse().unwrap_or(1);
-        } else if let Some(r) = tok.strip_prefix('+') {
-            new_no = r.split(',').next().unwrap_or("1").parse().unwrap_or(1);
-        }
-    }
-    (old_no, new_no)
-}
-
-/// Parse `git diff` output for a single file into hunks, keeping each hunk's exact
-/// applicable patch text (file header + hunk) so stage/revert is byte-exact.
+/// Parse `git diff` output for a single file into hunks for display.
+///
+/// The hunks and their line indexes are `engine::patch::hunks`' own — the numbering
+/// a line selection is sent back in, so the panel and the patch builder can never
+/// count the lines of a hunk differently.
 ///
 /// Visible to the whole engine: a commit's diff has the same shape as a worktree
 /// diff, and a second parser would be a second set of edge cases (binary files,
@@ -1172,85 +1226,36 @@ pub(crate) fn parse_diff(path: &str, raw: &str) -> FileDiff {
             ..FileDiff::default()
         };
     }
-    let lines: Vec<&str> = raw.split('\n').collect();
-    let Some(first) = lines.iter().position(|l| l.starts_with("@@")) else {
-        return FileDiff {
-            path: path.into(),
-            binary: false,
-            ..FileDiff::default()
-        };
-    };
-    let header = lines[..first].join("\n");
-
-    let mut hunks = Vec::new();
-    let mut i = first;
-    while i < lines.len() {
-        if !lines[i].starts_with("@@") {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        let mut j = i + 1;
-        while j < lines.len() && !lines[j].starts_with("@@") {
-            j += 1;
-        }
-        let block = &lines[start..j];
-
-        let (mut old_no, mut new_no) = parse_hunk_header(block[0]);
-        let mut dls = Vec::new();
-        for &l in &block[1..] {
-            if l.is_empty() || l.starts_with('\\') {
-                continue; // trailing artifact / "\ No newline at end of file"
+    let hunks = patch::hunks(raw.as_bytes())
+        .into_iter()
+        .map(|h| {
+            let (mut old_no, mut new_no) = (h.old_start, h.new_start);
+            let lines = h
+                .lines
+                .into_iter()
+                .map(|l| {
+                    let content = String::from_utf8_lossy(&l.text).to_string();
+                    let (origin, old, new) = match l.kind {
+                        Kind::Add => ("+", None, Some(new_no)),
+                        Kind::Del => ("-", Some(old_no), None),
+                        Kind::Context => (" ", Some(old_no), Some(new_no)),
+                    };
+                    old_no += u32::from(old.is_some());
+                    new_no += u32::from(new.is_some());
+                    DiffLine {
+                        origin: origin.into(),
+                        content,
+                        old_no: old,
+                        new_no: new,
+                    }
+                })
+                .collect();
+            Hunk {
+                header: String::from_utf8_lossy(&h.header).to_string(),
+                lines,
             }
-            let origin = l.as_bytes()[0] as char;
-            let content = l[1..].to_string();
-            match origin {
-                '+' => {
-                    dls.push(DiffLine {
-                        origin: "+".into(),
-                        content,
-                        old_no: None,
-                        new_no: Some(new_no),
-                    });
-                    new_no += 1;
-                }
-                '-' => {
-                    dls.push(DiffLine {
-                        origin: "-".into(),
-                        content,
-                        old_no: Some(old_no),
-                        new_no: None,
-                    });
-                    old_no += 1;
-                }
-                _ => {
-                    dls.push(DiffLine {
-                        origin: " ".into(),
-                        content,
-                        old_no: Some(old_no),
-                        new_no: Some(new_no),
-                    });
-                    old_no += 1;
-                    new_no += 1;
-                }
-            }
-        }
-
-        let mut patch = String::with_capacity(header.len() + 64);
-        patch.push_str(&header);
-        patch.push('\n');
-        patch.push_str(&block.join("\n"));
-        if !patch.ends_with('\n') {
-            patch.push('\n');
-        }
-        hunks.push(Hunk {
-            header: block[0].to_string(),
-            lines: dls,
-            patch,
-        });
-        i = j;
-    }
-
+        })
+        .collect();
     FileDiff {
         path: path.into(),
         binary: false,
@@ -2262,7 +2267,10 @@ pub(crate) mod tests {
         assert_eq!(diff.hunks.len(), 2, "two separated hunks");
 
         // stage only the first hunk
-        eng.apply_patch(&diff.hunks[0].patch, true, false).unwrap();
+        let patch = eng
+            .selection_patch("f.txt", "worktree", &[all(0)], &diff.digest, None, false)
+            .unwrap();
+        eng.apply_patch(&patch, true, false).unwrap();
         assert!(eng
             .git(&["diff", "--cached", "--name-only"])
             .unwrap()
@@ -2271,11 +2279,361 @@ pub(crate) mod tests {
         assert_eq!(remaining.hunks.len(), 1, "one hunk left unstaged");
 
         // revert the remaining (line 10) hunk in the worktree
-        eng.apply_patch(&remaining.hunks[0].patch, false, true).unwrap();
+        let patch = eng
+            .selection_patch(
+                "f.txt",
+                "worktree",
+                &[all(0)],
+                &remaining.digest,
+                None,
+                true,
+            )
+            .unwrap();
+        eng.apply_patch(&patch, false, true).unwrap();
         let content = std::fs::read_to_string(p.join("f.txt")).unwrap();
         assert!(content.contains("CHANGED1"), "staged change stays in worktree");
         assert!(content.contains("line10"), "line 10 restored");
         assert!(!content.contains("CHANGED10"), "line 10 change reverted");
+    }
+
+    // ---- line selections, checked by git itself ----
+
+    fn all(hunk: usize) -> HunkPick {
+        HunkPick {
+            hunk,
+            lines: LinePick::All(crate::model::AllLines::All),
+        }
+    }
+
+    fn some(hunk: usize, lines: &[usize]) -> HunkPick {
+        HunkPick {
+            hunk,
+            lines: LinePick::Lines(lines.to_vec()),
+        }
+    }
+
+    /// `git apply [--cached] [-R] --check` on the patch: git's own verdict that it
+    /// applies, before it is applied.
+    fn git_accepts(p: &Path, patch: &[u8], cached: bool, reverse: bool) {
+        use std::io::Write;
+        let mut args = vec!["apply", "--check"];
+        if cached {
+            args.push("--cached");
+        }
+        if reverse {
+            args.push("-R");
+        }
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(p)
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(patch).unwrap();
+        let o = child.wait_with_output().unwrap();
+        assert!(
+            o.status.success(),
+            "git apply --check refused:\n{}\n{}",
+            String::from_utf8_lossy(patch),
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+
+    /// Stage `picks` of the working-tree diff as the panel would: the digest of the
+    /// diff it was shown, the patch checked by git, then applied.
+    fn stage_picks(p: &Path, path: &str, picks: &[HunkPick]) {
+        let eng = CliEngine::new(p);
+        let d = eng.diff_file(path, "worktree", "none", None).unwrap();
+        let patch = eng
+            .selection_patch(path, "worktree", picks, &d.digest, None, false)
+            .unwrap();
+        git_accepts(p, &patch, true, false);
+        eng.apply_patch(&patch, true, false).unwrap();
+    }
+
+    fn unstage_picks(p: &Path, path: &str, picks: &[HunkPick]) {
+        let eng = CliEngine::new(p);
+        let d = eng.diff_file(path, "index", "none", None).unwrap();
+        let patch = eng
+            .selection_patch(path, "index", picks, &d.digest, None, true)
+            .unwrap();
+        git_accepts(p, &patch, true, true);
+        eng.apply_patch(&patch, true, true).unwrap();
+    }
+
+    fn numbered(n: usize) -> Vec<String> {
+        (1..=n).map(|i| format!("line{i}")).collect()
+    }
+
+    fn text(lines: &[String]) -> String {
+        lines.iter().map(|l| format!("{l}\n")).collect()
+    }
+
+    /// Two hunks; the first grows by one line, so the second one's written side
+    /// sits where the earlier choices put it, not where git printed it.
+    fn two_hunk_file(p: &Path) -> Vec<String> {
+        let base = numbered(20);
+        std::fs::write(p.join("f.txt"), text(&base)).unwrap();
+        run(p, &["add", "f.txt"]);
+        run(p, &["commit", "-q", "-m", "f"]);
+        let mut edited = base.clone();
+        edited.splice(1..2, ["A".to_string(), "B".to_string()]);
+        edited[15] = "X".into(); // was line15
+        std::fs::write(p.join("f.txt"), text(&edited)).unwrap();
+        base
+    }
+
+    #[test]
+    fn staging_chosen_lines_across_two_hunks_puts_exactly_them_in_the_index() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let base = two_hunk_file(p);
+        let d = CliEngine::new(p)
+            .diff_file("f.txt", "worktree", "none", None)
+            .unwrap();
+        assert_eq!(d.hunks.len(), 2);
+        let origins: Vec<&str> = d.hunks[0].lines.iter().map(|l| l.origin.as_str()).collect();
+        assert_eq!(origins, [" ", "-", "+", "+", " ", " ", " "]);
+
+        // `-line2` and `+A` of the first hunk (not `+B`), all of the second.
+        stage_picks(p, "f.txt", &[some(0, &[1, 2]), all(1)]);
+
+        let mut want = base.clone();
+        want[1] = "A".into();
+        want[14] = "X".into();
+        assert_eq!(blob(p, ":f.txt"), text(&want));
+    }
+
+    #[test]
+    fn unstaging_chosen_lines_leaves_the_rest_staged() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let base = two_hunk_file(p);
+        run(p, &["add", "f.txt"]);
+
+        // Unstage `+A` only and the whole second hunk: `line2` stays removed, `B`
+        // stays added, line 15 is back.
+        unstage_picks(p, "f.txt", &[some(0, &[2]), all(1)]);
+
+        let mut want = base.clone();
+        want[1] = "B".into();
+        assert_eq!(blob(p, ":f.txt"), text(&want));
+    }
+
+    #[test]
+    fn a_last_line_without_newline_is_staged_and_unstaged_line_by_line() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("e.txt"), "a\nb").unwrap();
+        run(p, &["add", "e.txt"]);
+        run(p, &["commit", "-q", "-m", "e"]);
+        std::fs::write(p.join("e.txt"), "a\nb\nc").unwrap();
+        // " a", "-b" (no newline), "+b", "+c" (no newline)
+        let d = CliEngine::new(p)
+            .diff_file("e.txt", "worktree", "none", None)
+            .unwrap();
+        let origins: Vec<&str> = d.hunks[0].lines.iter().map(|l| l.origin.as_str()).collect();
+        assert_eq!(origins, [" ", "-", "+", "+"]);
+
+        // `+c` alone: b needs its newline for c to follow it.
+        stage_picks(p, "e.txt", &[some(0, &[3])]);
+        assert_eq!(blob(p, ":e.txt"), "a\nb\nc");
+
+        // Back out `+c` again, from the index side.
+        unstage_picks(p, "e.txt", &[some(0, &[3])]);
+        assert_eq!(blob(p, ":e.txt"), "a\nb\n");
+    }
+
+    #[test]
+    fn a_new_file_is_staged_in_part_from_intent_to_add_and_from_untracked() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("n.txt"), "l1\nl2\nl3\n").unwrap();
+        run(p, &["add", "-N", "n.txt"]);
+        stage_picks(p, "n.txt", &[some(0, &[1])]);
+        assert_eq!(blob(p, ":n.txt"), "l2\n");
+
+        std::fs::write(p.join("u.txt"), "u1\nu2\nu3\n").unwrap();
+        stage_picks(p, "u.txt", &[some(0, &[0, 2])]);
+        assert_eq!(blob(p, ":u.txt"), "u1\nu3\n");
+    }
+
+    #[test]
+    fn a_staged_new_file_is_unstaged_in_part_or_whole() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("n.txt"), "l1\nl2\nl3\n").unwrap();
+        run(p, &["add", "n.txt"]);
+
+        unstage_picks(p, "n.txt", &[some(0, &[1])]);
+        assert_eq!(blob(p, ":n.txt"), "l1\nl3\n");
+
+        unstage_picks(p, "n.txt", &[all(0)]);
+        assert_eq!(out(p, &["ls-files", "--", "n.txt"]), "", "out of the index");
+    }
+
+    #[test]
+    fn a_deletion_staged_in_part_keeps_the_file_in_the_index() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("g.txt"), "l1\nl2\nl3\n").unwrap();
+        run(p, &["add", "g.txt"]);
+        run(p, &["commit", "-q", "-m", "g"]);
+        std::fs::remove_file(p.join("g.txt")).unwrap();
+
+        stage_picks(p, "g.txt", &[some(0, &[0])]);
+        assert_eq!(blob(p, ":g.txt"), "l2\nl3\n");
+
+        stage_picks(p, "g.txt", &[all(0)]);
+        assert_eq!(
+            out(p, &["ls-files", "--", "g.txt"]),
+            "",
+            "the deletion is staged"
+        );
+    }
+
+    /// Unstaging part of a staged deletion puts those lines back as the file in the
+    /// index: the reverse of a deletion patch that keeps `deleted file mode`.
+    #[test]
+    fn a_staged_deletion_is_unstaged_in_part() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("g.txt"), "l1\nl2\nl3\n").unwrap();
+        run(p, &["add", "g.txt"]);
+        run(p, &["commit", "-q", "-m", "g"]);
+        run(p, &["rm", "-q", "g.txt"]);
+
+        unstage_picks(p, "g.txt", &[some(0, &[1])]);
+        assert_eq!(blob(p, ":g.txt"), "l2\n");
+    }
+
+    #[test]
+    fn a_path_with_a_space_and_brackets_is_staged_and_its_sibling_is_not() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let odd = "sp ace [x].txt";
+        let sibling = "sp ace x.txt"; // what `[x]` would match as a glob
+        for f in [odd, sibling] {
+            std::fs::write(p.join(f), "one\ntwo\n").unwrap();
+            run(p, &["add", f]);
+        }
+        run(p, &["commit", "-q", "-m", "odd"]);
+        for f in [odd, sibling] {
+            std::fs::write(p.join(f), "one\nTWO\nthree\n").unwrap();
+        }
+
+        // " one", "-two", "+TWO", "+three": take `-two` and `+TWO`.
+        stage_picks(p, odd, &[some(0, &[1, 2])]);
+        assert_eq!(blob(p, &format!(":{odd}")), "one\nTWO\n");
+        assert_eq!(blob(p, &format!(":{sibling}")), "one\ntwo\n");
+    }
+
+    #[test]
+    fn a_choice_made_on_a_diff_that_has_since_changed_is_stale() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        two_hunk_file(p);
+        let eng = CliEngine::new(p);
+        let shown = eng.diff_file("f.txt", "worktree", "none", None).unwrap();
+        let index = out(p, &["ls-files", "-s"]);
+        std::fs::write(p.join("f.txt"), "rewritten\n").unwrap();
+
+        let r = eng.selection_patch("f.txt", "worktree", &[all(0)], &shown.digest, None, false);
+        assert!(matches!(r, Err(Error::Stale(_))), "{r:?}");
+        assert_eq!(out(p, &["ls-files", "-s"]), index);
+    }
+
+    #[test]
+    fn a_choice_of_context_lines_only_is_refused() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        two_hunk_file(p);
+        let eng = CliEngine::new(p);
+        let d = eng.diff_file("f.txt", "worktree", "none", None).unwrap();
+        let r = eng.selection_patch(
+            "f.txt",
+            "worktree",
+            &[some(0, &[0])],
+            &d.digest,
+            None,
+            false,
+        );
+        assert!(matches!(r, Err(Error::Rule(_))), "{r:?}");
+    }
+
+    /// A conflicted file is still drawn (its combined `diff --cc`), and choosing
+    /// lines in it is refused with the reason rather than a parse failure.
+    #[test]
+    fn a_conflicted_file_is_drawn_and_its_lines_are_refused() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        run(p, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(p.join("a.txt"), "side\n").unwrap();
+        run(p, &["commit", "-q", "-am", "side"]);
+        run(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("a.txt"), "main\n").unwrap();
+        run(p, &["commit", "-q", "-am", "main"]);
+        let merge = Command::new("git")
+            .arg("-C")
+            .arg(p)
+            .args(["merge", "side"])
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the merge must conflict");
+
+        let eng = CliEngine::new(p);
+        let d = eng.diff_file("a.txt", "worktree", "none", None).unwrap();
+        assert_eq!(d.hunks.len(), 1, "the conflict is drawn");
+        assert!(d.hunks[0]
+            .lines
+            .iter()
+            .any(|l| l.content.contains("<<<<<<<")));
+        let r = eng.selection_patch("a.txt", "worktree", &[all(0)], &d.digest, None, false);
+        assert!(matches!(r, Err(Error::Rule(_))), "{r:?}");
+    }
+
+    /// A widened diff is a different diff: the digest and the hunks are the ones
+    /// drawn at that context, and the patch is built at it too.
+    #[test]
+    fn a_widened_diff_is_staged_at_the_context_it_was_drawn_with() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let base = two_hunk_file(p);
+        let eng = CliEngine::new(p);
+        let wide = eng
+            .diff_file("f.txt", "worktree", "none", Some(20))
+            .unwrap();
+        assert_eq!(wide.hunks.len(), 1, "the two hunks merge");
+        let narrow = eng.diff_file("f.txt", "worktree", "none", None).unwrap();
+        assert!(matches!(
+            eng.selection_patch(
+                "f.txt",
+                "worktree",
+                &[all(0)],
+                &narrow.digest,
+                Some(20),
+                false
+            ),
+            Err(Error::Stale(_))
+        ));
+        let patch = eng
+            .selection_patch(
+                "f.txt",
+                "worktree",
+                &[all(0)],
+                &wide.digest,
+                Some(20),
+                false,
+            )
+            .unwrap();
+        git_accepts(p, &patch, true, false);
+        eng.apply_patch(&patch, true, false).unwrap();
+        let mut want = base;
+        want.splice(1..2, ["A".to_string(), "B".to_string()]);
+        want[15] = "X".into();
+        assert_eq!(blob(p, ":f.txt"), text(&want));
     }
 
     fn head_files(p: &Path) -> String {

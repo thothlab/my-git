@@ -92,6 +92,8 @@ const isMod = (e: KeyboardEvent) => e.metaKey || e.ctrlKey;
 interface Shortcut {
   code: string;
   shift: boolean;
+  /** Also while the caret is in a text field (the default). */
+  typing: boolean;
   run: () => void;
 }
 const shortcuts: Shortcut[] = [];
@@ -99,15 +101,26 @@ const shortcuts: Shortcut[] = [];
 /**
  * Register an application shortcut. Always Cmd/Ctrl + a physical key code
  * (`"Digit1"`, `"KeyF"`, …) — bare letters, Space and `/` are never taken.
+ *
+ * By default a shortcut fires even while the caret is in a text field: switching
+ * the mode or saving the edited file must work from inside the field. `typing:
+ * false` puts it below the "the user is typing" cut-off instead — for a
+ * combination that means something to a text field too (Cmd+Shift+Backspace in a
+ * commit message is editing, not "revert the chosen lines"). There it is not
+ * matched at all, so the field keeps the keystroke and its default.
  */
-export function registerHotkey(code: string, run: () => void, opts?: { shift?: boolean }): () => void {
+export function registerHotkey(
+  code: string,
+  run: () => void,
+  opts?: { shift?: boolean; typing?: boolean },
+): () => void {
   const shift = opts?.shift ?? false;
   // A second registration of the same combination would be shadowed by the first
   // and show up as "the shortcut does nothing", with nothing said about why.
   if (shortcuts.some((s) => s.code === code && s.shift === shift)) {
     throw new Error(`hotkeys: shortcut ${shift ? "Shift+" : ""}${code} is already registered`);
   }
-  const sc: Shortcut = { code, shift, run };
+  const sc: Shortcut = { code, shift, typing: opts?.typing ?? true, run };
   shortcuts.push(sc);
   const off = () => {
     const i = shortcuts.indexOf(sc);
@@ -122,7 +135,9 @@ function handle(e: KeyboardEvent): void {
   const typing = isTypingTarget(e.target);
 
   if (isMod(e)) {
-    const sc = shortcuts.find((s) => s.code === e.code && s.shift === e.shiftKey);
+    const sc = shortcuts.find(
+      (s) => s.code === e.code && s.shift === e.shiftKey && (s.typing || !typing),
+    );
     if (sc) {
       e.preventDefault();
       sc.run();

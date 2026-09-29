@@ -88,6 +88,7 @@ fn kind_name(kind: DiscardKind) -> &'static str {
         DiscardKind::Files => "files",
         DiscardKind::List => "list",
         DiscardKind::Hunk => "hunk",
+        DiscardKind::Lines => "lines",
         DiscardKind::Restore => "restore",
     }
 }
@@ -97,6 +98,7 @@ fn kind_of(name: &str) -> Option<DiscardKind> {
         "files" => DiscardKind::Files,
         "list" => DiscardKind::List,
         "hunk" => DiscardKind::Hunk,
+        "lines" => DiscardKind::Lines,
         "restore" => DiscardKind::Restore,
         _ => return None,
     })
@@ -312,6 +314,7 @@ fn message(before: bool, kind: DiscardKind, paths: &[String]) -> String {
     let what = match kind {
         DiscardKind::Files | DiscardKind::List => format!("rolling back {files}"),
         DiscardKind::Hunk => "reverting a hunk".to_string(),
+        DiscardKind::Lines => "reverting chosen lines".to_string(),
         DiscardKind::Restore => format!("restoring {files} from a backup"),
     };
     let subject = if before {
@@ -817,9 +820,9 @@ pub fn restore(repo: &Path, id: &str, force: bool) -> Result<Option<DiscardEntry
 
 /// The files a patch touches, as git reads the patch (`apply --numstat -z`: no
 /// quoting, and a rename names both sides). Nothing is applied.
-pub fn patch_paths(repo: &Path, patch: &str) -> Result<Vec<String>> {
+pub fn patch_paths(repo: &Path, patch: &[u8]) -> Result<Vec<String>> {
     let out = exec::git(repo, &["apply", "--numstat", "-z", "-"])
-        .input(patch.as_bytes())
+        .input(patch)
         .run()?
         .checked()?;
     let text = String::from_utf8_lossy(&out).to_string();
@@ -860,6 +863,7 @@ pub fn patch_paths(repo: &Path, patch: &str) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use crate::engine::cli::tests::scratch_repo;
+    use crate::model::{AllLines, HunkPick, LinePick};
     use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) -> String {
@@ -1014,7 +1018,13 @@ mod tests {
         let eng = CliEngine::new(p);
         let diff = eng.diff_file("f.txt", "worktree", "none", None).unwrap();
         assert_eq!(diff.hunks.len(), 2);
-        let patch = diff.hunks[1].patch.clone();
+        let picks = [HunkPick {
+            hunk: 1,
+            lines: LinePick::All(AllLines::All),
+        }];
+        let patch = eng
+            .selection_patch("f.txt", "worktree", &picks, &diff.digest, None, true)
+            .unwrap();
         let paths = patch_paths(p, &patch).unwrap();
         assert_eq!(paths, strings(&["f.txt"]));
         let entry = with_backup(p, DiscardKind::Hunk, &paths, || {
@@ -1027,6 +1037,89 @@ mod tests {
 
         restore(p, &entry.id, false).unwrap();
         assert_eq!(read(p, "f.txt"), edited);
+    }
+
+    /// Reverting single lines, as `lines_revert` does it: the working-tree diff in
+    /// reverse. An unchosen addition stays in the file, an unchosen deletion stays
+    /// deleted — and the backup puts the file back as it was.
+    #[test]
+    fn reverting_chosen_lines_touches_only_them_and_is_restored() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("f.txt"), "c1\nd1\nc2\n").unwrap();
+        git(p, &["add", "f.txt"]);
+        git(p, &["commit", "-m", "f"]);
+        let edited = "c1\na1\na2\nc2\n";
+        std::fs::write(p.join("f.txt"), edited).unwrap();
+
+        let eng = CliEngine::new(p);
+        let diff = eng.diff_file("f.txt", "worktree", "none", None).unwrap();
+        // " c1", "-d1", "+a1", "+a2", " c2": revert `+a1` alone.
+        let picks = [HunkPick {
+            hunk: 0,
+            lines: LinePick::Lines(vec![2]),
+        }];
+        let patch = eng
+            .selection_patch("f.txt", "worktree", &picks, &diff.digest, None, true)
+            .unwrap();
+        let paths = patch_paths(p, &patch).unwrap();
+        let entry = with_backup(p, DiscardKind::Lines, &paths, || {
+            eng.apply_patch(&patch, false, true)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(read(p, "f.txt"), "c1\na2\nc2\n");
+        assert_eq!(
+            entry.kind,
+            DiscardKind::Lines,
+            "the kind survives the round trip"
+        );
+        assert_eq!(list(p, 10).unwrap()[0].kind, DiscardKind::Lines);
+
+        // Now `-d1` alone: the deleted line comes back, `a2` stays.
+        let diff = eng.diff_file("f.txt", "worktree", "none", None).unwrap();
+        let picks = [HunkPick {
+            hunk: 0,
+            lines: LinePick::Lines(vec![1]),
+        }];
+        let patch = eng
+            .selection_patch("f.txt", "worktree", &picks, &diff.digest, None, true)
+            .unwrap();
+        eng.apply_patch(&patch, false, true).unwrap();
+        assert_eq!(read(p, "f.txt"), "c1\nd1\na2\nc2\n");
+
+        restore(p, &entry.id, true).unwrap();
+        assert_eq!(read(p, "f.txt"), edited);
+    }
+
+    /// An untracked file reverted in part is edited, not deleted: the partial
+    /// reverse of its all-add diff is a modification. The backup brings it back.
+    #[test]
+    fn reverting_lines_of_an_untracked_file_edits_it_and_is_restored() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("u.txt"), "u1\nu2\nu3\n").unwrap();
+
+        let eng = CliEngine::new(p);
+        let diff = eng.diff_file("u.txt", "worktree", "none", None).unwrap();
+        let picks = [HunkPick {
+            hunk: 0,
+            lines: LinePick::Lines(vec![1]),
+        }];
+        let patch = eng
+            .selection_patch("u.txt", "worktree", &picks, &diff.digest, None, true)
+            .unwrap();
+        let paths = patch_paths(p, &patch).unwrap();
+        assert_eq!(paths, strings(&["u.txt"]));
+        let entry = with_backup(p, DiscardKind::Hunk, &paths, || {
+            eng.apply_patch(&patch, false, true)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(read(p, "u.txt"), "u1\nu3\n");
+
+        restore(p, &entry.id, false).unwrap();
+        assert_eq!(read(p, "u.txt"), "u1\nu2\nu3\n");
     }
 
     #[test]

@@ -12,7 +12,8 @@ use crate::engine::exec::{self, mask_credentials};
 use crate::engine::{branches, commit as commit_engine, discard, log as log_engine, ops};
 use crate::model::{
     BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, DiscardEntry,
-    DiscardKind, DiscardOutcome, Eol, FileDiff,
+    DiscardKind, DiscardOutcome, Eol, FileDiff, HunkPick,
+    LinePick,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
     LogFilter, LogPage, RepoExternalChange, RepoState, StashEntry, TextFile, UiState,
 };
@@ -319,33 +320,67 @@ pub async fn file_write(
     Ok(FileWritten { digest })
 }
 
+/// Stage the chosen lines of a file (a whole hunk is all of its lines).
+///
+/// The client names hunks and lines of the working-tree diff it was shown and sends
+/// that diff's `digest` and `context`; the patch is rebuilt here from the diff read
+/// again, and a diff that no longer matches the digest is `Error::Stale`.
 #[tauri::command]
-pub async fn hunk_stage(state: State<'_, AppState>, patch: String) -> Result<RepoState> {
-    exec::as_user("hunk_stage", || {
-        CliEngine::new(state.repo_path()?).apply_patch(&patch, true, false)
+pub async fn lines_stage(
+    state: State<'_, AppState>,
+    path: String,
+    picks: Vec<HunkPick>,
+    digest: String,
+    context: Option<u32>,
+) -> Result<RepoState> {
+    exec::as_user("lines_stage", || {
+        let eng = CliEngine::new(state.repo_path()?);
+        let patch = eng.selection_patch(&path, "worktree", &picks, &digest, context, false)?;
+        eng.apply_patch(&patch, true, false)
     })?;
     build_state(&state)
 }
 
+/// Unstage the chosen lines of a file: the same, over `diff --cached`, reversed.
 #[tauri::command]
-pub async fn hunk_unstage(state: State<'_, AppState>, patch: String) -> Result<RepoState> {
-    exec::as_user("hunk_unstage", || {
-        CliEngine::new(state.repo_path()?).apply_patch(&patch, true, true)
+pub async fn lines_unstage(
+    state: State<'_, AppState>,
+    path: String,
+    picks: Vec<HunkPick>,
+    digest: String,
+    context: Option<u32>,
+) -> Result<RepoState> {
+    exec::as_user("lines_unstage", || {
+        let eng = CliEngine::new(state.repo_path()?);
+        let patch = eng.selection_patch(&path, "index", &picks, &digest, context, true)?;
+        eng.apply_patch(&patch, true, true)
     })?;
     build_state(&state)
 }
 
-/// Revert one hunk in the working tree, backing the file up first. The path comes
-/// from the patch as git reads it, not from a second client argument that could
-/// disagree with it.
+/// Revert the chosen lines of a file in the working tree, backing the file up first.
+/// The working-tree diff applied in reverse: the mirror of staging, the same rule as
+/// unstaging. The backup's paths come from the patch as git reads it.
 #[tauri::command]
-pub async fn hunk_revert(state: State<'_, AppState>, patch: String) -> Result<DiscardOutcome> {
+pub async fn lines_revert(
+    state: State<'_, AppState>,
+    path: String,
+    picks: Vec<HunkPick>,
+    digest: String,
+    context: Option<u32>,
+) -> Result<DiscardOutcome> {
     let repo = state.repo_path()?;
-    let backup = exec::as_user("hunk_revert", || {
+    // Named for what the reader did: whole hunks from the hunk buttons, lines otherwise.
+    let kind = if picks.iter().all(|p| matches!(p.lines, LinePick::All(_))) {
+        DiscardKind::Hunk
+    } else {
+        DiscardKind::Lines
+    };
+    let backup = exec::as_user("lines_revert", || {
+        let eng = CliEngine::new(&repo);
+        let patch = eng.selection_patch(&path, "worktree", &picks, &digest, context, true)?;
         let paths = discard::patch_paths(&repo, &patch)?;
-        discard::with_backup(&repo, DiscardKind::Hunk, &paths, || {
-            CliEngine::new(&repo).apply_patch(&patch, false, true)
-        })
+        discard::with_backup(&repo, kind, &paths, || eng.apply_patch(&patch, false, true))
     })?;
     Ok(DiscardOutcome {
         state: build_state(&state)?,

@@ -1,6 +1,7 @@
 import {
   For,
   Show,
+  type JSX,
   createMemo,
   createResource,
   createSignal,
@@ -15,14 +16,15 @@ import {
   diffFile,
   errText,
   fileRead,
-  hunkRevert,
-  hunkStage,
-  hunkUnstage,
+  linesRevert,
+  linesStage,
+  linesUnstage,
   repoState,
   type DiffBase,
   type DiffLine,
   type FileDiff,
   type Hunk,
+  type HunkPick,
   type RepoState,
   type TextFile,
   type WhitespaceMode,
@@ -74,6 +76,18 @@ import {
   saveNow,
   setEditorText,
 } from "./diff/editState";
+import {
+  NO_SELECTION,
+  extendTo,
+  forPayload,
+  lineKey,
+  picks as selectionPicks,
+  selectable,
+  step as stepSelection,
+  toggle as toggleLine,
+  type LineRef,
+  type LineSelection,
+} from "./diff/lineSelection";
 import { DISABLED_CLASS } from "./IconButton";
 
 export type { DiffSource, HighlightMode } from "./diff/model";
@@ -409,6 +423,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     // The only place this is cleared — `dropAccepted()` must not, or the
     // re-reads it exists for would each tear the rows down again.
     setDrawnKey(null);
+    setLineSel(NO_SELECTION);
     setCurrent(-1);
     setNote("");
     setOpened(new Set<string>());
@@ -737,6 +752,153 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
   /** The editor is open *on the file this panel is showing*. The draft outlives
    *  the panel, so a remount finds it still open and picks it back up. */
   const editing = () => editorOpen() && editorPath() === source()?.path;
+
+  // ── Choosing lines to stage, unstage or revert ─────────────────────────────
+
+  /**
+   * The lines chosen, bound to the payload they were chosen in (see
+   * `diff/lineSelection`). Read through `chosen()`: a selection made in another
+   * payload is nothing here, so a re-read that changed the file empties it on
+   * its own — kept, its indexes would stage whatever lines now sit there.
+   */
+  const [lineSel, setLineSel] = createSignal<LineSelection>(NO_SELECTION);
+  const chosen = createMemo(() => forPayload(lineSel(), shown()?.digest ?? ""));
+  const chosenKeys = createMemo(() => new Set(chosen().keys));
+  const clearChosen = () => setLineSel(NO_SELECTION);
+  /** Where each drawn line sits in the payload: rows share the payload's own
+   *  `DiffLine` objects, so identity is the key. */
+  const refOf = createMemo(() => {
+    const m = new Map<DiffLine, LineRef>();
+    shown()?.hunks.forEach((h, hunk) => h.lines.forEach((l, line) => m.set(l, { hunk, line })));
+    return m;
+  });
+  /** The base this panel stages from or unstages from, or `null` when lines of
+   *  this comparison cannot be moved (vs HEAD, a revision, the Log mode). */
+  const lineBase = (): "worktree" | "index" | null => {
+    const s = source();
+    if (s?.kind !== "worktree") return null;
+    return s.base === "worktree" || s.base === "index" ? s.base : null;
+  };
+  /** Lines can be chosen here at all. Not while the editor is open: the rows
+   *  under it describe the file as it was when editing began. */
+  const canChoose = () =>
+    lineBase() !== null && !editing() && rowsDrawn() && !!shown() && !shown()!.binary && shown()!.digest !== "";
+  /** Why the actions are refused, when they are; `null` when they are not. */
+  const actionOff = (): string | null =>
+    editing() || editStale() ? d().hunkEditTip() : ws() !== "none" ? d().hunkWhitespaceTip() : null;
+
+  // The editor opening is a departure from the rows the lines were chosen in.
+  createEffect(() => {
+    if (editing()) clearChosen();
+  });
+
+  const pickLine = (line: DiffLine, range: boolean) => {
+    const ref = refOf().get(line);
+    const f = shown();
+    if (!ref || !f || !canChoose() || !selectable(line)) return;
+    const next = range
+      ? extendTo(chosen(), f.hunks, ref, f.digest, acceptedContext)
+      : toggleLine(chosen(), f.hunks, ref, f.digest, acceptedContext);
+    setLineSel(next);
+  };
+
+  /** The line the current difference opens with, where the keyboard starts. */
+  const currentRef = (): LineRef | null => {
+    const v = view();
+    const c = current();
+    if (!v || c < 0) return null;
+    for (const h of v.hunks)
+      for (const it of h.items)
+        for (const r of it.kind === "row" ? [it.row] : it.rows)
+          if (r.diff === c && r.first) {
+            const l = selectable(r.left) ? r.left : r.right;
+            return l ? (refOf().get(l) ?? null) : null;
+          }
+    return null;
+  };
+
+  const stepChosen = (dir: 1 | -1) => {
+    const f = shown();
+    if (!f || !canChoose()) return;
+    const next = stepSelection(chosen(), f.hunks, dir, f.digest, acceptedContext, currentRef());
+    setLineSel(next);
+    const c = next.cursor;
+    if (!c) return;
+    // A folded run never holds a choosable line, so the row is always drawn.
+    scrollEl
+      ?.querySelector(`[data-line-key="${lineKey(c)}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  };
+
+  /**
+   * Stage, unstage or revert — chosen lines or a whole hunk (`"all"`). The digest
+   * and context are those of the payload the choice was made in, never the ones
+   * of a request still in flight: `context()` already holds a widened value
+   * before its answer arrives.
+   */
+  const applyLines = async (
+    kind: "stage" | "unstage" | "revert",
+    picks: HunkPick[],
+    digest: string,
+    context: number | undefined,
+    confirmText: string,
+  ) => {
+    const s = source();
+    if (!s || picks.length === 0 || actionOff()) return;
+    if (kind === "revert") {
+      if (!(await confirmAction(confirmText))) return;
+      await runDiscard(linesRevert(s.path, picks, digest, context));
+    } else {
+      await act(() => (kind === "stage" ? linesStage : linesUnstage)(s.path, picks, digest, context));
+    }
+    clearChosen();
+  };
+  const picker: LinePicker = {
+    on: () => canChoose(),
+    picked: (l) => {
+      const r = refOf().get(l);
+      return !!r && chosenKeys().has(lineKey(r));
+    },
+    keyOf: (l) => {
+      const r = refOf().get(l);
+      return r ? lineKey(r) : undefined;
+    },
+    pick: pickLine,
+  };
+  const applyChosen = (kind: "stage" | "unstage" | "revert") => {
+    const c = chosen();
+    void applyLines(kind, selectionPicks(c), c.digest, c.context, d().revertLinesConfirm(c.keys.length));
+  };
+  const applyHunk = (kind: "stage" | "unstage" | "revert", hunk: number) => {
+    const f = shown();
+    if (!f) return;
+    const ask = widened() ? d().revertHunkWideConfirm() : d().revertHunkConfirm();
+    return applyLines(kind, [{ hunk, lines: "all" }], f.digest, acceptedContext, ask);
+  };
+
+  // Standalone only, like the arrows: hosted, the Log mode has nothing to stage.
+  // Registered while lines can be chosen, the actions while there is a choice
+  // they would act on — an unregistered combination is the one way to decline a
+  // key (`hotkeys.ts` prevents the default before any handler runs). All of them
+  // `typing: false`: with the caret in the commit message, the search or the
+  // console these are that field's keys (Cmd+Shift+Backspace is text editing).
+  if (!hosted) {
+    const keys = { shift: true, typing: false };
+    createEffect(() => {
+      if (!canChoose()) return;
+      registerHotkey("KeyJ", () => stepChosen(1), keys);
+      registerHotkey("KeyK", () => stepChosen(-1), keys);
+    });
+    createEffect(() => {
+      if (!canChoose() || chosen().keys.length === 0 || actionOff()) return;
+      if (lineBase() === "worktree") {
+        registerHotkey("KeyS", () => applyChosen("stage"), keys);
+        registerHotkey("Backspace", () => applyChosen("revert"), keys);
+      } else {
+        registerHotkey("KeyU", () => applyChosen("unstage"), keys);
+      }
+    });
+  }
 
   let taEl: HTMLTextAreaElement | undefined;
   let gutterEl: HTMLDivElement | undefined;
@@ -1067,6 +1229,41 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
           </div>
         </Show>
 
+        <Show when={canChoose() && chosen().keys.length > 0}>
+          <div class="flex flex-wrap items-center gap-1 border-b border-border bg-accent/10 px-2 py-0.5 text-[0.6875rem]">
+            <span class="mr-1 text-fg">{d().linesChosen(chosen().keys.length)}</span>
+            <Show when={lineBase() === "worktree"}>
+              <HunkBtn
+                label={d().stageLines()}
+                disabled={!!actionOff()}
+                tip={actionOff() ?? d().stageLinesTip()}
+                onClick={() => applyChosen("stage")}
+              />
+              <HunkBtn
+                label={d().revertLines()}
+                danger
+                disabled={!!actionOff()}
+                tip={actionOff() ?? d().revertLinesTip()}
+                onClick={() => applyChosen("revert")}
+              />
+            </Show>
+            <Show when={lineBase() === "index"}>
+              <HunkBtn
+                label={d().unstageLines()}
+                disabled={!!actionOff()}
+                tip={actionOff() ?? d().unstageLinesTip()}
+                onClick={() => applyChosen("unstage")}
+              />
+            </Show>
+            <HunkBtn label={d().clearLines()} onClick={clearChosen} />
+            <Show when={!hosted}>
+              <span class="ml-auto truncate text-fg-muted">
+                {lineBase() === "index" ? d().linesKeysIndex() : d().linesKeysWorktree()}
+              </span>
+            </Show>
+          </div>
+        </Show>
+
         <div class="relative min-h-0 flex-1" ref={wrapEl}>
           <div
             ref={scrollEl}
@@ -1146,15 +1343,10 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
                             }
                             widened={widened()}
                             base={source()!.kind === "worktree" ? (source() as { base: DiffBase }).base : null}
-                            onStage={() => act(() => hunkStage(hv.hunk.patch))}
-                            onUnstage={() => act(() => hunkUnstage(hv.hunk.patch))}
-                            onRevert={async () => {
-                              const ask = widened()
-                                ? d().revertHunkWideConfirm()
-                                : d().revertHunkConfirm();
-                              if (await confirmAction(ask))
-                                await runDiscard(hunkRevert(hv.hunk.patch));
-                            }}
+                            onStage={() => void applyHunk("stage", i())}
+                            onUnstage={() => void applyHunk("unstage", i())}
+                            onRevert={() => void applyHunk("revert", i())}
+                            picker={picker}
                           />
                         </>
                       )}
@@ -1333,6 +1525,7 @@ function HunkBody(props: {
   onStage: () => void;
   onUnstage: () => void;
   onRevert: () => void;
+  picker: LinePicker;
 }) {
   // Expanding the context merges neighbouring changes into one hunk, so Stage,
   // Unstage and Revert act on a wider region than the one the reader saw before
@@ -1373,8 +1566,8 @@ function HunkBody(props: {
           <Show when={props.base === "index"}>
             <HunkBtn
               label={label("Unstage")}
-              disabled={props.editStale}
-              tip={props.editStale ? d().hunkEditTip() : props.widened ? d().hunkWideTip() : undefined}
+              disabled={off()}
+              tip={tip()}
               onClick={props.onUnstage}
             />
           </Show>
@@ -1403,6 +1596,7 @@ function HunkBody(props: {
                   active={row.diff >= 0 && row.diff === props.current}
                   anchor={props.anchor}
                   onEditLine={props.onEditLine}
+                  picker={props.picker}
                 />
               )}
             </For>
@@ -1461,6 +1655,7 @@ function RowView(props: {
   active: boolean;
   anchor: (idx: number, el: HTMLElement) => void;
   onEditLine?: (newNo: number, top: number) => void;
+  picker: LinePicker;
 }) {
   const segs = createMemo(() =>
     props.highlight === "words" && pairChanged(props.row)
@@ -1479,7 +1674,12 @@ function RowView(props: {
       <Show
         when={props.split}
         fallback={
-          <UnifiedRow row={props.row} highlight={props.highlight} segs={segs()} />
+          <UnifiedRow
+            row={props.row}
+            highlight={props.highlight}
+            segs={segs()}
+            picker={props.picker}
+          />
         }
       >
         <Cell
@@ -1488,6 +1688,7 @@ function RowView(props: {
           frac={props.ratio}
           highlight={props.highlight}
           segs={segs()?.left}
+          picker={props.picker}
         />
         <Cell
           line={props.row.right}
@@ -1497,6 +1698,7 @@ function RowView(props: {
           segs={segs()?.right}
           editAt={props.row.newAnchor}
           onEditLine={props.onEditLine}
+          picker={props.picker}
         />
       </Show>
     </div>
@@ -1541,6 +1743,7 @@ function UnifiedRow(props: {
   row: Row;
   highlight: HighlightMode;
   segs: { left: Seg[]; right: Seg[] } | null;
+  picker: LinePicker;
 }) {
   const sides = () =>
     props.row.diff < 0
@@ -1554,12 +1757,10 @@ function UnifiedRow(props: {
       <For each={sides()}>
         {(s) => (
           <div class={`flex ${lineBg(s.line!.origin)}`}>
-            <span class="w-10 shrink-0 select-none pr-1 text-right text-fg-muted">
-              {s.line!.oldNo ?? ""}
-            </span>
-            <span class="w-10 shrink-0 select-none pr-2 text-right text-fg-muted">
-              {s.line!.newNo ?? ""}
-            </span>
+            <Gutter line={s.line} picker={props.picker} class="flex shrink-0">
+              <span class="w-10 pr-1 text-right">{s.line!.oldNo ?? ""}</span>
+              <span class="w-10 pr-2 text-right">{s.line!.newNo ?? ""}</span>
+            </Gutter>
             <span class="w-3 shrink-0 select-none text-fg-muted">{s.line!.origin}</span>
             <Text
               content={s.line!.content}
@@ -1586,6 +1787,7 @@ function Cell(props: {
   editAt?: number;
   /** Second, equal way into the editor: point at the line and open it there. */
   onEditLine?: (newNo: number, top: number) => void;
+  picker: LinePicker;
 }) {
   const no = () => (props.side === "old" ? props.line?.oldNo : props.line?.newNo);
   const bg = () => (props.line ? lineBg(props.line.origin) : "bg-bg-muted/40");
@@ -1607,9 +1809,9 @@ function Cell(props: {
       style={{ width: `${props.frac * 100}%` }}
       onDblClick={(e) => editHere(e.currentTarget)}
     >
-      <span class="w-10 shrink-0 select-none pr-2 text-right text-fg-muted">
+      <Gutter line={props.line} picker={props.picker} class="w-10 shrink-0 pr-2 text-right">
         {no() ?? ""}
-      </span>
+      </Gutter>
       <span class="w-3 shrink-0 select-none text-fg-muted">
         {props.line ? props.line.origin : ""}
       </span>
@@ -1624,5 +1826,58 @@ function Cell(props: {
         </Show>
       </span>
     </div>
+  );
+}
+
+/** What the rows need to let the reader choose lines; built once by the panel. */
+type LinePicker = {
+  /** Lines of this comparison can be chosen now. */
+  on: () => boolean;
+  picked: (l: DiffLine) => boolean;
+  /** `data-line-key` of a line, which the keyboard scrolls to. */
+  keyOf: (l: DiffLine) => string | undefined;
+  /** A click (`range`: with Shift). */
+  pick: (l: DiffLine, range: boolean) => void;
+};
+
+/**
+ * The line-number gutter of one drawn line, and the place a line is chosen: a
+ * click chooses it or gives it back, Shift+click extends the range from the last
+ * one. Only an added or removed line answers — a context line is in both versions.
+ *
+ * The mouse-down default is prevented so Shift+click does not also select text,
+ * and a double-click stops here: on the right-hand column it would otherwise open
+ * the editor over the lines being chosen.
+ */
+function Gutter(props: {
+  line?: DiffLine;
+  picker: LinePicker;
+  class: string;
+  children: JSX.Element;
+}) {
+  const can = () => props.picker.on() && selectable(props.line);
+  const picked = () => can() && props.picker.picked(props.line!);
+  return (
+    <span
+      class={`select-none ${props.class}`}
+      classList={{
+        "text-fg-muted": !picked(),
+        "bg-accent text-white": picked(),
+        "cursor-pointer hover:bg-accent/20": can() && !picked(),
+      }}
+      data-line-key={can() ? props.picker.keyOf(props.line!) : undefined}
+      title={can() ? d().linePickTip() : undefined}
+      onMouseDown={(e) => {
+        if (can()) e.preventDefault();
+      }}
+      onClick={(e) => {
+        if (can()) props.picker.pick(props.line!, e.shiftKey);
+      }}
+      onDblClick={(e) => {
+        if (can()) e.stopPropagation();
+      }}
+    >
+      {props.children}
+    </span>
   );
 }

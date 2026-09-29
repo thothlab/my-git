@@ -64,15 +64,38 @@ pub struct DiffLine {
     pub new_no: Option<u32>,
 }
 
-/// A diff hunk. `patch` is the **exact, self-contained** patch text (file header +
-/// this hunk) so the frontend can hand it straight back to `git apply` for
-/// hunk-level stage/revert without any lossy reconstruction.
+/// A diff hunk. Carries no patch text: stage / unstage / revert name hunks and lines
+/// by index ([`HunkPick`]) and the backend rebuilds the patch from the diff it reads
+/// again — a patch handed back by the client would be applied against whatever the
+/// file has become since it was drawn.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Hunk {
     pub header: String,
     pub lines: Vec<DiffLine>,
-    pub patch: String,
+}
+
+/// Lines of one hunk chosen for `lines_stage` / `lines_unstage` / `lines_revert`:
+/// `hunk` and each line are indexes into `FileDiff::hunks` and `Hunk::lines` of the
+/// diff the reader was shown. `"all"` is the whole hunk.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HunkPick {
+    pub hunk: usize,
+    pub lines: LinePick,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum LinePick {
+    All(AllLines),
+    Lines(Vec<usize>),
+}
+
+/// The literal `"all"`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub enum AllLines {
+    #[serde(rename = "all")]
+    All,
 }
 
 /// A file's diff against a chosen base.
@@ -86,11 +109,16 @@ pub struct Hunk {
 /// the commit's *first* parent, one of several possible readings, so the panel must
 /// say so. The fact travels with the diff rather than being reassembled by the UI
 /// from a second call.
+///
+/// `digest` fingerprints the exact bytes git printed (`cli::fnv1a`) for a working-tree
+/// diff; a line action sends it back and is refused as stale when the diff read again
+/// is not the same. Empty for a revision diff, which nothing is applied from.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileDiff {
     pub path: String,
     pub binary: bool,
+    pub digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -493,8 +521,10 @@ pub enum DiscardKind {
     Files,
     /// A whole changelist rolled back to HEAD (`list_rollback`).
     List,
-    /// One hunk reverted in the working tree (`hunk_revert`).
+    /// Whole hunks reverted in the working tree (`lines_revert` with `"all"`).
     Hunk,
+    /// Chosen lines reverted in the working tree (`lines_revert`).
+    Lines,
     /// A backup restored — itself undoable, from the same list.
     Restore,
 }
@@ -520,4 +550,21 @@ pub struct DiscardEntry {
 pub struct DiscardOutcome {
     pub state: RepoState,
     pub backup: Option<DiscardEntry>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shape `api.ts` sends: `lines` is an array of indexes or the string
+    /// `"all"`; anything else is refused at the boundary, not read as "all".
+    #[test]
+    fn hunk_picks_read_the_client_shape() {
+        let v: Vec<HunkPick> =
+            serde_json::from_str(r#"[{"hunk":0,"lines":"all"},{"hunk":2,"lines":[1,3]}]"#).unwrap();
+        assert!(matches!(v[0].lines, LinePick::All(AllLines::All)));
+        assert!(matches!(&v[1].lines, LinePick::Lines(l) if l == &[1, 3]));
+        assert_eq!(v[1].hunk, 2);
+        assert!(serde_json::from_str::<Vec<HunkPick>>(r#"[{"hunk":0,"lines":"some"}]"#).is_err());
+    }
 }

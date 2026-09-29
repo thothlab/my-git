@@ -112,7 +112,7 @@ export const filesMove = (paths: string[], toListId: string) =>
   invoke<RepoState>("files_move", { paths, toListId });
 
 // rollback (task_03) — every discard is backed up first under refs/graft/discard
-export type DiscardKind = "files" | "list" | "hunk" | "restore";
+export type DiscardKind = "files" | "list" | "hunk" | "lines" | "restore";
 
 /** One restorable backup: the paths a discard changed, as they were before it.
  * `id` is the handle `discardCheck` / `discardRestore` take; `at` is Unix seconds. */
@@ -157,14 +157,19 @@ export interface DiffLine {
   oldNo: number | null;
   newNo: number | null;
 }
+/** A hunk carries no patch text: actions name hunks and lines by index
+ * (`HunkPick`) and the backend rebuilds the patch from the diff it reads again. */
 export interface Hunk {
   header: string;
   lines: DiffLine[];
-  patch: string;
 }
 export interface FileDiff {
   path: string;
   binary: boolean;
+  /** Fingerprint of the exact diff git printed, for a working-tree / index diff;
+   * a line action sends it back and is refused as `stale` when the diff read
+   * again is another one. Empty for a revision diff. */
+  digest: string;
   /** Bytes on each side of a **binary** file — the only honest thing to show when
    * there is no text (prd_02 История 68). Absent on the side where the file does
    * not exist (added / deleted) and absent entirely for a text diff. */
@@ -191,12 +196,25 @@ export const diffFile = (
   context?: number,
 ) => invoke<FileDiff>("diff_file", { path, against, whitespace, context });
 
-export const hunkStage = (patch: string) =>
-  invoke<RepoState>("hunk_stage", { patch });
-export const hunkUnstage = (patch: string) =>
-  invoke<RepoState>("hunk_unstage", { patch });
-export const hunkRevert = (patch: string) =>
-  invoke<DiscardOutcome>("hunk_revert", { patch });
+/** Lines of one hunk: indexes into `Hunk.lines`, or the whole hunk. */
+export interface HunkPick {
+  hunk: number;
+  lines: number[] | "all";
+}
+
+/**
+ * Stage / unstage / revert the chosen lines of `path`. `digest` and `context` are
+ * those of the diff the lines were chosen in — the worktree diff for stage and
+ * revert, the index diff for unstage; the backend reads that diff again with the
+ * same context (and never with whitespace ignored) and refuses a changed one as
+ * `stale`.
+ */
+export const linesStage = (path: string, picks: HunkPick[], digest: string, context?: number) =>
+  invoke<RepoState>("lines_stage", { path, picks, digest, context });
+export const linesUnstage = (path: string, picks: HunkPick[], digest: string, context?: number) =>
+  invoke<RepoState>("lines_unstage", { path, picks, digest, context });
+export const linesRevert = (path: string, picks: HunkPick[], digest: string, context?: number) =>
+  invoke<DiscardOutcome>("lines_revert", { path, picks, digest, context });
 
 // commit (task_05)
 export const commitList = (a: {

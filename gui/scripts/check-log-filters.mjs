@@ -9,7 +9,9 @@
  *     filter and repository-relative paths for the path filter;
  *   - `src/components/pathTree.ts` - the shared path layout behind both file
  *     trees (Changes panel and commit details), which used to be two copies
- *     that had already drifted apart.
+ *     that had already drifted apart;
+ *   - `src/components/diff/lineSelection.ts` - which diff lines are chosen for
+ *     stage / unstage / revert, and that a choice belongs to one diff.
  *
  * Run it:  node scripts/check-log-filters.mjs      (from `gui/`)
  * Another time zone:  TZ=America/Los_Angeles node scripts/check-log-filters.mjs
@@ -60,6 +62,16 @@ await build({
   logLevel: "warning",
 });
 
+// Its own call too, for the same reason: `diff/lineSelection.ts` next to
+// `editRules.ts` would share its base with nothing else here, and a combined call
+// with any other directory would nest the output.
+await build({
+  entryPoints: [join(here, "..", "src", "components", "diff", "lineSelection.ts")],
+  outdir: out,
+  format: "esm",
+  logLevel: "warning",
+});
+
 const load = (name) => import(pathToFileURL(join(out, name)).href);
 const { compilePattern, spansIn, matchesCommit } = await load("searchPattern.js");
 const { asInputDate, dayStart, dayEnd, startOfToday, relativeToRepo, toSlash } =
@@ -82,6 +94,7 @@ const {
   newSideAnchors,
 } = await load("editRules.js");
 const { splitShellArgs, formatArgv } = await load("gitConsoleCommand.js");
+const sel = await load("lineSelection.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -256,10 +269,21 @@ eq(mayOverwrite("mixed-eol"), false, "...nor one whose line endings became mixed
 // answers are identical. Republishing one rebuilds a reference-keyed row list
 // and takes the scroll position with it, so an alt-tab would jump the reader to
 // the top of the file.
-const hunk = (header, patch) => ({ header, patch });
+// A hunk by its header and a compact spelling of its lines: "-a" is a removal of
+// `a` from line 1, "+b" an addition of `b` as line 1.
+const hunk = (header, spelled) => ({
+  header,
+  lines: spelled.split("\n").filter(Boolean).map((l) => ({
+    origin: l[0],
+    content: l.slice(1),
+    oldNo: l[0] === "+" ? null : 1,
+    newNo: l[0] === "-" ? null : 1,
+  })),
+});
 const payload = (over = {}) => ({
   path: "a.txt",
   binary: false,
+  digest: "d1",
   mergeFirstParent: false,
   hunks: [hunk("@@ -1,2 +1,2 @@", "-a\n+b\n")],
   ...over,
@@ -278,6 +302,11 @@ eq(
   "...as is one that moved to other line numbers",
 );
 eq(samePayload(payload(), payload({ hunks: [] })), false, "a staged hunk leaves a shorter list");
+eq(
+  samePayload(payload(), payload({ digest: "d2" })),
+  false,
+  "another digest is another payload: the one on screen is what the next line action sends",
+);
 eq(samePayload(payload(), payload({ path: "b.txt" })), false, "another file is another payload");
 eq(
   samePayload(payload({ binary: true, oldSize: 4 }), payload({ binary: true, oldSize: 9 })),
@@ -442,6 +471,52 @@ eq(
   "a file deleted whole has only line 1 to point at",
 );
 eq(newSideAnchors([]), [], "nothing drawn, nothing to place");
+
+// -- Choosing lines for stage / unstage / revert ------------------------------
+// Two hunks: [" c", "-d", "+a", "+b", " c"] and [" c", "+x", " c"].
+const H = [
+  { lines: [" ", "-", "+", "+", " "].map((origin) => ({ origin })) },
+  { lines: [" ", "+", " "].map((origin) => ({ origin })) },
+];
+const at = (hunk, line) => ({ hunk, line });
+const none = sel.NO_SELECTION;
+eq(sel.selectable({ origin: " " }), false, "a context line cannot be chosen");
+eq(sel.selectable({ origin: "-" }) && sel.selectable({ origin: "+" }), true, "a removal and an addition can");
+eq(sel.selectableRefs(H).map(sel.lineKey), ["0:1", "0:2", "0:3", "1:1"], "choosable lines in document order");
+
+let s1 = sel.toggle(none, H, at(0, 2), "D", undefined);
+eq(s1.keys, ["0:2"], "a click chooses the line");
+eq([s1.digest, s1.context], ["D", null], "...and binds the choice to the diff it was made in");
+eq(sel.toggle(s1, H, at(0, 0), "D", undefined), s1, "a click on a context line changes nothing");
+eq(sel.toggle(s1, H, at(0, 2), "D", undefined).keys, [], "a second click gives the line back");
+eq(sel.toggle(s1, H, at(0, 1), "D", undefined).keys, ["0:1", "0:2"], "keys stay in document order");
+
+eq(sel.forPayload(s1, "D"), s1, "the selection holds on the diff it was made in");
+eq(sel.forPayload(s1, "E").keys, [], "...and is nothing on any other one");
+eq(sel.toggle(s1, H, at(0, 1), "E", 5).keys, ["0:1"], "a click on another diff starts over");
+eq(sel.toggle(s1, H, at(0, 1), "E", 5).context, 5, "...with that diff's context");
+eq([sel.toggle(s1, H, at(0, 1), "D", 9).context], [undefined], "the context stays the one the lines were chosen at");
+
+const r1 = sel.extendTo(sel.toggle(none, H, at(0, 1), "D", undefined), H, at(1, 1), "D", undefined);
+eq(r1.keys, ["0:1", "0:2", "0:3", "1:1"], "shift-click chooses the range, across hunks, skipping context");
+const r2 = sel.extendTo(r1, H, at(0, 2), "D", undefined);
+eq(r2.keys, ["0:1", "0:2"], "moving the end back gives the lines past it back");
+const r3 = sel.extendTo(sel.toggle(r2, H, at(1, 1), "D", undefined), H, at(0, 3), "D", undefined);
+eq(r3.keys, ["0:1", "0:2", "0:3", "1:1"], "a range from a new anchor keeps what was chosen before");
+eq(sel.extendTo(none, H, at(0, 3), "D", undefined).keys, ["0:3"], "without an anchor shift-click is a click");
+
+const k1 = sel.step(none, H, 1, "D", undefined);
+eq(k1.keys, ["0:1"], "the first step chooses the first choosable line");
+eq(sel.step(none, H, -1, "D", undefined).keys, ["1:1"], "...or the last one going up");
+eq(sel.step(none, H, 1, "D", undefined, at(1, 0)).keys, ["1:1"], "...or the first one from the difference on screen");
+const k3 = sel.step(sel.step(k1, H, 1, "D", undefined), H, 1, "D", undefined);
+eq(k3.keys, ["0:1", "0:2", "0:3"], "steps extend the range");
+eq(sel.step(k3, H, -1, "D", undefined).keys, ["0:1", "0:2"], "a step back shrinks it");
+const end = sel.step(sel.step(k3, H, 1, "D", undefined), H, 1, "D", undefined);
+eq(end.cursor, { hunk: 1, line: 1 }, "steps stop at the last line instead of wrapping");
+
+eq(sel.picks(r1), [{ hunk: 0, lines: [1, 2, 3] }, { hunk: 1, lines: [1] }], "picks group lines by hunk");
+eq(sel.picks(none), [], "nothing chosen, nothing sent");
 
 // -- Git console input splitting ----------------------------------------------
 eq(splitShellArgs("status"), { ok: true, args: ["status"] }, "single word");

@@ -163,21 +163,26 @@ export function mayOverwrite(blocked: EditBlock | null): boolean {
 }
 
 /**
- * The parts of a hunk that decide whether two answers describe the same patch.
- * `patch` is the hunk's own text, so the lines are compared through it.
+ * The parts of a hunk that decide whether two answers describe the same patch:
+ * its header and every line, with its kind and numbers.
  *
  * Declared here rather than imported: `FileDiff` from `../../api` satisfies it
  * structurally, and this module imports nothing (see the header).
  */
 export interface PatchHunk {
   header: string;
-  patch: string;
+  lines: { origin: string; content: string; oldNo: number | null; newNo: number | null }[];
 }
 
 /** Everything a `FileDiff` says about the file, as this rule reads it. */
 export interface PatchPayload {
   path: string;
   binary: boolean;
+  /** The fingerprint line actions are sent with. Two answers that differ in it
+   * are different payloads even when every drawn line is the same: the one kept
+   * on screen is the one whose digest the next action carries, and an old one
+   * would be refused as stale on every click. */
+  digest: string;
   oldSize?: number;
   newSize?: number;
   mergeFirstParent: boolean;
@@ -201,6 +206,7 @@ export function samePayload(a: PatchPayload | null, b: PatchPayload | null): boo
   if (!a || !b) return false;
   if (
     a.path !== b.path ||
+    a.digest !== b.digest ||
     a.binary !== b.binary ||
     a.oldSize !== b.oldSize ||
     a.newSize !== b.newSize ||
@@ -208,7 +214,20 @@ export function samePayload(a: PatchPayload | null, b: PatchPayload | null): boo
     a.hunks.length !== b.hunks.length
   )
     return false;
-  return a.hunks.every((h, i) => h.header === b.hunks[i].header && h.patch === b.hunks[i].patch);
+  return a.hunks.every((h, i) => {
+    const o = b.hunks[i];
+    return (
+      h.header === o.header &&
+      h.lines.length === o.lines.length &&
+      h.lines.every(
+        (l, j) =>
+          l.origin === o.lines[j].origin &&
+          l.content === o.lines[j].content &&
+          l.oldNo === o.lines[j].oldNo &&
+          l.newNo === o.lines[j].newNo,
+      )
+    );
+  });
 }
 
 /**

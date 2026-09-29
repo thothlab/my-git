@@ -445,6 +445,7 @@ const en = {
   discardedFiles: (n: number) => `Rolled back ${n} ${n === 1 ? "file" : "files"}`,
   discardedList: (n: number) => `Rolled back a changelist: ${n} ${n === 1 ? "file" : "files"}`,
   discardedHunk: (path: string) => `Reverted a hunk in ${path}`,
+  discardedLines: (path: string) => `Reverted lines in ${path}`,
   discardedRestore: (n: number) => `Restored ${n} ${n === 1 ? "file" : "files"} from a backup`,
   discardUndo: () => "Undo",
   discardStaleConfirm: (paths: string[]) =>
@@ -507,6 +508,22 @@ const en = {
   editStaleOverwrite: () => "Overwrite with the typed text",
   hunkEditTip: () =>
     "The comparison on screen was not computed from the file as it is now. Finish editing to stage or revert.",
+  // Choosing lines to stage / unstage / revert
+  linePickTip: () => "Click to choose this line, Shift+click to choose the range up to it",
+  linesChosen: (n: number) => `${n} ${n === 1 ? "line" : "lines"} chosen`,
+  stageLines: () => "Stage lines",
+  unstageLines: () => "Unstage lines",
+  revertLines: () => "Revert lines",
+  clearLines: () => "Clear",
+  stageLinesTip: () => "Put the chosen lines into the index (Cmd/Ctrl+Shift+S)",
+  unstageLinesTip: () => "Take the chosen lines out of the index (Cmd/Ctrl+Shift+U)",
+  revertLinesTip: () =>
+    "Undo the chosen lines in the working tree; the file is backed up first (Cmd/Ctrl+Shift+Backspace)",
+  revertLinesConfirm: (n: number) =>
+    `Revert ${n} chosen ${n === 1 ? "line" : "lines"} in the working tree? The file is backed up first and can be restored.`,
+  linesKeysWorktree: () =>
+    "Cmd/Ctrl+Shift+J / K: extend · Cmd/Ctrl+Shift+S: stage · Cmd/Ctrl+Shift+Backspace: revert",
+  linesKeysIndex: () => "Cmd/Ctrl+Shift+J / K: extend · Cmd/Ctrl+Shift+U: unstage",
 };
 
 type Dict = typeof en;
@@ -914,6 +931,7 @@ const ru: Dict = {
   discardedList: (n) =>
     `Откачен changelist: ${n} ${ruPlural(n, "файл", "файла", "файлов")}`,
   discardedHunk: (path) => `Откачен фрагмент в ${path}`,
+  discardedLines: (path) => `Откачены строки в ${path}`,
   discardedRestore: (n) =>
     `Восстановлено из копии: ${n} ${ruPlural(n, "файл", "файла", "файлов")}`,
   discardUndo: () => "Вернуть",
@@ -975,6 +993,21 @@ const ru: Dict = {
   editStaleOverwrite: () => "Перезаписать набранным",
   hunkEditTip: () =>
     "Diff на экране посчитан не по текущему файлу. Закончите правку, чтобы ставить в индекс или откатывать.",
+  linePickTip: () => "Щелчок выбирает строку, Shift+щелчок — диапазон до неё",
+  linesChosen: (n) => `${ruPlural(n, "выбрана", "выбраны", "выбрано")} ${n} ${ruPlural(n, "строка", "строки", "строк")}`,
+  stageLines: () => "Подготовить строки",
+  unstageLines: () => "Убрать строки",
+  revertLines: () => "Откатить строки",
+  clearLines: () => "Сбросить",
+  stageLinesTip: () => "Поставить выбранные строки в индекс (Cmd/Ctrl+Shift+S)",
+  unstageLinesTip: () => "Убрать выбранные строки из индекса (Cmd/Ctrl+Shift+U)",
+  revertLinesTip: () =>
+    "Отменить выбранные строки в рабочем дереве; файл сначала сохраняется в копию (Cmd/Ctrl+Shift+Backspace)",
+  revertLinesConfirm: (n) =>
+    `Откатить ${n} ${ruPlural(n, "выбранную строку", "выбранные строки", "выбранных строк")} в рабочем дереве? Файл сначала сохраняется в копию, его можно будет вернуть.`,
+  linesKeysWorktree: () =>
+    "Cmd/Ctrl+Shift+J / K: расширить · Cmd/Ctrl+Shift+S: подготовить · Cmd/Ctrl+Shift+Backspace: откатить",
+  linesKeysIndex: () => "Cmd/Ctrl+Shift+J / K: расширить · Cmd/Ctrl+Shift+U: убрать",
 };
 
 /** Current locale's dictionary. Reactive: reads the `locale` signal. */

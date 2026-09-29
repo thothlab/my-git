@@ -75,6 +75,8 @@ export function discardLabel(e: DiscardEntry): string {
   switch (e.kind) {
     case "hunk":
       return d().discardedHunk(e.paths[0] ?? "");
+    case "lines":
+      return d().discardedLines(e.paths[0] ?? "");
     case "restore":
       return d().discardedRestore(e.paths.length);
     case "list":
@@ -85,8 +87,8 @@ export function discardLabel(e: DiscardEntry): string {
 }
 
 /**
- * Run a discard (rollback, hunk revert) or a restore, and offer the way back.
- * Every caller of `fileRollback`, `listRollback`, `hunkRevert` goes through here.
+ * Run a discard (rollback, line or hunk revert) or a restore, and offer the way back.
+ * Every caller of `fileRollback`, `listRollback`, `linesRevert` goes through here.
  */
 export async function runDiscard(p: Promise<DiscardOutcome>, label = ""): Promise<void> {
   const repo = state()?.repoPath;
