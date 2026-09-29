@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::engine::cli::parse_refs;
+use crate::engine::cli::{literal, parse_refs};
 use crate::engine::exec;
 use crate::error::{Error, Result};
 use crate::model::{
@@ -52,7 +52,7 @@ fn s(v: &str) -> String {
 
 /// Configured remote names, so `origin/main` is told apart from a local branch
 /// that merely contains a slash (`feature/x`).
-fn remotes(repo: &Path) -> Result<Vec<String>> {
+pub(crate) fn remotes(repo: &Path) -> Result<Vec<String>> {
     Ok(git_text(repo, &[s("remote")])?
         .lines()
         .map(|l| l.trim().to_string())
@@ -188,8 +188,10 @@ fn filter_args(filter: &LogFilter) -> Vec<String> {
     }
     if !filter.paths.is_empty() {
         a.push(s("--"));
+        // `literal()`: a bare path after `--` is still a glob to git, and
+        // `x[ab].txt` from the file dialog would also select `xa.txt`.
         for p in &filter.paths {
-            a.push(p.clone());
+            a.push(literal(p));
         }
     }
     a
@@ -233,7 +235,7 @@ fn parse_rows(out: &str) -> Result<Vec<Row>> {
     Ok(rows)
 }
 
-fn short(hash: &str) -> String {
+pub(crate) fn short(hash: &str) -> String {
     hash.chars().take(7).collect()
 }
 
@@ -954,6 +956,26 @@ mod tests {
 
         assert!(page.next_cursor.is_none(), "3 commits under a limit of 10 end the log");
         assert!(!page.lane_overflow);
+    }
+
+    /// A path of the Paths filter is a name, not a pattern: `x[ab].txt` must not
+    /// pull in the commits of `xa.txt`. The values come from a file dialog, and a
+    /// Next.js route (`app/[id]/page.tsx`) is an ordinary thing to pick there.
+    /// A directory still selects every file under it.
+    #[test]
+    fn a_paths_filter_entry_is_matched_literally() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        commit(p, "x[ab].txt", "bracket\n", "the bracketed file");
+        commit(p, "xa.txt", "plain\n", "the plain file");
+        std::fs::create_dir_all(p.join("app/[id]")).unwrap();
+        commit(p, "app/[id]/page.tsx", "page\n", "a route");
+        let subjects = |paths: Vec<&str>| {
+            let f = LogFilter { paths: paths.into_iter().map(String::from).collect(), ..Default::default() };
+            page(p, &f, None, 20).unwrap().commits.into_iter().map(|c| c.subject).collect::<Vec<_>>()
+        };
+        assert_eq!(subjects(vec!["x[ab].txt"]), vec!["the bracketed file"]);
+        assert_eq!(subjects(vec!["app/[id]"]), vec!["a route"], "a directory entry covers the files under it");
     }
 
     /// The branch filter goes after every option, behind `--end-of-options`: a
