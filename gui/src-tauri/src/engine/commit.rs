@@ -77,7 +77,9 @@ fn file_state(code: &str) -> Result<FileState> {
 /// truncated stream would otherwise produce a shorter file list indistinguishable
 /// from a complete one — the commit would silently appear to have touched fewer
 /// files than it did.
-fn parse_name_status(raw: &str) -> Result<Vec<CommitFileEntry>> {
+///
+/// Also read by `CliEngine::commit_paths` for what a list has staged.
+pub(crate) fn parse_name_status(raw: &str) -> Result<Vec<CommitFileEntry>> {
     let toks = nul_fields(raw);
     let mut out = Vec::new();
     let mut i = 0;

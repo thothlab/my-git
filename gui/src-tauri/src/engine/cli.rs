@@ -1,12 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use super::commit::parse_name_status;
 use super::exec;
 use super::GitEngine;
 use crate::error::{Error, Result};
 use crate::model::{
-    BranchInfo, DiffLine, EditBlock, Eol, FileDiff, FileState, FileStatus, Hunk, RefKind, RefLabel,
-    RepoSnapshot, TextFile,
+    BranchInfo, CommitFileEntry, DiffLine, EditBlock, Eol, FileDiff, FileState, FileStatus, Hunk,
+    RefKind, RefLabel, RepoSnapshot, TextFile,
 };
 
 /// Largest working-tree file offered for in-place editing: 2 MiB. Craft, not a
@@ -15,6 +16,49 @@ use crate::model::{
 pub const EDIT_SIZE_CEILING: u64 = 2 * 1024 * 1024;
 
 pub(crate) static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A throwaway index file inside the git directory, removed (with its lock) on drop.
+/// The crate's only one: the discard backups build their trees in it, and a list
+/// commit builds its whole commit in it.
+///
+/// It must not exist when git first opens it: a missing index is an empty one, a
+/// zero-byte file is a corrupt one. The path comes from `rev-parse --git-path`, so a
+/// linked worktree gets its own.
+pub(crate) struct TempIndex(PathBuf);
+
+impl TempIndex {
+    pub(crate) fn new(repo: &Path, prefix: &str) -> Result<Self> {
+        let n = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let name = format!("{prefix}-{}-{n}-{nanos}.index", std::process::id());
+        let path = CliEngine::new(repo)
+            .git_paths(&[name.as_str()])?
+            .pop()
+            .ok_or_else(|| Error::Parse("rev-parse --git-path returned nothing".into()))?;
+        Ok(Self(path))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// The value for `GIT_INDEX_FILE`.
+    pub(crate) fn env_value(&self) -> String {
+        self.0.to_string_lossy().to_string()
+    }
+}
+
+impl Drop for TempIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        let mut lock = self.0.clone().into_os_string();
+        lock.push(".lock");
+        let _ = std::fs::remove_file(lock);
+    }
+}
 
 /// FNV-1a over raw bytes, rendered as sixteen hex digits. The crate's only
 /// implementation: `engine::log` fingerprints a filter's argument list with it and
@@ -749,7 +793,8 @@ impl CliEngine {
     /// forward), unstage (cached, reverse) and revert (worktree, reverse) — the index
     /// is touched only by the exact hunk, never by `git add -A`/`git add <dir>`
     /// (which would over-stage other lists; cf. commit staging discipline, Правка
-    /// `ad8c42e`).
+    /// `ad8c42e`). A hunk staged here is what [`CliEngine::commit_paths`] later
+    /// commits for that file — the index wins.
     pub fn apply_patch(&self, patch: &str, cached: bool, reverse: bool) -> Result<()> {
         let mut args = vec!["apply", "--whitespace=nowarn"];
         if cached {
@@ -765,6 +810,10 @@ impl CliEngine {
     /// are staged via `git rm`. Never `git add -A` or `git add <dir>` — both would
     /// sweep in other changelists' files or miss deletions (Правка `ad8c42e`; the
     /// `-A`/`<dir>` ban is about *unscoped* staging, exactly what this avoids).
+    ///
+    /// Whole files: a partly staged file loses its staged/unstaged split here. Only
+    /// the mid-operation fallback of [`CliEngine::commit_paths`] still commits
+    /// through it.
     pub fn stage_paths(&self, paths: &[String]) -> Result<()> {
         let (deleted, existing): (Vec<&String>, Vec<&String>) =
             paths.iter().partition(|p| !self.repo.join(p).exists());
@@ -783,18 +832,205 @@ impl CliEngine {
         Ok(())
     }
 
-    /// Commit exactly the given paths: stage only them, then commit the index. Other
-    /// changelists' files, being unstaged, stay out of the commit (AC#3).
+    /// Commit exactly the given paths, and nothing the user staged for anything else.
+    ///
+    /// **The index wins.** A path of the set with something staged goes into the
+    /// commit exactly as staged — a hunk staged with `hunk_stage` is the whole change
+    /// of that file in this commit, the unstaged rest stays in the working tree. A
+    /// path with nothing staged goes in whole from the working tree (deletion, new
+    /// file, mode, symlink — as `git add` records them). A path outside the set never
+    /// goes in, staged or not, and stays staged.
+    ///
+    /// The commit is made by `git commit` over a throwaway index ([`TempIndex`],
+    /// `GIT_INDEX_FILE`), so hooks, `commit.gpgsign`, identity, `--amend` and the
+    /// message cleanup are git's own, as before; hooks see the throwaway index. It
+    /// starts as HEAD — for `--amend` too: the amended commit keeps everything the
+    /// old HEAD changed, and git gives it the old HEAD's parents — and only the set's
+    /// paths are laid over it. The throwaway index starts as a *copy* of the user's
+    /// and is then reset to HEAD: `read-tree --reset` keeps the stat data of every
+    /// entry that matches, and without it `git commit`'s refresh would re-read every
+    /// file of the working tree. An unborn branch starts empty.
+    ///
+    /// Only after the commit landed is the user's index touched, and only at the
+    /// set's paths: they are reset to the new HEAD, which leaves the other lists'
+    /// staged changes where they were. A refused commit (hook, empty) leaves the
+    /// user's index byte for byte as it was.
+    ///
+    /// A staged rename (`git mv`) is one row in the snapshot, the new path; its
+    /// source's removal goes along, or the commit would hold a copy and the deletion
+    /// would stay staged. The pair is the snapshot's own: where status shows the two
+    /// sides as two rows, they are two changes and each goes with its own list.
+    ///
+    /// **While `MERGE_HEAD`, `CHERRY_PICK_HEAD` or `REVERT_HEAD` exists** the old
+    /// behaviour stays: stage the set whole and commit the whole index. `git commit`
+    /// reads those markers from the git directory whatever the index is — a merge
+    /// commit whose tree lacks the merged files outside the set would claim a merge
+    /// it does not contain, and a pick's commit would take the picked commit's
+    /// message and author for part of its change. Every other stop (a rebase on
+    /// `edit` / `break` / `exec`, a rebase conflict without those markers) makes an
+    /// ordinary commit, and goes the throwaway-index way like any other.
     pub fn commit_paths(&self, paths: &[String], message: &str, amend: bool) -> Result<()> {
         if message.trim().is_empty() {
             return Err(Error::Rule("commit message cannot be empty".into()));
         }
-        self.stage_paths(paths)?;
+        let markers = self.git_paths(&["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"])?;
+        if markers.iter().any(|m| m.exists()) {
+            self.stage_paths(paths)?;
+            return self.git_commit(message, amend, &[]);
+        }
+
+        let head = exec::git(&self.repo, &["rev-parse", "--verify", "--quiet", "HEAD"]).run()?;
+        let born = match head.code {
+            Some(0) => true,
+            Some(1) => false,
+            _ => return Err(head.fail_stderr()),
+        };
+
+        let index = TempIndex::new(&self.repo, "graft-commit")?;
+        let index_path = index.env_value();
+        let env = [("GIT_INDEX_FILE", index_path.as_str())];
+        if born {
+            let real = self
+                .git_paths(&["index"])?
+                .pop()
+                .ok_or_else(|| Error::Parse("rev-parse --git-path returned nothing".into()))?;
+            match std::fs::copy(&real, index.path()) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::Io(format!("copying the index: {e}"))),
+            }
+            exec::git(&self.repo, &["read-tree", "--reset", "HEAD"])
+                .env(&env)
+                .run()?
+                .checked()?;
+        }
+
+        // What the set has staged, file by file. `--no-renames`: scoped to the set, a
+        // rename's other side is outside the pathspec anyway. An unmerged path is no
+        // staged version — it goes in from the working tree, as `git add` would.
+        let specs: Vec<String> = paths.iter().map(|p| literal(p)).collect();
+        let mut args = vec![
+            "diff",
+            "--cached",
+            "--no-renames",
+            "--name-status",
+            "-z",
+            "--",
+        ];
+        args.extend(specs.iter().map(String::as_str));
+        let staged: Vec<CommitFileEntry> = parse_name_status(&self.git(&args)?)?
+            .into_iter()
+            .filter(|e| e.status != FileState::Conflicted)
+            .collect();
+        let mut from_index: Vec<String> = staged.iter().map(|e| e.path.clone()).collect();
+        let mut in_index: HashSet<String> = from_index.iter().cloned().collect();
+        let mut sources: Vec<String> = Vec::new();
+        if born && staged.iter().any(|e| e.status == FileState::Added) {
+            // The pairs the snapshot shows, not a rename detection of our own: with
+            // `status.renames` / `diff.renames` off, `git mv` is two rows that may sit
+            // in two lists, and the source's deletion is then another list's change.
+            for f in self.snapshot()?.files {
+                if let Some(old) = f.old_path {
+                    if in_index.contains(&f.path) && in_index.insert(old.clone()) {
+                        sources.push(old);
+                    }
+                }
+            }
+            from_index.extend(sources.iter().cloned());
+        }
+
+        // Nothing staged: the working-tree version, laid first so that a staged file
+        // under a folder of the set (`dir/`) is then overridden by its index entry.
+        let worktree: Vec<&String> = paths.iter().filter(|p| !in_index.contains(*p)).collect();
+        if !worktree.is_empty() {
+            let specs: Vec<String> = worktree.iter().map(|p| literal(p)).collect();
+            let mut args = vec!["add", "--"];
+            args.extend(specs.iter().map(String::as_str));
+            exec::git(&self.repo, &args).env(&env).run()?.checked()?;
+        }
+
+        if !from_index.is_empty() {
+            let specs: Vec<String> = from_index.iter().map(|p| literal(p)).collect();
+            let mut args = vec!["ls-files", "--stage", "-z", "--"];
+            args.extend(specs.iter().map(String::as_str));
+            let listed = self.git_bytes(&args)?;
+            let mut records = Vec::new();
+            let mut present: HashSet<String> = HashSet::new();
+            for rec in listed.split(|&b| b == 0).filter(|r| !r.is_empty()) {
+                let (meta, path) = rec
+                    .iter()
+                    .position(|&b| b == b'\t')
+                    .map(|i| (&rec[..i], &rec[i + 1..]))
+                    .ok_or_else(|| {
+                        Error::Parse(format!(
+                            "ls-files --stage record without a path: {:?}",
+                            String::from_utf8_lossy(rec)
+                        ))
+                    })?;
+                let path = String::from_utf8_lossy(path).to_string();
+                if !in_index.contains(&path) || !meta.ends_with(b" 0") {
+                    continue;
+                }
+                records.extend_from_slice(rec);
+                records.push(0);
+                present.insert(path);
+            }
+            if !records.is_empty() {
+                exec::git(&self.repo, &["update-index", "-z", "--index-info"])
+                    .env(&env)
+                    .input(&records)
+                    .run()?
+                    .checked()?;
+            }
+            // Staged as gone: `update-index` takes plain paths, not pathspecs.
+            let mut gone = Vec::new();
+            for p in from_index.iter().filter(|p| !present.contains(*p)) {
+                gone.extend_from_slice(p.as_bytes());
+                gone.push(0);
+            }
+            if !gone.is_empty() {
+                exec::git(
+                    &self.repo,
+                    &["update-index", "-z", "--force-remove", "--stdin"],
+                )
+                .env(&env)
+                .input(&gone)
+                .run()?
+                .checked()?;
+            }
+        }
+
+        self.git_commit(message, amend, &env)?;
+
+        // The set's paths in the user's index now match the new HEAD; every other
+        // entry, other lists' staged changes included, is left as it was.
+        let mut specs: Vec<String> = paths.iter().map(|p| literal(p)).collect();
+        specs.extend(sources.iter().map(|p| literal(p)));
+        let mut args = vec!["reset", "-q", "HEAD", "--"];
+        args.extend(specs.iter().map(String::as_str));
+        let out = exec::git(&self.repo, &args).run()?;
+        if !out.success() {
+            return Err(out.fail_with(format!(
+                "the commit was made, but the index of its files was not brought up to it: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(())
+    }
+
+    /// `git commit -m <message> [--amend]`, with `env` (the throwaway index, or none).
+    ///
+    /// A refusal carries **both** streams: "nothing to commit" and the status around
+    /// it are printed on stdout, and stderr alone left the banner without a reason.
+    fn git_commit(&self, message: &str, amend: bool, env: &[(&str, &str)]) -> Result<()> {
         let mut args = vec!["commit", "-m", message];
         if amend {
             args.push("--amend");
         }
-        self.git(&args)?;
+        exec::git(&self.repo, &args)
+            .env(env)
+            .run()?
+            .checked_both()?;
         Ok(())
     }
 
@@ -2112,6 +2348,429 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(count(p), before, "amend does not add a commit");
         assert!(head_files(p).contains("a.txt"));
+    }
+
+    // ---- commit_paths: the index wins, other lists stay out ----
+
+    /// `git -C dir <args>` stdout as text; panics on failure.
+    fn out(dir: &Path, args: &[&str]) -> String {
+        let o = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            o.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8_lossy(&o.stdout).to_string()
+    }
+
+    /// `git show <spec>` — `HEAD:x` for the commit, `:x` for the index.
+    fn blob(dir: &Path, spec: &str) -> String {
+        out(dir, &["show", spec])
+    }
+
+    fn staged_names(dir: &Path) -> String {
+        out(dir, &["diff", "--cached", "--name-only"])
+    }
+
+    fn unstaged_names(dir: &Path) -> String {
+        out(dir, &["diff", "--name-only"])
+    }
+
+    /// A file of another list, staged whole, is neither committed with this list nor
+    /// knocked out of the index by it.
+    #[test]
+    fn commit_leaves_another_lists_staged_file_out_and_staged() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("b.txt"), "b0\n").unwrap();
+        run(p, &["add", "b.txt"]);
+        run(p, &["commit", "-m", "b"]);
+        std::fs::write(p.join("a.txt"), "A\n").unwrap();
+        std::fs::write(p.join("b.txt"), "B staged\n").unwrap();
+        run(p, &["add", "b.txt"]);
+
+        CliEngine::new(p)
+            .commit_paths(&["a.txt".to_string()], "commit a", false)
+            .unwrap();
+
+        assert_eq!(blob(p, "HEAD:a.txt"), "A\n");
+        assert_eq!(
+            blob(p, "HEAD:b.txt"),
+            "b0\n",
+            "b.txt must stay out of the commit"
+        );
+        assert_eq!(
+            staged_names(p),
+            "b.txt\n",
+            "b.txt is still staged, a.txt is not"
+        );
+        assert_eq!(blob(p, ":b.txt"), "B staged\n");
+        assert_eq!(unstaged_names(p), "");
+    }
+
+    /// A partly staged file of the list commits exactly its staged part; the rest
+    /// stays in the working tree, unstaged.
+    #[test]
+    fn commit_takes_only_the_staged_part_of_a_partly_staged_file() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "one\nstaged\n").unwrap();
+        run(p, &["add", "a.txt"]);
+        std::fs::write(p.join("a.txt"), "one\nstaged\nnot staged\n").unwrap();
+
+        CliEngine::new(p)
+            .commit_paths(&["a.txt".to_string()], "commit a", false)
+            .unwrap();
+
+        assert_eq!(blob(p, "HEAD:a.txt"), "one\nstaged\n");
+        assert_eq!(
+            std::fs::read_to_string(p.join("a.txt")).unwrap(),
+            "one\nstaged\nnot staged\n"
+        );
+        assert_eq!(
+            staged_names(p),
+            "",
+            "the index of a.txt matches the new HEAD"
+        );
+        assert_eq!(unstaged_names(p), "a.txt\n", "the rest is left unstaged");
+    }
+
+    /// A file with nothing staged goes in whole, from the working tree — and the
+    /// index of the committed path ends up at the new HEAD.
+    #[test]
+    fn commit_takes_an_unstaged_file_whole() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "one\ntwo\n").unwrap();
+
+        CliEngine::new(p)
+            .commit_paths(&["a.txt".to_string()], "commit a", false)
+            .unwrap();
+
+        assert_eq!(blob(p, "HEAD:a.txt"), "one\ntwo\n");
+        assert_eq!(staged_names(p), "");
+        assert_eq!(unstaged_names(p), "");
+    }
+
+    /// A deletion, a new untracked file and a staged new file of the list, together;
+    /// another list's staged deletion stays staged and out.
+    #[test]
+    fn commit_carries_deletions_and_new_files_of_the_list_only() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("keep.txt"), "keep\n").unwrap();
+        run(p, &["add", "keep.txt"]);
+        run(p, &["commit", "-m", "keep"]);
+        std::fs::remove_file(p.join("a.txt")).unwrap();
+        std::fs::write(p.join("new.txt"), "new\n").unwrap();
+        std::fs::write(p.join("added.txt"), "added\n").unwrap();
+        run(p, &["add", "added.txt"]);
+        run(p, &["rm", "-q", "keep.txt"]); // another list's staged deletion
+
+        let set = ["a.txt", "new.txt", "added.txt"].map(String::from);
+        CliEngine::new(p)
+            .commit_paths(&set, "mixed", false)
+            .unwrap();
+
+        let files = head_files(p);
+        assert!(files.contains("D\ta.txt"), "{files}");
+        assert!(files.contains("A\tnew.txt"), "{files}");
+        assert!(files.contains("A\tadded.txt"), "{files}");
+        assert!(!files.contains("keep.txt"), "{files}");
+        assert_eq!(blob(p, "HEAD:keep.txt"), "keep\n");
+        assert_eq!(
+            staged_names(p),
+            "keep.txt\n",
+            "the other list's deletion stays staged"
+        );
+    }
+
+    /// A new symlink whose target does not exist is a file to commit, not a deletion:
+    /// `Path::exists` follows the link and would call it gone.
+    #[cfg(unix)]
+    #[test]
+    fn commit_takes_a_dangling_symlink_as_a_link() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::os::unix::fs::symlink("nowhere", p.join("link")).unwrap();
+
+        CliEngine::new(p)
+            .commit_paths(&["link".to_string()], "link", false)
+            .unwrap();
+
+        let tree = out(p, &["ls-tree", "HEAD", "--", "link"]);
+        assert!(tree.starts_with("120000 "), "{tree}");
+        assert_eq!(blob(p, "HEAD:link"), "nowhere");
+    }
+
+    /// Amend folds the list into HEAD: same parent, HEAD's own other changes kept,
+    /// another list's staged file still out and still staged.
+    #[test]
+    fn amend_keeps_heads_changes_and_leaves_other_lists_out() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("b.txt"), "b0\n").unwrap();
+        run(p, &["add", "b.txt"]);
+        run(p, &["commit", "-m", "b"]);
+        std::fs::write(p.join("c.txt"), "c\n").unwrap();
+        run(p, &["add", "c.txt"]);
+        run(p, &["commit", "-m", "c"]);
+        let parent = out(p, &["rev-parse", "HEAD~1"]);
+        std::fs::write(p.join("a.txt"), "amended\n").unwrap();
+        std::fs::write(p.join("b.txt"), "B staged\n").unwrap();
+        run(p, &["add", "b.txt"]);
+
+        CliEngine::new(p)
+            .commit_paths(&["a.txt".to_string()], "c and a", true)
+            .unwrap();
+
+        assert_eq!(out(p, &["rev-parse", "HEAD~1"]), parent, "same parent");
+        assert_eq!(out(p, &["log", "-1", "--format=%s"]), "c and a\n");
+        assert_eq!(blob(p, "HEAD:c.txt"), "c\n", "HEAD's own change survives");
+        assert_eq!(blob(p, "HEAD:a.txt"), "amended\n");
+        assert_eq!(blob(p, "HEAD:b.txt"), "b0\n");
+        assert_eq!(staged_names(p), "b.txt\n");
+    }
+
+    /// A pre-commit hook that refuses still stops the commit, and the user's index —
+    /// a partly staged file of the list and another list's staged file — is as it was.
+    #[cfg(unix)]
+    #[test]
+    fn refused_by_a_hook_the_commit_leaves_the_index_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("b.txt"), "b0\n").unwrap();
+        run(p, &["add", "b.txt"]);
+        run(p, &["commit", "-m", "b"]);
+        std::fs::write(p.join("a.txt"), "one\nstaged\n").unwrap();
+        run(p, &["add", "a.txt"]);
+        std::fs::write(p.join("a.txt"), "one\nstaged\nnot staged\n").unwrap();
+        std::fs::write(p.join("b.txt"), "B staged\n").unwrap();
+        run(p, &["add", "b.txt"]);
+        let hooks = PathBuf::from(out(p, &["rev-parse", "--git-path", "hooks"]).trim());
+        let hooks = if hooks.is_absolute() {
+            hooks
+        } else {
+            p.join(hooks)
+        };
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\necho no >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let head = out(p, &["rev-parse", "HEAD"]);
+        let index = out(p, &["ls-files", "-s"]);
+
+        let r = CliEngine::new(p).commit_paths(&["a.txt".to_string()], "nope", false);
+
+        assert!(r.is_err(), "the hook refused");
+        assert_eq!(out(p, &["rev-parse", "HEAD"]), head, "no commit was made");
+        assert_eq!(out(p, &["ls-files", "-s"]), index, "the index is untouched");
+        assert_eq!(blob(p, ":a.txt"), "one\nstaged\n");
+    }
+
+    /// The first commit of an unborn branch: only the list goes in, another list's
+    /// staged new file stays staged.
+    #[test]
+    fn first_commit_on_an_unborn_branch_takes_the_list_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        run(p, &["init", "-b", "main"]);
+        run(p, &["config", "user.email", "t@example.com"]);
+        run(p, &["config", "user.name", "Test"]);
+        run(p, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(p.join("a.txt"), "a\n").unwrap();
+        std::fs::write(p.join("b.txt"), "b\n").unwrap();
+        run(p, &["add", "b.txt"]);
+
+        CliEngine::new(p)
+            .commit_paths(&["a.txt".to_string()], "first", false)
+            .unwrap();
+
+        assert_eq!(out(p, &["ls-tree", "--name-only", "HEAD"]), "a.txt\n");
+        assert_eq!(staged_names(p), "b.txt\n");
+        assert_eq!(unstaged_names(p), "");
+    }
+
+    /// A staged `git mv` shows as one row, the new path; committing that path takes
+    /// the source's removal along, or the commit would be a copy and the deletion
+    /// would stay staged.
+    #[test]
+    fn commit_of_a_staged_rename_takes_its_source_along() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        run(p, &["mv", "a.txt", "r.txt"]);
+
+        CliEngine::new(p)
+            .commit_paths(&["r.txt".to_string()], "rename", false)
+            .unwrap();
+
+        assert_eq!(out(p, &["ls-tree", "--name-only", "HEAD"]), "r.txt\n");
+        assert_eq!(staged_names(p), "");
+    }
+
+    /// With rename detection off, status shows a `git mv` as two rows — a deletion
+    /// and a new file that may sit in two lists. The new path's list takes only the
+    /// new file; the deletion stays staged for its own list.
+    #[test]
+    fn with_status_renames_off_the_source_stays_with_its_own_list() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        run(p, &["config", "status.renames", "false"]);
+        run(p, &["mv", "a.txt", "r.txt"]);
+
+        CliEngine::new(p)
+            .commit_paths(&["r.txt".to_string()], "new side only", false)
+            .unwrap();
+
+        assert_eq!(
+            out(p, &["ls-tree", "--name-only", "HEAD"]),
+            "a.txt\nr.txt\n"
+        );
+        assert_eq!(staged_names(p), "a.txt\n", "the deletion stays staged");
+    }
+
+    /// `git status` reports an untracked folder as one entry, `d/`; the list commits
+    /// its files, and another list's staged file stays out.
+    #[test]
+    fn commit_of_an_untracked_folder_entry_takes_its_files() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join("d/e")).unwrap();
+        std::fs::write(p.join("d/x.txt"), "x\n").unwrap();
+        std::fs::write(p.join("d/e/y.txt"), "y\n").unwrap();
+        std::fs::write(p.join("a.txt"), "staged\n").unwrap();
+        run(p, &["add", "a.txt"]);
+
+        CliEngine::new(p)
+            .commit_paths(&["d/".to_string()], "folder", false)
+            .unwrap();
+
+        assert_eq!(
+            out(p, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            "a.txt\nd/e/y.txt\nd/x.txt\n"
+        );
+        assert_eq!(blob(p, "HEAD:a.txt"), "one\n");
+        assert_eq!(staged_names(p), "a.txt\n");
+    }
+
+    /// A conflict with no operation in progress (a `stash pop` that collided): the
+    /// resolved file goes in from the working tree and its index entry is resolved.
+    #[test]
+    fn commit_of_an_unmerged_path_takes_the_resolution() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "stashed\n").unwrap();
+        run(p, &["stash", "push", "-q"]);
+        std::fs::write(p.join("a.txt"), "committed\n").unwrap();
+        run(p, &["commit", "-q", "-am", "moved on"]);
+        let pop = Command::new("git")
+            .arg("-C")
+            .arg(p)
+            .args(["stash", "pop", "-q"])
+            .output()
+            .unwrap();
+        assert!(!pop.status.success(), "the pop must conflict");
+        assert!(out(p, &["ls-files", "-u"]).contains("a.txt"));
+        std::fs::write(p.join("a.txt"), "resolved\n").unwrap();
+
+        CliEngine::new(p)
+            .commit_paths(&["a.txt".to_string()], "resolve", false)
+            .unwrap();
+
+        assert_eq!(blob(p, "HEAD:a.txt"), "resolved\n");
+        assert_eq!(out(p, &["ls-files", "-u"]), "", "no longer unmerged");
+        assert_eq!(staged_names(p), "");
+    }
+
+    /// A rebase stopped on `edit` has no `MERGE_HEAD` / `CHERRY_PICK_HEAD` /
+    /// `REVERT_HEAD`: `git commit` there is an ordinary commit, and the list commit
+    /// keeps the other list's staged file out, as anywhere else.
+    #[test]
+    fn during_a_rebase_stop_the_list_commit_leaves_other_lists_out() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("b.txt"), "b0\n").unwrap();
+        run(p, &["add", "b.txt"]);
+        run(p, &["commit", "-m", "b"]);
+        let stop = Command::new("git")
+            .arg("-C")
+            .arg(p)
+            .args(["rebase", "-i", "HEAD~1"])
+            .env("GIT_SEQUENCE_EDITOR", "sed -i.bak s/^pick/edit/")
+            .output()
+            .unwrap();
+        assert!(
+            stop.status.success(),
+            "{}",
+            String::from_utf8_lossy(&stop.stderr)
+        );
+        let rebase_dir = p.join(out(p, &["rev-parse", "--git-path", "rebase-merge"]).trim());
+        assert!(rebase_dir.exists(), "the rebase is stopped");
+        std::fs::write(p.join("a.txt"), "A\n").unwrap();
+        std::fs::write(p.join("b.txt"), "B staged\n").unwrap();
+        run(p, &["add", "b.txt"]);
+
+        CliEngine::new(p)
+            .commit_paths(&["a.txt".to_string()], "during edit", false)
+            .unwrap();
+
+        assert_eq!(blob(p, "HEAD:a.txt"), "A\n");
+        assert_eq!(blob(p, "HEAD:b.txt"), "b0\n", "b.txt stays out");
+        assert_eq!(staged_names(p), "b.txt\n", "b.txt is still staged");
+        assert!(rebase_dir.exists(), "the rebase is still stopped");
+    }
+
+    /// "Nothing to commit" is printed on stdout; the error carries both streams, so
+    /// the banner has a reason to show.
+    #[test]
+    fn nothing_to_commit_says_why() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        match CliEngine::new(p).commit_paths(&["a.txt".to_string()], "empty", false) {
+            Err(Error::Git { stderr, .. }) => {
+                assert!(stderr.contains("nothing to commit"), "{stderr:?}")
+            }
+            other => panic!("expected a git refusal, got {other:?}"),
+        }
+    }
+
+    /// Mid-merge the commit concludes the merge, and a merge commit must hold the
+    /// whole merge result — so the list commit falls back to committing the index.
+    #[test]
+    fn during_a_merge_the_commit_takes_the_whole_index() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        run(p, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(p.join("x.txt"), "x\n").unwrap();
+        run(p, &["add", "x.txt"]);
+        run(p, &["commit", "-m", "x"]);
+        run(p, &["checkout", "-q", "main"]);
+        run(p, &["merge", "--no-commit", "--no-ff", "side"]);
+        std::fs::write(p.join("a.txt"), "A\n").unwrap();
+
+        CliEngine::new(p)
+            .commit_paths(&["a.txt".to_string()], "merge side", false)
+            .unwrap();
+
+        assert_eq!(
+            out(p, &["rev-list", "--parents", "-1", "HEAD"])
+                .split(' ')
+                .count(),
+            3
+        );
+        assert_eq!(
+            blob(p, "HEAD:x.txt"),
+            "x\n",
+            "the merged file is in the merge commit"
+        );
+        assert_eq!(blob(p, "HEAD:a.txt"), "A\n");
     }
 
     #[test]

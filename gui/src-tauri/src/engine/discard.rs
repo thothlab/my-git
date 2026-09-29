@@ -51,7 +51,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::cli::{CliEngine, TMP_COUNTER};
+use super::cli::{CliEngine, TempIndex, TMP_COUNTER};
 use super::exec;
 use crate::error::{Error, Result};
 use crate::model::{DiscardEntry, DiscardKind};
@@ -245,39 +245,10 @@ fn read_paths(
 
 // ── writing the chain ───────────────────────────────────────────────────────
 
-/// A throwaway index file, removed on drop. It must not exist when git first opens
-/// it: a missing index is an empty one, a zero-byte file is a corrupt one.
-struct TempIndex(PathBuf);
-
-impl TempIndex {
-    fn new(repo: &Path) -> Result<Self> {
-        let n = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let name = format!("graft-discard-{}-{n}-{nanos}.index", std::process::id());
-        let path = CliEngine::new(repo)
-            .git_paths(&[name.as_str()])?
-            .pop()
-            .ok_or_else(|| Error::Parse("rev-parse --git-path returned nothing".into()))?;
-        Ok(Self(path))
-    }
-}
-
-impl Drop for TempIndex {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-        let mut lock = self.0.clone().into_os_string();
-        lock.push(".lock");
-        let _ = std::fs::remove_file(lock);
-    }
-}
-
 /// The tree of the present entries, built in a throwaway index.
 fn write_tree(repo: &Path, entries: &[(String, Entry)]) -> Result<String> {
-    let index = TempIndex::new(repo)?;
-    let index_path = index.0.to_string_lossy().to_string();
+    let index = TempIndex::new(repo, "graft-discard")?;
+    let index_path = index.env_value();
     let env = [("GIT_INDEX_FILE", index_path.as_str())];
     let mut records = Vec::new();
     for (path, e) in entries {
