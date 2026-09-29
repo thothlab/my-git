@@ -27,8 +27,8 @@
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
 | `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, разбор и печать команды консоли), 176 утверждений |
-| `cargo test` | Оба крейта разом: 248 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 248 тестов |
+| `cargo test` | Оба крейта разом: 249 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 249 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -668,6 +668,9 @@ Git вызывается только как внешний процесс. `gix
   (`is_tracked`; intent-to-add в индексе и имеет свой дифф). `selection_patch` на пустом диффе —
   `Error::Rule`. Тест прежней задачи, закреплявший подмену как «прежнее поведение `none`»,
   перевёрнут.
+- Бинарность в `parse_diff` судится по строке-маркеру **заголовка** (`Binary files …` /
+  `GIT binary patch` до первого `@@`), а не по тексту где угодно в диффе: изменённая строка с
+  такими словами прятала текстовый дифф за «бинарный файл».
 - `--no-textconv` в `raw_diff` меняет и то, что видно в Changes: файл с textconv-драйвером
   показывается как есть (часто — бинарным), потому что превращённый дифф не применяется.
 

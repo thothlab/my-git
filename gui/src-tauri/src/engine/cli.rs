@@ -1224,7 +1224,13 @@ impl CliEngine {
 /// diff, and a second parser would be a second set of edge cases (binary files,
 /// renames, "\ No newline") drifting away from this one.
 pub(crate) fn parse_diff(path: &str, raw: &str) -> FileDiff {
-    if raw.contains("Binary files ") || raw.contains("GIT binary patch") {
+    // The marker is a header line git writes, not text anywhere in the diff: a
+    // changed line reading "Binary files a/x and b/x differ" is a line.
+    let binary = raw
+        .lines()
+        .take_while(|l| !l.starts_with("@@"))
+        .any(|l| l.starts_with("Binary files ") || l == "GIT binary patch");
+    if binary {
         return FileDiff {
             path: path.into(),
             binary: true,
@@ -2401,6 +2407,29 @@ pub(crate) mod tests {
         std::fs::write(p.join("u.txt"), "u\n").unwrap();
         let u = eng.diff_file("u.txt", "worktree", "none", None).unwrap();
         assert_eq!(u.hunks.len(), 1);
+    }
+
+    /// A text file whose lines say "Binary files ..." is still a text diff: the
+    /// marker counts only where git writes it, in the file header.
+    #[test]
+    fn a_line_that_reads_like_the_binary_marker_is_just_a_line() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "Binary files a/x and b/x differ\n").unwrap();
+        let d = CliEngine::new(p)
+            .diff_file("a.txt", "worktree", "none", None)
+            .unwrap();
+        assert!(!d.binary);
+        assert_eq!(d.hunks.len(), 1);
+
+        std::fs::write(p.join("b.bin"), [0u8, 1, 2, 0, 255]).unwrap();
+        run(p, &["add", "b.bin"]);
+        run(p, &["commit", "-q", "-m", "bin"]);
+        std::fs::write(p.join("b.bin"), [0u8, 9, 9, 0, 255]).unwrap();
+        let b = CliEngine::new(p)
+            .diff_file("b.bin", "worktree", "none", None)
+            .unwrap();
+        assert!(b.binary, "a real binary diff is still binary");
     }
 
     /// Two hunks; the first grows by one line, so the second one's written side
