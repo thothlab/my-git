@@ -132,6 +132,35 @@ fn undo(deepest: &Path, created: &Option<PathBuf>) {
     }
 }
 
+/// Remove a file or link; one already gone is fine, any other failure is reported.
+fn remove_existing(abs: &Path, rel: &str) -> Result<()> {
+    match std::fs::remove_file(abs) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(Error::Io(format!("{rel}: {e}")))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Remove every folder under `dir` (and `dir` itself) left empty, deepest first.
+/// A folder that still holds something — an ignored file — stays; links are not
+/// followed. Returns whether `dir` was removed.
+fn prune_empty_dirs(dir: &Path, rel: &str) -> Result<bool> {
+    let io = |e: std::io::Error| Error::Io(format!("{rel}: {e}"));
+    let mut empty = true;
+    for entry in std::fs::read_dir(dir).map_err(io)? {
+        let entry = entry.map_err(io)?;
+        let is_dir = entry.file_type().map_err(io)?.is_dir();
+        if !(is_dir && prune_empty_dirs(&entry.path(), rel)?) {
+            empty = false;
+        }
+    }
+    if empty {
+        std::fs::remove_dir(dir).map_err(io)?;
+    }
+    Ok(empty)
+}
+
 /// git backend implemented by shelling out to the system `git`.
 pub struct CliEngine {
     repo: PathBuf,
@@ -247,17 +276,58 @@ impl CliEngine {
     /// that exists in HEAD is checked out from it; an added/new file (absent from
     /// HEAD) is unstaged and removed from disk. Callers confirm on the UI first —
     /// this is destructive.
+    ///
+    /// An untracked folder arrives as one entry, `dir/` — `git status` collapses it that
+    /// way — and is removed file by file: the untracked files under it (the same list
+    /// the discard backup takes, [`Self::untracked_under`]), then every folder left
+    /// empty, from the bottom up. Ignored files stay, and so do the folders holding them.
     pub fn rollback(&self, paths: &[String]) -> Result<()> {
         for p in paths {
             let in_head = self.git(&["cat-file", "-e", &format!("HEAD:{p}")]).is_ok();
             let spec = literal(p);
             if in_head {
                 self.git(&["checkout", "HEAD", "--", &spec])?;
-            } else {
-                let _ = self.git(&["rm", "-f", "--", &spec]); // unstage if it was `git add`ed
-                let _ = std::fs::remove_file(self.repo.join(p));
+                continue;
+            }
+            // Unstage it if it was `git add`ed. Fails, harmlessly, for a path git does
+            // not have in the index — an untracked file or folder.
+            let _ = self.git(&["rm", "-f", "--", &spec]);
+            let abs = self.repo.join(p);
+            match std::fs::symlink_metadata(&abs) {
+                Ok(meta) if meta.is_dir() => self.remove_untracked_dir(p, &abs)?,
+                Ok(_) => remove_existing(&abs, p)?,
+                // `git rm -f` already took it off the disk.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::Io(format!("{p}: {e}"))),
             }
         }
+        Ok(())
+    }
+
+    /// Untracked files under the folder `rel`, as `git status` would list them: ignored
+    /// ones left out. Paths relative to the root.
+    pub(crate) fn untracked_under(&self, rel: &str) -> Result<Vec<String>> {
+        let dir = format!("{}/", rel.trim_end_matches('/'));
+        let out = self.git_bytes(&[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            &literal(&dir),
+        ])?;
+        Ok(String::from_utf8_lossy(&out)
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    fn remove_untracked_dir(&self, rel: &str, abs: &Path) -> Result<()> {
+        for f in self.untracked_under(rel)? {
+            remove_existing(&self.repo.join(&f), &f)?;
+        }
+        prune_empty_dirs(abs, rel)?;
         Ok(())
     }
 
@@ -1839,6 +1909,47 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "one\n");
         assert!(!p.join("added.txt").exists());
         assert!(eng.snapshot().unwrap().files.is_empty(), "tree is clean again");
+    }
+
+    /// `git status` without `-uall` reports an untracked folder as one entry, `d/`, and
+    /// that entry is a row of the Unversioned list with a checkbox and "Revert to HEAD" —
+    /// so the rollback receives it. It used to return Ok and leave every file in place:
+    /// `rm -f` of a path not in the index fails, `remove_file` refuses a folder, and both
+    /// errors were swallowed.
+    #[test]
+    fn rolling_back_an_untracked_folder_removes_its_files() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join(".gitignore"), "*.log\n").unwrap();
+        run(p, &["add", ".gitignore"]);
+        run(p, &["commit", "-m", "ignore logs"]);
+        std::fs::create_dir_all(p.join("d/e/empty")).unwrap();
+        std::fs::write(p.join("d/one.txt"), "1\n").unwrap();
+        std::fs::write(p.join("d/e/two.txt"), "2\n").unwrap();
+        std::fs::create_dir_all(p.join("k/sub")).unwrap();
+        std::fs::write(p.join("k/sub/new.txt"), "n\n").unwrap();
+        std::fs::write(p.join("k/keep.log"), "ignored\n").unwrap();
+
+        let eng = CliEngine::new(p);
+        let untracked: Vec<String> = eng
+            .snapshot()
+            .unwrap()
+            .files
+            .into_iter()
+            .filter(|f| f.status == FileState::Untracked)
+            .map(|f| f.path)
+            .collect();
+        assert_eq!(untracked, vec!["d/".to_string(), "k/".to_string()], "what the UI is handed");
+
+        eng.rollback(&untracked).unwrap();
+        assert!(!p.join("d").exists(), "files and the emptied folders are gone");
+        assert_eq!(
+            std::fs::read_to_string(p.join("k/keep.log")).unwrap(),
+            "ignored\n",
+            "an ignored file is not the rollback's to delete"
+        );
+        assert!(!p.join("k/sub").exists(), "its emptied subfolder is");
+        assert!(eng.snapshot().unwrap().files.is_empty());
     }
 
     /// A name with glob characters (`app/[id]/page.tsx` in Next.js) names that file

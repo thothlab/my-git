@@ -51,7 +51,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::cli::{literal, CliEngine, TMP_COUNTER};
+use super::cli::{CliEngine, TMP_COUNTER};
 use super::exec;
 use crate::error::{Error, Result};
 use crate::model::{DiscardEntry, DiscardKind};
@@ -143,29 +143,6 @@ fn file_mode(meta: &std::fs::Metadata) -> &'static str {
     MODE_FILE
 }
 
-/// Untracked files under a directory entry, as `git status` would list them.
-fn untracked_under(repo: &Path, rel: &str) -> Result<Vec<String>> {
-    let dir = format!("{}/", rel.trim_end_matches('/'));
-    let out = exec::git(
-        repo,
-        &[
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-            "--",
-            &literal(&dir),
-        ],
-    )
-    .run()?
-    .checked()?;
-    Ok(String::from_utf8_lossy(&out)
-        .split('\0')
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect())
-}
-
 /// Read `paths` from the working tree: absence, or content id and mode.
 ///
 /// `write` stores the blobs (a backup); without it they are only hashed (the
@@ -221,7 +198,7 @@ fn read_paths(
         } else if meta.is_dir() {
             if expand {
                 // Pushed in reverse so they are read in the order git listed them.
-                let mut inner = untracked_under(repo, &rel)?;
+                let mut inner = eng.untracked_under(&rel)?;
                 inner.reverse();
                 queue.extend(inner);
             } else {
