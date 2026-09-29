@@ -27,8 +27,8 @@
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
 | `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, разбор и печать команды консоли), 176 утверждений |
-| `cargo test` | Оба крейта разом: 258 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 258 тестов |
+| `cargo test` | Оба крейта разом: 259 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 259 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -718,10 +718,13 @@ Git вызывается только как внешний процесс. `gix
 - В формате `log --name-status` разделитель записи **ведущий** (`%x01` в начале): статус
   идёт после формата, и хвостовой `%x01`, как у `engine::log::FORMAT`, отдал бы статус
   коммита N записи N+1.
-- `FileStatus` (файлы changelist'ов) сериализуется в `snake_case` (`old_path`), а `api.ts`
-  описывает его как `oldPath` — на фронте поле всегда `undefined`. Меню «История файла» в
-  Changes для подготовленного переименования берёт `oldPath ?? path`, то есть пока — новый
-  путь (пустая история). Не чинено: вне задачи.
+- **`FileStatus` уходил на границу в `snake_case`** (`old_path`), а `api.ts` читает `oldPath`
+  — на фронте поле было всегда `undefined`, и «История файла» у подготовленного
+  переименования в Changes открывалась по новому имени, которого в HEAD нет: пустая история.
+  Теперь camelCase, как у всех типов границы; имя поля держит тест
+  `a_changelist_file_crosses_the_boundary_in_camel_case` в `model.rs`. Тип, который едет на
+  фронт, без `rename_all = "camelCase"` — ошибка: однословные поля совпадут, многословные
+  молча станут `undefined`.
 - `--no-textconv` в `raw_diff` меняет и то, что видно в Changes: файл с textconv-драйвером
   показывается как есть (часто — бинарным), потому что превращённый дифф не применяется.
 

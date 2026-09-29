@@ -15,7 +15,7 @@ pub enum FileState {
 
 /// A changed file with its status and index/worktree staging flags.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "camelCase")]
 pub struct FileStatus {
     pub path: String,
     pub status: FileState,
@@ -606,5 +606,38 @@ mod tests {
         assert!(matches!(&v[1].lines, LinePick::Lines(l) if l == &[1, 3]));
         assert_eq!(v[1].hunk, 2);
         assert!(serde_json::from_str::<Vec<HunkPick>>(r#"[{"hunk":0,"lines":"some"}]"#).is_err());
+    }
+
+    /// A file of a changelist reaches `api.ts` as `FileStatus` — camelCase like
+    /// every boundary type. In snake_case `old_path` arrived where the client reads
+    /// `oldPath`, and a staged rename lost its old name on the way: the file
+    /// history opened from Changes asked for the new name, which HEAD has never seen.
+    #[test]
+    fn a_changelist_file_crosses_the_boundary_in_camel_case() {
+        let view = ChangelistView {
+            id: "default".into(),
+            name: "Changes".into(),
+            comment: String::new(),
+            is_default: true,
+            is_unversioned: false,
+            is_ignored: false,
+            files: vec![FileStatus {
+                path: "new.txt".into(),
+                status: FileState::Renamed,
+                old_path: Some("old.txt".into()),
+                staged: true,
+                unstaged: false,
+            }],
+        };
+        let json = serde_json::to_value(&view).unwrap();
+        let file = &json["files"][0];
+        assert_eq!(file["oldPath"], "old.txt", "the name api.ts reads: {file}");
+        assert!(file.get("old_path").is_none(), "no snake_case twin: {file}");
+        for key in ["path", "status", "staged", "unstaged"] {
+            assert!(file.get(key).is_some(), "{key} missing: {file}");
+        }
+        // no old name — the key is simply absent, which api.ts types as optional
+        let plain = FileStatus { old_path: None, ..view.files[0].clone() };
+        assert!(serde_json::to_value(&plain).unwrap().get("oldPath").is_none());
     }
 }
