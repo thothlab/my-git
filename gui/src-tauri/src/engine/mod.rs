@@ -1,6 +1,7 @@
 use crate::error::Result;
 use crate::model::RepoSnapshot;
 
+pub mod blame;
 pub mod branches;
 pub mod cli;
 pub mod commit;

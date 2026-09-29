@@ -48,7 +48,8 @@ import {
 } from "../store";
 import { d } from "../i18n";
 import { openStashPanel, reloadStashes, stashCount } from "./StashPanel";
-import { openFileHistory } from "./FileHistoryPanel";
+import { changeOf, historyPathOf, openFileHistory } from "./FileHistoryPanel";
+import { openBlame } from "./blame/BlamePanel";
 
 // Which paths a drag carries: the checked set if the dragged row is part of it,
 // otherwise just that one file.
@@ -442,6 +443,19 @@ function ContextMenu() {
                       openFileHistory(historyPathOf(path()));
                     }}
                   />
+                  {/* R05b: the file as it is on disk, uncommitted lines marked. An
+                      untracked file has no history to blame; a deleted one is
+                      blamed as HEAD has it. */}
+                  <Show when={changeOf(path())?.status !== "untracked"}>
+                    <MenuItem
+                      label={d().blameItem()}
+                      onClick={() => {
+                        setMenu(null);
+                        const deleted = changeOf(path())?.status === "deleted";
+                        openBlame(path(), deleted ? "HEAD" : null);
+                      }}
+                    />
+                  </Show>
                 </Show>
                 <Divider />
                 <MenuItem
@@ -507,12 +521,7 @@ function ContextMenu() {
  * yet: under the new name the history would be empty, under the old one it is
  * the file's history.
  */
-function historyPathOf(path: string): string {
-  const f = (state()?.changelists ?? [])
-    .flatMap((cl) => cl.files)
-    .find((x) => x.path === path);
-  return f?.status === "renamed" && f.oldPath ? f.oldPath : path;
-}
+
 
 function MenuItem(props: { label: string; danger?: boolean; onClick: () => void }) {
   return (

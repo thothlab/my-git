@@ -11,7 +11,10 @@
  *     trees (Changes panel and commit details), which used to be two copies
  *     that had already drifted apart;
  *   - `src/components/diff/lineSelection.ts` - which diff lines are chosen for
- *     stage / unstage / revert, and that a choice belongs to one diff.
+ *     stage / unstage / revert, and that a choice belongs to one diff;
+ *   - `src/components/blame/blameRules.ts` - runs of one commit in the blame
+ *     gutter, age shades, whether a line can be blamed further back, the width
+ *     of the text column and where "blame before" lands.
  *
  * Run it:  node scripts/check-log-filters.mjs      (from `gui/`)
  * Another time zone:  TZ=America/Los_Angeles node scripts/check-log-filters.mjs
@@ -72,6 +75,14 @@ await build({
   logLevel: "warning",
 });
 
+// Its own call, like the two above: `blame/` shares its base with nothing here.
+await build({
+  entryPoints: [join(here, "..", "src", "components", "blame", "blameRules.ts")],
+  outdir: out,
+  format: "esm",
+  logLevel: "warning",
+});
+
 const load = (name) => import(pathToFileURL(join(out, name)).href);
 const { compilePattern, spansIn, matchesCommit } = await load("searchPattern.js");
 const { asInputDate, dayStart, dayEnd, startOfToday, relativeToRepo, toSlash } =
@@ -95,6 +106,7 @@ const {
 } = await load("editRules.js");
 const { splitShellArgs, formatArgv } = await load("gitConsoleCommand.js");
 const sel = await load("lineSelection.js");
+const blame = await load("blameRules.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -560,6 +572,49 @@ for (const argv of [
   ["show", "HEAD~1^{commit}", "$HOME", "a\\b"],
 ]) {
   eq(splitShellArgs(formatArgv(argv)), { ok: true, args: argv }, `round trip ${JSON.stringify(argv)}`);
+}
+
+// -- Blame gutter (blameRules.ts) -------------------------------------------
+{
+  const L = (...o) => o.map((origin) => ({ origin }));
+  eq(blame.runStarts(L(0, 0, 1, 1, 0)), [true, false, true, false, true], "a run starts where the commit changes");
+  eq(blame.runStarts(L()), [], "no lines, no runs");
+  eq(blame.runStarts(L(3)), [true], "a single line starts its run");
+
+  const O = (authorAt, uncommitted = false) => ({ authorAt, uncommitted });
+  eq(
+    blame.ageLevels([O(100), O(300), O(200)]),
+    [0, 4, 2],
+    "age shades by rank: oldest 0, newest AGE_LEVELS - 1, the middle between",
+  );
+  eq(
+    blame.ageLevels([O(10), O(20), O(1e9)]),
+    [0, 2, 4],
+    "by rank, not by distance: a decade-old pair does not collapse into one shade",
+  );
+  eq(blame.ageLevels([O(5), O(5)]), [4, 4], "one date only: everything is newest");
+  eq(blame.ageLevels([O(1), O(0, true), O(2)]), [0, 4, 4], "an uncommitted line is the newest");
+  eq(blame.AGE_LEVELS, 5, "five shades");
+
+  const prev = { hash: "a".repeat(40), path: "f.txt" };
+  const B = (previous, boundary, uncommitted = false) => ({ previous, boundary, uncommitted });
+  eq(blame.beforeBlock(B(prev, false)), null, "a previous version: blame before is offered");
+  eq(blame.beforeBlock(B(prev, false, true)), null, "an uncommitted line of a committed file steps into HEAD");
+  eq(blame.beforeBlock(B(null, true)), "boundary", "the earliest version says so");
+  eq(blame.beforeBlock(B(null, false)), "created", "a file created in the commit says so");
+  eq(blame.beforeBlock(B(null, false, true)), "new", "a staged new file is not 'created in this commit'");
+
+  eq(blame.textColumns("abc"), 3, "plain text: one column per character");
+  eq(blame.textColumns("\tx"), 9, "a TAB runs to the next stop of eight");
+  eq(blame.textColumns("ab\tx"), 9, "a TAB after two characters still stops at eight");
+  eq(blame.textColumns("жж"), 2, "a Cyrillic letter is one column, not two bytes");
+  eq(blame.maxColumns([{ text: "a" }, { text: "\t\tz" }, { text: "" }]), 17, "the widest line wins");
+  eq(blame.maxColumns([]), 0, "no lines, no width");
+
+  eq(blame.landingLine({ from: 3, to: 5 }, 10), 3, "lands on the first line of the range");
+  eq(blame.landingLine({ from: 12, to: 12 }, 10), 10, "clamped to the last line there is");
+  eq(blame.landingLine({ from: 0, to: 0 }, 10), 1, "never above the first line");
+  eq(blame.landingLine({ from: 1, to: 1 }, 0), null, "an empty file has nowhere to land");
 }
 
 await rm(out, { recursive: true, force: true });

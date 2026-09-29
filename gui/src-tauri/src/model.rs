@@ -282,6 +282,95 @@ pub struct FileHistoryPage {
     pub next_cursor: Option<FileHistoryCursor>,
 }
 
+/// Why a file cannot be blamed (`engine::blame`). A machine key, not prose, for
+/// the reason `EditBlock` is one: the text is assembled from both dictionaries,
+/// and the reason is an answer to show in place of the lines, not a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlameBlock {
+    /// A NUL byte — what git itself calls binary; its "lines" are not text.
+    Binary,
+    /// Over `BLAME_SIZE_CEILING` bytes or `BLAME_LINE_CEILING` lines.
+    TooLarge,
+    /// No file at this path in that revision (or on disk), or not a file there.
+    Missing,
+    /// On disk, but git does not know it: there is no history to blame.
+    Untracked,
+}
+
+/// Where a line's commit took it from: the commit's parent that git blamed
+/// further, and the path the file had there — a rename is already followed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlamePrevious {
+    pub hash: String,
+    pub path: String,
+}
+
+/// One commit a line is attributed to, as `--line-porcelain` describes it. Listed
+/// once however many lines point to it; lines refer to it by index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameOrigin {
+    pub hash: String,
+    pub short_hash: String,
+    /// All parents of the commit (empty for a root, a shallow edge and an
+    /// uncommitted line) — `DiffSource.parent` needs the real one, not a guess.
+    pub parents: Vec<String>,
+    pub author: String,
+    pub author_email: String,
+    pub author_at: i64,
+    pub summary: String,
+    /// The file's path **in this commit**.
+    pub path: String,
+    /// `None`: the file was created here, or the history ends here (`boundary`).
+    pub previous: Option<BlamePrevious>,
+    /// The earliest version reachable here — a root commit, or the edge of a
+    /// shallow clone. Nothing can be blamed before it.
+    pub boundary: bool,
+    /// The all-zero hash of a working-tree blame: the line is not committed yet.
+    pub uncommitted: bool,
+}
+
+/// One line of the blamed file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameLine {
+    /// Line number in the blamed file, 1-based.
+    pub line: u32,
+    /// Line number in the file as the origin commit left it.
+    pub orig_line: u32,
+    pub text: String,
+    /// Index into `Blame.origins`.
+    pub origin: u32,
+}
+
+/// A whole file, blamed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Blame {
+    pub path: String,
+    /// The commit blamed, as a full hash; `None` — the working tree.
+    pub rev: Option<String>,
+    pub lines: Vec<BlameLine>,
+    pub origins: Vec<BlameOrigin>,
+    /// Set, the lines are empty and this says why.
+    pub blocked: Option<BlameBlock>,
+}
+
+/// "Blame before this change": the blame of the version before a line's commit,
+/// and where that line lands in it. `exact` — the line itself is there (it moved,
+/// it was not changed); otherwise `from..=to` is what the change replaced, or the
+/// line it was inserted after.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameBefore {
+    pub blame: Blame,
+    pub from: u32,
+    pub to: u32,
+    pub exact: bool,
+}
+
 /// Commit ordering requested by the filter bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

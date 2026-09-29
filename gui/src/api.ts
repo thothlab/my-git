@@ -489,6 +489,67 @@ export const fileHistory = (
   cursor: FileHistoryCursor | null,
   limit: number,
 ) => invoke<FileHistoryPage>("file_history", { path, rev, cursor, limit });
+// blame of one file (R05b) — `engine::blame`
+/** Why a file cannot be blamed; the lines are empty then. */
+export type BlameBlock = "binary" | "too-large" | "missing" | "untracked";
+/** The commit a line of the file is attributed to, and where it came from. */
+export interface BlameOrigin {
+  hash: string;
+  shortHash: string;
+  /** Empty for a root, a shallow edge and an uncommitted line. */
+  parents: string[];
+  author: string;
+  authorEmail: string;
+  authorAt: number;
+  summary: string;
+  /** The file's path **in this commit** — a rename is already followed. */
+  path: string;
+  /** The version git blamed further; `null` — the file was created here, or the
+   * history ends here (`boundary`). */
+  previous: { hash: string; path: string } | null;
+  /** The earliest version reachable here (root commit or shallow edge). */
+  boundary: boolean;
+  /** The all-zero hash of a working-tree blame. */
+  uncommitted: boolean;
+}
+export interface BlameLine {
+  line: number;
+  /** The line's number in the file as its origin commit left it. */
+  origLine: number;
+  text: string;
+  /** Index into `Blame.origins`. */
+  origin: number;
+}
+export interface Blame {
+  path: string;
+  /** Full hash blamed; `null` — the working tree. */
+  rev: string | null;
+  lines: BlameLine[];
+  origins: BlameOrigin[];
+  blocked: BlameBlock | null;
+}
+/** The blame of the version before a line's commit, and where the line lands:
+ * `exact` — the line itself; else `from..to` is what the change replaced, or the
+ * line it was inserted after. */
+export interface BlameBefore {
+  blame: Blame;
+  from: number;
+  to: number;
+  exact: boolean;
+}
+/** `rev` — any revision naming a commit; `null` blames the working tree. */
+export const fileBlame = (path: string, rev: string | null) =>
+  invoke<Blame>("file_blame", { path, rev });
+/** Step back from line `line` (its `origLine`) of `path` at `hash` into the
+ * version its `previous` names. */
+export const fileBlameBefore = (
+  hash: string,
+  path: string,
+  line: number,
+  prevHash: string,
+  prevPath: string,
+) => invoke<BlameBefore>("file_blame_before", { hash, path, line, prevHash, prevPath });
+
 /** The revision that means "the working tree" in `commitsCompare` /
  * `commitsCompareDiff` (prd_02 История 77). A comparison against a real revision
  * always names it, so passing this constant is a deliberate choice rather than an

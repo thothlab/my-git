@@ -15,20 +15,13 @@ import {
   type FileHistoryCommit,
   type FileHistoryCursor,
 } from "../api";
-import { focusPanel, isTypingTarget } from "../hotkeys";
+import { isTypingTarget } from "../hotkeys";
 import { d, fmtDateTime } from "../i18n";
-import { revealCommit } from "../logStore";
-import {
-  registerModalSource,
-  scaledPx,
-  setNotice,
-  setViewMode,
-  state,
-  statusMeta,
-} from "../store";
+import { registerModalSource, scaledPx, state, statusMeta } from "../store";
+import { openBlame } from "./blame/BlamePanel";
 import DiffView, { type DiffApi } from "./DiffView";
 import { sameDiffSource, type DiffSource } from "./diff/model";
-import { clearCompare } from "./log/actions/compareSelection";
+import { showCommitInLog } from "./log/actions/showInLog";
 
 /**
  * File history (R05c): every commit that touched one file, renames followed,
@@ -47,7 +40,11 @@ import { clearCompare } from "./log/actions/compareSelection";
  *
  *  - **The row cursor is local to the overlay.** It is not a fourth selection of
  *    the window: Enter hands the commit to the log's own selection
- *    (`revealCommit` in `logStore`) and closes the overlay.
+ *    (`showCommitInLog`, shared with the blame) and closes the overlay.
+ *  - **Blame replaces it rather than stacking on it.** Cmd/Ctrl+B (or the
+ *    button) opens the blame of the row's version and closes the history; the
+ *    blame's "File history" does the same the other way. Two overlays of one
+ *    z-level would fight over focus and over Escape.
  *  - **Each row diffs under its own path.** `--follow` crosses renames, so the
  *    diff source takes `path` / `oldPath` from the row, never the path the
  *    history was opened with.
@@ -81,6 +78,26 @@ export function openFileHistory(path: string, rev: string | null = null, revLabe
   const repo = state()?.repoPath;
   if (!repo || !path) return;
   setTarget({ path, rev, revLabel: revLabel ?? (rev ? rev.slice(0, 7) : null), repo });
+}
+
+/** The change a path of the Changes panel stands for, if it is one. */
+export function changeOf(path: string) {
+  return (state()?.changelists ?? []).flatMap((cl) => cl.files).find((x) => x.path === path);
+}
+
+/**
+ * The name a working-tree path has at HEAD: a staged rename's history is under
+ * its old name, and the new one does not exist there yet — a history opened by
+ * it from HEAD is empty. Used by the Changes panel and by a working-tree blame.
+ */
+export function historyPathOf(path: string): string {
+  const f = changeOf(path);
+  return f?.status === "renamed" && f.oldPath ? f.oldPath : path;
+}
+
+/** Close the history — another overlay (the blame) is taking its place. */
+export function closeFileHistory(): void {
+  setTarget(null);
 }
 
 export default function FileHistoryPanel() {
@@ -205,15 +222,21 @@ function FileHistoryView(props: { target: Target }) {
   const showInLog = async () => {
     const c = current();
     if (!c) return;
-    const repo = props.target.repo;
     close();
-    // A comparison on screen would keep the details pane on it: the commit being
-    // revealed is a plain selection, like a click on its row.
-    clearCompare();
-    setViewMode("log");
-    const found = await revealCommit(c.hash);
-    if (found) focusPanel("commits");
-    else setNotice({ repo, text: () => d().fileHistoryNotInLog(c.shortHash) });
+    await showCommitInLog(c.hash, c.shortHash);
+  };
+
+  /** Why the row's version cannot be blamed, or `null`. A row that deleted the
+   * file (the old name seen from HEAD, see `engine::file_history`) has no file. */
+  const blameReason = (): string | null => {
+    const c = current();
+    if (!c) return d().fileHistoryEmpty();
+    return c.status === "deleted" ? d().blameDeletedReason() : null;
+  };
+  const blame = () => {
+    const c = current();
+    if (!c || blameReason()) return;
+    openBlame(c.path, c.hash, c.shortHash);
   };
 
   // Keys that start inside the overlay stop here; the application layer is
@@ -254,6 +277,10 @@ function FileHistoryView(props: { target: Target }) {
       case "Enter":
         void showInLog();
         break;
+      case "KeyB":
+        if (mod) blame();
+        else handled = false;
+        break;
       default:
         handled = false;
     }
@@ -286,6 +313,14 @@ function FileHistoryView(props: { target: Target }) {
           </Show>
           <button
             class="ml-auto shrink-0 rounded border border-border px-2 py-0.5 text-xs hover:bg-bg-muted disabled:opacity-50"
+            disabled={blameReason() !== null}
+            title={blameReason() ?? d().blameItem()}
+            onClick={blame}
+          >
+            {d().blameItem()}
+          </button>
+          <button
+            class="shrink-0 rounded border border-border px-2 py-0.5 text-xs hover:bg-bg-muted disabled:opacity-50"
             disabled={!current()}
             title={current() ? d().fileHistoryShowInLog() : d().fileHistoryEmpty()}
             onClick={() => void showInLog()}

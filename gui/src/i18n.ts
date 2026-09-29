@@ -539,10 +539,47 @@ const en = {
   fileHistoryMergesNote: () =>
     "Renames are followed. Merge commits are not listed, as in git log --follow: their changes appear on the commits they merged.",
   fileHistoryRenamedFrom: (old: string) => `renamed from ${old}`,
-  fileHistoryKeys: () => "↑ ↓ Home End: move · Enter: show in the log · Esc: close",
+  fileHistoryKeys: () =>
+    "↑ ↓ Home End: move · Enter: show in the log · ⌘/Ctrl+B: blame · Esc: close",
   fileHistoryShowInLog: () => "Show in log",
-  fileHistoryNotInLog: (hash: string) =>
+  commitNotInLog: (hash: string) =>
     `Commit ${hash} could not be found in the log — it may be outside every ref the log walks.`,
+
+  // blame (R05b)
+  blameItem: () => "Blame",
+  blameTitle: (path: string) => `Blame of ${path}`,
+  blameAt: (rev: string) => `at ${rev}`,
+  blameWorkingTree: () => "working tree",
+  blameLoading: () => "Running blame…",
+  blameLines: (n: number) => `${n} ${n === 1 ? "line" : "lines"}`,
+  blameEmptyFile: () => "The file is empty in this version.",
+  blameBlocked: (kind: "binary" | "too-large" | "missing" | "untracked") =>
+    ({
+      binary: "A binary file has no lines to blame.",
+      "too-large": "The file is too large to blame (over 4 MB or 50,000 lines).",
+      missing: "There is no such file in this version.",
+      untracked: "The file is not tracked by git yet — it has no history to blame.",
+    })[kind],
+  blameDeletedReason: () => "The file is deleted in this version — there is nothing to blame",
+  blameUncommitted: () => "Not committed",
+  blameUncommittedNote: () =>
+    "Not committed yet. The diff below is the working tree against the version before.",
+  blameSelectLine: () => "Select a line to see the commit that last changed it.",
+  blameOpenInLog: () => "Open commit in log",
+  blameOpenInLogUncommitted: () => "The line is not committed yet — it has no commit",
+  blameBefore: () => "Blame before this change",
+  blameBeforeBoundary: () =>
+    "This is the earliest version reachable here (a root commit or the edge of a shallow clone)",
+  blameBeforeCreated: () => "The file was created in this commit — the line had no earlier version",
+  blameBeforeNew: () => "The file is not committed yet — there is no earlier version",
+  blameBack: (n: number) => `Back (${n})`,
+  blameBackTip: () => "Back to the previous blame (Esc)",
+  blamePathInCommit: (path: string) => `In this commit the file was ${path}`,
+  blameLandedExact: (line: number) => `The line was at ${line} in this version.`,
+  blameLanded: (from: number, to: number) =>
+    `The line was introduced by the change. Highlighted: what it replaced, or the line it was inserted after (${from === to ? from : `${from}–${to}`}).`,
+  blameKeys: () =>
+    "↑ ↓ PgUp PgDn Home End: move · Enter: open in log · ⌘/Ctrl+B: blame before · ⌘/Ctrl+↑↓: next/prev difference · Esc: back / close",
 };
 
 type Dict = typeof en;
@@ -1042,10 +1079,46 @@ const ru: Dict = {
   fileHistoryMergesNote: () =>
     "Переименования учитываются. Merge-коммиты не показываются, как в git log --follow: их изменения видны в тех коммитах, которые они слили.",
   fileHistoryRenamedFrom: (old) => `переименован из ${old}`,
-  fileHistoryKeys: () => "↑ ↓ Home End: переход · Enter: показать в логе · Esc: закрыть",
+  fileHistoryKeys: () =>
+    "↑ ↓ Home End: переход · Enter: показать в логе · ⌘/Ctrl+B: blame · Esc: закрыть",
   fileHistoryShowInLog: () => "Показать в логе",
-  fileHistoryNotInLog: (hash) =>
+  commitNotInLog: (hash) =>
     `Коммит ${hash} не найден в логе — возможно, он недостижим ни от одной ссылки, которую обходит лог.`,
+
+  blameItem: () => "Blame (авторство строк)",
+  blameTitle: (path) => `Blame: ${path}`,
+  blameAt: (rev) => `в ${rev}`,
+  blameWorkingTree: () => "рабочее дерево",
+  blameLoading: () => "Выполняю blame…",
+  blameLines: (n) => `${n} ${ruPlural(n, "строка", "строки", "строк")}`,
+  blameEmptyFile: () => "В этой версии файл пуст.",
+  blameBlocked: (kind) =>
+    ({
+      binary: "У двоичного файла нет строк для blame.",
+      "too-large": "Файл слишком большой для blame (больше 4 МБ или 50 000 строк).",
+      missing: "В этой версии такого файла нет.",
+      untracked: "Файл ещё не отслеживается git — у него нет истории для blame.",
+    })[kind],
+  blameDeletedReason: () => "В этой версии файл удалён — показывать нечего",
+  blameUncommitted: () => "Не закоммичено",
+  blameUncommittedNote: () =>
+    "Строка ещё не закоммичена. Ниже — рабочее дерево против предыдущей версии.",
+  blameSelectLine: () => "Выберите строку, чтобы увидеть коммит, который менял её последним.",
+  blameOpenInLog: () => "Открыть коммит в логе",
+  blameOpenInLogUncommitted: () => "Строка ещё не закоммичена — коммита у неё нет",
+  blameBefore: () => "Blame до этого изменения",
+  blameBeforeBoundary: () =>
+    "Это самая ранняя доступная версия (корневой коммит или край неглубокого клона)",
+  blameBeforeCreated: () => "Файл создан в этом коммите — раньше этой строки не было",
+  blameBeforeNew: () => "Файл ещё не закоммичен — более ранней версии нет",
+  blameBack: (n) => `Назад (${n})`,
+  blameBackTip: () => "Вернуться к предыдущему blame (Esc)",
+  blamePathInCommit: (path) => `В этом коммите файл назывался ${path}`,
+  blameLandedExact: (line) => `В этой версии строка была на ${line}.`,
+  blameLanded: (from, to) =>
+    `Строка появилась в этом изменении. Подсвечено то, что она заменила, или строка, после которой вставлена (${from === to ? from : `${from}–${to}`}).`,
+  blameKeys: () =>
+    "↑ ↓ PgUp PgDn Home End: переход · Enter: открыть в логе · ⌘/Ctrl+B: blame до изменения · ⌘/Ctrl+↑↓: следующее/предыдущее различие · Esc: назад / закрыть",
 };
 
 /** Current locale's dictionary. Reactive: reads the `locale` signal. */
@@ -1071,3 +1144,26 @@ export const fmtDate = (unixSeconds: number): string =>
 /** Unix seconds from git as a date with the time of day. */
 export const fmtDateTime = (unixSeconds: number): string =>
   new Date(unixSeconds * 1000).toLocaleString(dateLocale());
+
+const AGO_STEPS: [Intl.RelativeTimeFormatUnit, number][] = [
+  ["year", 365 * 86400],
+  ["month", 30 * 86400],
+  ["week", 7 * 86400],
+  ["day", 86400],
+  ["hour", 3600],
+  ["minute", 60],
+];
+
+/**
+ * Unix seconds from git as a distance from now — "3 months ago" — in the
+ * window's language, the way a blame gutter shows age. The largest whole unit
+ * wins; under a minute is "now". The exact date belongs next to it, not instead.
+ */
+export const fmtAgo = (unixSeconds: number, nowMs: number = Date.now()): string => {
+  const secs = Math.max(0, Math.round(nowMs / 1000 - unixSeconds));
+  const rtf = new Intl.RelativeTimeFormat(dateLocale(), { numeric: "auto" });
+  for (const [unit, size] of AGO_STEPS) {
+    if (secs >= size) return rtf.format(-Math.floor(secs / size), unit);
+  }
+  return rtf.format(0, "second");
+};

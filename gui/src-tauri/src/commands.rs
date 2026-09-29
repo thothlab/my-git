@@ -10,10 +10,10 @@ use crate::engine::GitEngine;
 use crate::error::{Error, Result};
 use crate::engine::exec::{self, mask_credentials};
 use crate::engine::{
-    branches, commit as commit_engine, discard, file_history as file_history_engine, log as log_engine, ops,
+    blame as blame_engine, branches, commit as commit_engine, discard, file_history as file_history_engine, log as log_engine, ops,
 };
 use crate::model::{
-    BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, DiscardEntry,
+    Blame, BlameBefore, BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, DiscardEntry,
     DiscardKind, DiscardOutcome, Eol, FileDiff, FileHistoryCursor, FileHistoryPage, HunkPick,
     LinePick,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
@@ -544,6 +544,33 @@ pub async fn file_history(
     limit: u32,
 ) -> Result<FileHistoryPage> {
     file_history_engine::page(&state.repo_path()?, &path, rev.as_deref(), cursor.as_ref(), limit)
+}
+
+/// Blame of one file (R05b). Read-only. `rev` is any revision naming a commit;
+/// `None` blames the working tree, uncommitted lines included. An unfit file
+/// (binary, too large, missing, untracked) is `blocked`, not an error.
+#[tauri::command]
+pub async fn file_blame(
+    state: State<'_, AppState>,
+    path: String,
+    rev: Option<String>,
+) -> Result<Blame> {
+    blame_engine::file(&state.repo_path()?, rev.as_deref(), &path)
+}
+
+/// "Blame before this change": the blame of the version a line's commit started
+/// from (`prev_hash` / `prev_path` — the line's `previous`) and where line `line`
+/// of `path` at `hash` lands in it. Read-only.
+#[tauri::command]
+pub async fn file_blame_before(
+    state: State<'_, AppState>,
+    hash: String,
+    path: String,
+    line: u32,
+    prev_hash: String,
+    prev_path: String,
+) -> Result<BlameBefore> {
+    blame_engine::before(&state.repo_path()?, &hash, &path, line, &prev_hash, &prev_path)
 }
 
 /// Which of these commits the current revision cannot reach — the input behind

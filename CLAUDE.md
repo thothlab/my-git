@@ -26,9 +26,9 @@
 | `cd gui && npm run tauri dev` | Запустить Graft локально (нужен дисплей) |
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
-| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, разбор и печать команды консоли), 176 утверждений |
-| `cargo test` | Оба крейта разом: 259 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 259 тестов |
+| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, разбор и печать команды консоли), 199 утверждений |
+| `cargo test` | Оба крейта разом: 268 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 268 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -65,6 +65,7 @@ gui/src-tauri/src/  бэк GUI
   engine/cli.rs     CliEngine — snapshot, диффы, стейджинг, ветки, push/pull + общие парсеры
   engine/log.rs     история и раскладка лейнов графа
   engine/file_history.rs история одного файла (`log --follow`), закреплённая на коммите
+  engine/blame.rs   blame файла (`--line-porcelain`) в ревизии или рабочем дереве, «blame до изменения»
   engine/commit.rs  один коммит и сравнение двух ревизий
   engine/branches.rs дерево веток и операции над ветками
   engine/ops.rs     операции, переписывающие историю, и распознавание незавершённой
@@ -80,6 +81,8 @@ gui/src/            фронт
   components/       Changes-режим (ChangesView, DiffView, CommitPanel, Toolbar, ...);
                     DiscardPanel — runDiscard, уведомление «Откатано N · Вернуть», диалог копий;
                     FileHistoryPanel — оверлей «История файла» (список коммитов + DiffView)
+  components/blame/ BlamePanel — оверлей blame (строки + коммит строки + DiffView, стек
+                    «blame до изменения»); blameRules.ts — чистые правила, без единого импорта
   components/log/   панель Git: BranchTree, LogTable, LogGraph, CommitDetailsPane, FilterBar, LogView, PanelChrome + чистые модули
   components/log/actions/  действия над коммитами и ветками, контекстное меню, диалоги
   components/diff/  DiffPanel — обёртка DiffView под панель лога; model.ts — раскладка diff;
@@ -162,6 +165,17 @@ Git вызывается только как внешний процесс. `gix
   в хэш, дальше обход всегда от него (почему не `--skip` — в «Что уже кусало»). Пустая
   история (файл не в коммитах, нерождённый `HEAD`) — пустая страница; `rev`, не называющий
   коммит, — `Error::Rule`.
+- `engine::blame` — `file(&Path, rev: Option<&str>, path) -> Blame` (`None` — рабочее
+  дерево, незакоммиченные строки под нулевым хэшем, `uncommitted: true`),
+  `before(&Path, hash, path, line, prev_hash, prev_path) -> BlameBefore` и чистый
+  `pub(crate) map_line_back(&[patch::HunkText], line)`. Строки ссылаются на таблицу
+  `origins` по индексу (коммит один раз, с `parents` из одного `rev-list --stdin`,
+  `previous`, `boundary`). Непригодный файл — `blocked` (`binary`, `too-large`, `missing`,
+  `untracked`), как у `TextFile`, и судится **до** blame по блобу / файлу на диске:
+  `BLAME_SIZE_CEILING = 4 MiB`, `BLAME_LINE_CEILING = 50 000`. Ревизия резолвится общим
+  `file_history::resolve` (`pub(crate)`, своей копии не писать). «Blame до изменения»
+  отображает `orig_line` через дифф блоба против блоба (`-U0`), а не через дифф коммита
+  с первым родителем: `previous` у merge может быть не первым родителем.
 - `engine::commit` — `details`, `files`, `file_diff` (с `old_path: Option<&str>` —
   источник переименования, если вызывающий его знает; `None` — поиск в `files`),
   `compare`, `compare_diff`,
@@ -337,6 +351,12 @@ Git вызывается только как внешний процесс. `gix
   `commit_file_diff(hash, path, whitespace, context, oldPath)` с путём и старым путём
   **из строки**, а не с путём, по которому историю открыли; `oldPath: null` — прежний поиск
   переименования на бэке. В `DiffSource` вида `commit` это необязательное поле `oldPath`.
+- Blame: `file_blame(path, rev) -> Blame` (`rev: null` — рабочее дерево) и
+  `file_blame_before(hash, path, line, prevHash, prevPath) -> BlameBefore` — оба read-only.
+  В `before` уходят `origin.hash` / `origin.path`, **`line.origLine`** (номер строки в коммите
+  строки, а не в показанном файле) и `origin.previous`. Ответ — blame старой версии плюс
+  `from..to` / `exact`: куда строка легла. `exact: false` — строку внёс коммит, подсвечено
+  то, что она заменила, или строка, после которой её вставили.
 - `file_read(path) -> TextFile` — read-only, через `createResource` + `refetch`.
   `file_write(path, text, eol, expect) -> FileWritten` — **единственная мутация проекта, не
   возвращающая `RepoState` и не идущая через `run()`**: она срабатывает на каждой паузе в
@@ -357,7 +377,7 @@ Git вызывается только как внешний процесс. `gix
   `journal_list` раз в секунду, **только пока открыта** — событие на каждый процесс git стоило
   бы сериализации ради почти всегда закрытой панели. `git_exec` возвращает `journalId`
   своей записи.
-- Имена команд: `log_*`, `commit_*`, `branch_*`, `op_*`, `ui_state_*`, `journal_*`, `discard_*`, `lines_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_history`). Имя `commit_list`
+- Имена команд: `log_*`, `commit_*`, `branch_*`, `op_*`, `ui_state_*`, `journal_*`, `discard_*`, `lines_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_history`, `file_blame`, `file_blame_before`). Имя `commit_list`
   занято операцией «закоммитить changelist» и переиспользовано быть не может.
 - Полный список зарегистрированных команд — `invoke_handler` в `gui/src-tauri/src/lib.rs`;
   он же роспись того, что вообще доступно фронту.
@@ -378,7 +398,7 @@ Git вызывается только как внешний процесс. `gix
   фокуса; `PanelId` — закрытый союз, новая панель добавляется в него первой.
 - **Панель оборачивается в `PanelChrome`**, а не рисует свою рамку: он же регистрирует
   `PanelId`, поэтому `DiffPanel` существует отдельно от `DiffView`. Оверлеи, открываемые из
-  обоих режимов (`StashPanel`, `GitConsolePanel`, `FileHistoryPanel`), — не панели: они
+  обоих режимов (`StashPanel`, `GitConsolePanel`, `FileHistoryPanel`, `BlamePanel`), — не панели: они
   монтируются в `App`, регистрируются через `registerModalSource` и сами разбирают свои
   клавиши в `onKeyDown` (не в capture — Esc остаётся у store-модалки поверх). `PanelId` им
   не заводить: он поставил бы панели под оверлеем в цикл Tab, а `DiffPanel` в
@@ -390,7 +410,14 @@ Git вызывается только как внешний процесс. `gix
   **Выбор строки не прокручивает список**: любой выбор, сделанный стором сам (не стрелками
   панели), ставит `setRevealPending(true)` — так же `jumpToMatch` (Cmd+G): без этого
   найденное ниже видимых строк или на догруженной странице выделялось за экраном, и
-  переход выглядел как «ничего не произошло». Второго флага не заводить.
+  переход выглядел как «ничего не произошло». Второго флага не заводить. Из оверлея —
+  `showCommitInLog(hash, shortHash)` (`log/actions/showInLog.ts`): сброс сравнения, режим,
+  `revealCommit`, фокус списка или уведомление. Им пользуются история файла и blame; оверлей
+  сперва закрывает себя сам.
+- **История файла и blame друг друга заменяют, а не стопкой**: `openBlame` закрывает
+  историю (`closeFileHistory`), «История файла» из blame закрывает blame. Два оверлея одного
+  z-уровня делили бы фокус и Esc. Esc в blame сперва снимает шаг «blame до…», закрывает —
+  только с первого.
 - **Все видимые строки — через `src/i18n.ts`**, в обоих словарях. `ru` типизирован по `en`,
   пропущенный ключ ломает сборку. `d().x()` читать внутри JSX или tracked scope — вынос в
   модульную константу замораживает язык на момент импорта. Сообщения `Error::Rule` с бэка
@@ -564,7 +591,7 @@ Git вызывается только как внешний процесс. `gix
   изменение сам забирает фокус и возвращает) и не при `!document.hasFocus()` (Cmd+Tab — не
   уход пользователя из редактора). Пробовать `relatedTarget` бесполезно: он `null` и для
   клика по любой нефокусируемой части приложения, а это как раз уход.
-- **`editRules.ts` и `lineSelection.ts` не импортируют ничего и не должны начать** (у
+- **`editRules.ts`, `lineSelection.ts` и `blame/blameRules.ts` не импортируют ничего и не должны начать** (у
   каждого свой вызов `build()` в харнессе — по той же причине): `check-log-filters.mjs`
   *транспилирует* точки входа, а не бандлит, и один `import` из `../../api` превращается в
   падение резолва модулей, читающееся как посторонняя поломка. Свой вызов `build()` ему тоже
@@ -731,6 +758,22 @@ Git вызывается только как внешний процесс. `gix
   молча станут `undefined`.
 - `--no-textconv` в `raw_diff` меняет и то, что видно в Changes: файл с textconv-драйвером
   показывается как есть (часто — бинарным), потому что превращённый дифф не применяется.
+- **`git blame` не принимает `--end-of-options`** (git 2.54: `blame --end-of-options HEAD --
+  f` — `fatal: bad revision 'f'`): ревизии он разбирает сам. Поэтому `engine::blame` сперва
+  резолвит ревизию через `rev-parse --end-of-options` и отдаёт blame полный хэш — опцией
+  тот быть не может. Путь в blame — без `:(literal)`, после `--`.
+- **Пути в `--line-porcelain` C-квотированы**, `-z` у blame нет: `filename` и `previous`
+  приезжают как `"\320\266 \"q\".txt"` для `ж "q".txt`. Без `blame::unquote` «blame до
+  изменения» просит у git файл, которого нет.
+- **`boundary` у blame — не только край неглубокого клона.** Без `--root` git помечает так и
+  корневой коммит, а привитый коммит неглубокого клона выглядит корневым в любом случае —
+  различить их по выводу нельзя, поэтому причина в UI общая: «самая ранняя доступная
+  версия». Нет `previous` без `boundary` — файл создан в этом коммите.
+- Blame рабочего дерева: незакоммиченные строки — нулевой хэш с `previous` на `HEAD`,
+  подготовленное переименование git прослеживает сам, а неотслеживаемый файл отвергает
+  (`no such path in HEAD`) — поэтому `untracked` распознаётся заранее через `ls-files`, а не
+  по тексту ошибки. `cat-file -s` отвечает и за каталог (размером дерева) — тип
+  проверяется первым.
 
 ## Инициативы и PRD
 

@@ -16,6 +16,7 @@ import {
   WORKING_TREE,
   type CommitDetails,
   type CommitFileEntry,
+  type FileState,
 } from "../../api";
 import { focusPanel } from "../../hotkeys";
 import { d, fmtDateTime } from "../../i18n";
@@ -24,6 +25,7 @@ import type { CompareTarget } from "./actions/compareSelection";
 import { PanelBtn, PanelChrome, PanelNote } from "./PanelChrome";
 import { IconCollapseAll, IconExpandAll } from "../IconButton";
 import { openFileHistory } from "../FileHistoryPanel";
+import { openBlame } from "../blame/BlamePanel";
 import ContextMenu, { anchorOfElement, type MenuAnchor } from "./actions/ContextMenu";
 import { setSelectedCommitFile, selectedCommitFile } from "./commitFileSelection";
 import {
@@ -249,16 +251,45 @@ export default function CommitDetailsPane(props: {
     else openFileHistory(path, r.cmp.to, r.cmp.toLabel);
   };
 
-  const [menu, setMenu] = createSignal<{ anchor: MenuAnchor; path: string } | null>(null);
+  /**
+   * R05b: the blame of the file in the revision it was picked in — the same
+   * choice of revision as the history. A file this revision deleted has no lines.
+   */
+  const openBlameOf = (path: string) => {
+    const r = ready();
+    if (!r) return;
+    if (!r.cmp) openBlame(path, r.hash);
+    else if (r.cmp.to === WORKING_TREE) openBlame(path, null);
+    else openBlame(path, r.cmp.to, r.cmp.toLabel);
+  };
+
+  const [menu, setMenu] = createSignal<{
+    anchor: MenuAnchor;
+    path: string;
+    status: FileState;
+  } | null>(null);
   const menuItems = () => {
     const m = menu();
     if (!m) return [];
-    return [{ label: d().fileHistoryItem(), run: () => openHistory(m.path) }];
+    const deleted = m.status === "deleted";
+    return [
+      { label: d().fileHistoryItem(), run: () => openHistory(m.path) },
+      {
+        label: d().blameItem(),
+        disabled: deleted,
+        reason: deleted ? d().blameDeletedReason() : undefined,
+        run: () => openBlameOf(m.path),
+      },
+    ];
   };
   const openMenuForCursor = () => {
     const row = currentRow();
     if (row?.kind !== "file") return;
-    setMenu({ anchor: anchorOfElement(anchors.get(row.key)), path: row.file.path });
+    setMenu({
+      anchor: anchorOfElement(anchors.get(row.key)),
+      path: row.file.path,
+      status: row.file.status,
+    });
   };
 
   const onKey = (e: KeyboardEvent) => {
@@ -385,7 +416,11 @@ export default function CommitDetailsPane(props: {
                             onMenu={(e) => {
                               e.preventDefault();
                               pick(row.file);
-                              setMenu({ anchor: { x: e.clientX, y: e.clientY }, path: row.file.path });
+                              setMenu({
+                                anchor: { x: e.clientX, y: e.clientY },
+                                path: row.file.path,
+                                status: row.file.status,
+                              });
                             }}
                           />
                         ) : (

@@ -58,7 +58,7 @@ const FIELDS: usize = 7;
 /// The commit `rev` names, or `None` when it names nothing here (an unborn `HEAD`
 /// included). A repository git cannot read explains itself on stderr — that is an
 /// error, not "no such revision" (same rule as `log::commit_by_hash`).
-fn resolve(repo: &Path, rev: &str) -> Result<Option<String>> {
+pub(crate) fn resolve(repo: &Path, rev: &str) -> Result<Option<String>> {
     let spec = format!("{rev}^{{commit}}");
     let out = exec::git(
         repo,
