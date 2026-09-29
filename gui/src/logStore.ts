@@ -517,6 +517,16 @@ export function selectHash(hash: string): boolean {
   return true;
 }
 
+/**
+ * A row the store selected on its own — `revealCommit`, a search jump — still
+ * waits to be scrolled into view. Selecting never scrolls: the list owns
+ * scrolling and answers this flag once its virtualised rows exist (`LogTable`).
+ * Without it a match found below the visible rows, or on a page just loaded,
+ * was selected off screen and the jump looked like it did nothing.
+ */
+const [revealPending, setRevealPending] = createSignal(false);
+export { revealPending, setRevealPending };
+
 /** Select every loaded row (Cmd/Ctrl+A inside the panel). */
 export function selectAll(): void {
   setSelectedSet(new Set(commits().map((c) => c.hash)));
@@ -551,15 +561,10 @@ export async function revealCommit(hash: string): Promise<boolean> {
   ensureLoaded();
   await whenSettled();
   const found = selectHash(hash) || (await findCommitByHash(hash));
-  // Selecting does not scroll — the list owns scrolling, and it answers this flag
-  // once its virtualised rows exist (`LogTable`).
   if (found) setRevealPending(true);
   return found;
 }
 
-/** A commit selected by `revealCommit` still waits to be scrolled into view. */
-const [revealPending, setRevealPending] = createSignal(false);
-export { revealPending, setRevealPending };
 
 // ── Jumping to search matches ────────────────────────────────────────────────
 
@@ -640,6 +645,7 @@ export async function jumpToMatch(dir: 1 | -1): Promise<void> {
         for (let i = from + 1; i < rows.length; i++) {
           if (hits(rows[i].subject, rows[i].hash)) {
             selectAt(i, "single");
+            setRevealPending(true);
             return;
           }
         }
@@ -648,6 +654,7 @@ export async function jumpToMatch(dir: 1 | -1): Promise<void> {
         for (let i = from - 1; i >= 0; i--) {
           if (hits(rows[i].subject, rows[i].hash)) {
             selectAt(i, "single");
+            setRevealPending(true);
             return;
           }
         }
@@ -658,14 +665,20 @@ export async function jumpToMatch(dir: 1 | -1): Promise<void> {
         // Nothing more to walk through — but a pasted hash still has the direct
         // route, which is the whole point of D06: the commit is older than the
         // cap, and the backend can name it without loading everything between.
-        if (await findCommitByHash(search().text)) return;
+        if (await findCommitByHash(search().text)) {
+          setRevealPending(true);
+          return;
+        }
         setNote(capped() ? "search-capped" : "no-more-matches");
         return;
       }
       const had = commits().length;
       await loadMore();
       if (commits().length === had) {
-        if (await findCommitByHash(search().text)) return;
+        if (await findCommitByHash(search().text)) {
+          setRevealPending(true);
+          return;
+        }
         setNote(capped() ? "search-capped" : "no-more-matches");
         return;
       }

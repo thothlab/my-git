@@ -198,8 +198,8 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
 
   createEffect(() => props.onSelect?.(commits()[cursorIndex()]?.hash ?? null));
 
-  // A commit chosen from outside the log (file history → Enter) is selected by
-  // the store; bringing it on screen is this list's part, once it can scroll.
+  // A row the store selected on its own (file history → Enter, a search jump)
+  // is brought on screen here, once the list can scroll — `revealPending`.
   createEffect(() => {
     const scroll = scrollToRow();
     const i = cursorIndex();
