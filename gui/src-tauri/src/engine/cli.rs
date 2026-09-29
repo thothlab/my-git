@@ -33,6 +33,18 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> String {
     format!("{h:016x}")
 }
 
+/// A file path as a git pathspec that matches that one file and nothing else.
+///
+/// A bare path after `--` is still a pattern: `app/[id]/page.tsx` also matches
+/// `app/i/page.tsx`, so a rollback of the first reverts the second, and `rm -f` of a
+/// new `x[ab].txt` deletes a tracked `xa.txt` from disk. Every client-supplied path
+/// that reaches a pathspec slot goes through here. Not for `diff --no-index`, which
+/// takes plain filesystem paths, and not for `git blame`, which reads its path
+/// literally already and would look for a file named `:(literal)…`.
+pub(crate) fn literal(path: &str) -> String {
+    format!(":(literal){path}")
+}
+
 /// Take back the directories a write made for itself, after that write failed.
 ///
 /// **Only empty ones, from the deepest up, stopping at the first that will not go.**
@@ -199,10 +211,11 @@ impl CliEngine {
     pub fn rollback(&self, paths: &[String]) -> Result<()> {
         for p in paths {
             let in_head = self.git(&["cat-file", "-e", &format!("HEAD:{p}")]).is_ok();
+            let spec = literal(p);
             if in_head {
-                self.git(&["checkout", "HEAD", "--", p])?;
+                self.git(&["checkout", "HEAD", "--", &spec])?;
             } else {
-                let _ = self.git(&["rm", "-f", "--", p]); // unstage if it was `git add`ed
+                let _ = self.git(&["rm", "-f", "--", &spec]); // unstage if it was `git add`ed
                 let _ = std::fs::remove_file(self.repo.join(p));
             }
         }
@@ -552,7 +565,7 @@ impl CliEngine {
     /// Whether git has the path in the index (i.e. it is not an untracked file).
     fn is_tracked(&self, path: &str) -> bool {
         !self
-            .git_allow_fail(&["ls-files", "--", path])
+            .git_allow_fail(&["ls-files", "--", &literal(path)])
             .trim()
             .is_empty()
     }
@@ -577,26 +590,27 @@ impl CliEngine {
         let ws = whitespace_args(whitespace)?;
         let ctx = context_arg(context);
         let ctx: Vec<&str> = ctx.iter().map(String::as_str).collect();
+        let spec = literal(path);
         let raw = match against {
             "index" => {
                 let mut a = vec!["diff", "--cached"];
                 a.extend_from_slice(&ws);
                 a.extend_from_slice(&ctx);
-                a.extend_from_slice(&["--", path]);
+                a.extend_from_slice(&["--", &spec]);
                 self.git(&a)?
             }
             "head" => {
                 let mut a = vec!["diff", "HEAD"];
                 a.extend_from_slice(&ws);
                 a.extend_from_slice(&ctx);
-                a.extend_from_slice(&["--", path]);
+                a.extend_from_slice(&["--", &spec]);
                 self.git(&a)?
             }
             _ => {
                 let mut a = vec!["diff"];
                 a.extend_from_slice(&ws);
                 a.extend_from_slice(&ctx);
-                a.extend_from_slice(&["--", path]);
+                a.extend_from_slice(&["--", &spec]);
                 let d = self.git(&a)?;
                 // "Empty diff ⇒ untracked file" is exactly right while nothing is
                 // ignored, and that is the behaviour `none` must keep. Only when a
@@ -645,13 +659,15 @@ impl CliEngine {
         let (deleted, existing): (Vec<&String>, Vec<&String>) =
             paths.iter().partition(|p| !self.repo.join(p).exists());
         if !existing.is_empty() {
+            let specs: Vec<String> = existing.iter().map(|p| literal(p)).collect();
             let mut args = vec!["add", "--"];
-            args.extend(existing.iter().map(|s| s.as_str()));
+            args.extend(specs.iter().map(String::as_str));
             self.git(&args)?;
         }
         if !deleted.is_empty() {
+            let specs: Vec<String> = deleted.iter().map(|p| literal(p)).collect();
             let mut args = vec!["rm", "-q", "--"];
-            args.extend(deleted.iter().map(|s| s.as_str()));
+            args.extend(specs.iter().map(String::as_str));
             self.git(&args)?;
         }
         Ok(())
@@ -1780,6 +1796,60 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "one\n");
         assert!(!p.join("added.txt").exists());
         assert!(eng.snapshot().unwrap().files.is_empty(), "tree is clean again");
+    }
+
+    /// A name with glob characters (`app/[id]/page.tsx` in Next.js) names that file
+    /// only. As a bare pathspec `x[ab].txt` also matches `xa.txt`: the rollback
+    /// reverted the neighbour's edit, and `rm -f` of a new file deleted it from disk.
+    #[test]
+    fn a_glob_looking_name_touches_that_file_only() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("xa.txt"), "one\n").unwrap();
+        std::fs::write(p.join("x[ab].txt"), "one\n").unwrap();
+        run(p, &["add", "xa.txt", ":(literal)x[ab].txt"]);
+        run(p, &["commit", "-m", "both"]);
+        let eng = CliEngine::new(p);
+
+        std::fs::write(p.join("xa.txt"), "mine\n").unwrap();
+        std::fs::write(p.join("x[ab].txt"), "two\n").unwrap();
+        eng.rollback(&["x[ab].txt".to_string()]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.join("x[ab].txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.join("xa.txt")).unwrap(),
+            "mine\n",
+            "neighbour kept"
+        );
+
+        std::fs::write(p.join("y[ab].txt"), "new\n").unwrap();
+        std::fs::write(p.join("ya.txt"), "tracked\n").unwrap();
+        run(p, &["add", "ya.txt"]);
+        run(p, &["commit", "-m", "ya"]);
+        run(p, &["add", ":(literal)y[ab].txt"]);
+        eng.rollback(&["y[ab].txt".to_string()]).unwrap();
+        assert!(!p.join("y[ab].txt").exists());
+        assert!(p.join("ya.txt").exists(), "a tracked neighbour is not deleted");
+
+        std::fs::write(p.join("x[ab].txt"), "two\n").unwrap();
+        let d = eng.diff_file("x[ab].txt", "worktree", "none", None).unwrap();
+        let shown: Vec<&str> = d
+            .hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .map(|l| l.content.as_str())
+            .collect();
+        assert!(shown.iter().any(|c| c.contains("two")), "{shown:?}");
+        assert!(
+            !shown.iter().any(|c| c.contains("mine")),
+            "the neighbour's hunk is not this file's: {shown:?}"
+        );
+
+        eng.stage_paths(&["x[ab].txt".to_string()]).unwrap();
+        let staged = eng.git(&["diff", "--cached", "--name-only"]).unwrap();
+        assert_eq!(staged.trim(), "x[ab].txt", "xa.txt stays out of the commit");
     }
 
     #[test]

@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::engine::cli::{context_arg, parse_diff, parse_refs, whitespace_args};
+use crate::engine::cli::{context_arg, literal, parse_diff, parse_refs, whitespace_args};
 use crate::error::{Error, Result};
 use crate::model::{CommitDetails, CommitFileEntry, FileDiff, FileState};
 
@@ -267,14 +267,16 @@ pub fn file_diff(
     let mut d = match parents.first() {
         Some(base) => {
             let old = rename_source(&files(repo, hash)?, path);
+            let old_spec = old.as_deref().map(literal);
+            let spec = literal(path);
             let mut a = vec!["diff", "-M"];
             a.extend_from_slice(&wsa);
             a.extend_from_slice(&ctx);
             a.extend_from_slice(&[base.as_str(), hash, "--"]);
-            if let Some(o) = old.as_deref() {
+            if let Some(o) = old_spec.as_deref() {
                 a.push(o);
             }
-            a.push(path);
+            a.push(&spec);
             let mut d = parse_diff(path, &git_text(repo, &a)?);
             if d.binary {
                 d.old_size = blob_size(repo, base, old.as_deref().unwrap_or(path));
@@ -288,7 +290,8 @@ pub fn file_diff(
             let mut a = vec!["diff-tree", "-p", "-r", "-M", "--root", "--no-commit-id"];
             a.extend_from_slice(&wsa);
             a.extend_from_slice(&ctx);
-            a.extend_from_slice(&[hash, "--", path]);
+            let spec = literal(path);
+            a.extend_from_slice(&[hash, "--", &spec]);
             let mut d = parse_diff(path, &git_text(repo, &a)?);
             if d.binary {
                 d.new_size = blob_size(repo, hash, path);
@@ -356,6 +359,8 @@ pub fn compare_diff(
     let ctx = context_arg(context);
     let ctx: Vec<&str> = ctx.iter().map(String::as_str).collect();
     let old = rename_source(&compare(repo, from, to)?, path);
+    let old_spec = old.as_deref().map(literal);
+    let spec = literal(path);
     let mut a = vec!["diff", "-M"];
     a.extend_from_slice(&wsa);
     a.extend_from_slice(&ctx);
@@ -364,10 +369,10 @@ pub fn compare_diff(
         a.push(to);
     }
     a.push("--");
-    if let Some(o) = old.as_deref() {
+    if let Some(o) = old_spec.as_deref() {
         a.push(o);
     }
-    a.push(path);
+    a.push(&spec);
     let mut d = parse_diff(path, &git_text(repo, &a)?);
     if d.binary {
         d.old_size = blob_size(repo, from, old.as_deref().unwrap_or(path));
@@ -410,6 +415,34 @@ mod tests {
             .output()
             .expect("spawn git");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A commit that changed both `x[ab].txt` and `xa.txt`: the diff of the first is
+    /// that file's alone. As a bare pathspec the name also matched the second, and
+    /// the neighbour's hunks were drawn under the wrong file.
+    #[test]
+    fn a_glob_looking_name_diffs_that_file_only() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("xa.txt"), "neighbour\n").unwrap();
+        std::fs::write(p.join("x[ab].txt"), "mine\n").unwrap();
+        run(p, &["add", "xa.txt", ":(literal)x[ab].txt"]);
+        run(p, &["commit", "-m", "both"]);
+        let h = head(p);
+
+        for d in [
+            file_diff(p, &h, "x[ab].txt", "none", None).unwrap(),
+            compare_diff(p, &format!("{h}~1"), &h, "x[ab].txt", "none", None).unwrap(),
+        ] {
+            let shown: Vec<&str> = d
+                .hunks
+                .iter()
+                .flat_map(|h| &h.lines)
+                .map(|l| l.content.as_str())
+                .collect();
+            assert!(shown.iter().any(|c| c.contains("mine")), "{shown:?}");
+            assert!(!shown.iter().any(|c| c.contains("neighbour")), "{shown:?}");
+        }
     }
 
     /// R46i / D04: how much unchanged text travels around each change.
