@@ -284,7 +284,7 @@ function OptionItem(props: { label: string; on: boolean; onClick: () => void }) 
 
 function SectionTitle(props: { title: string }) {
   return (
-    <div class="mt-1 border-t border-border px-3 py-0.5 text-[10px] uppercase text-fg-muted">
+    <div class="mt-1 border-t border-border px-3 py-0.5 text-[0.625rem] uppercase text-fg-muted">
       {props.title}
     </div>
   );

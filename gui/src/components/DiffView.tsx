@@ -27,7 +27,7 @@ import {
   type TextFile,
   type WhitespaceMode,
 } from "../api";
-import { confirmAction, run, selectedPath, state } from "../store";
+import { confirmAction, run, scaledPx, selectedPath, state } from "../store";
 import { d } from "../i18n";
 import { beginDrag } from "./Resizer";
 import { registerHotkey } from "../hotkeys";
@@ -89,7 +89,9 @@ export interface DiffApi {
 const SPLIT_RATIO_KEY = "diffSplitRatio";
 const WS_KEY = "diffWhitespace";
 const HL_KEY = "diffHighlight";
+/** Editor line height in px at the default font size; `linePx()` is the current one. */
 const LINE_PX = 16;
+const linePx = () => scaledPx(LINE_PX);
 /**
  * The widest gap a click may open, and the ceiling on the context that follows
  * from it.
@@ -597,7 +599,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
       reveal();
       goto(current() - 1);
     },
-    scrollLines: (delta) => scrollEl?.scrollBy({ top: delta * LINE_PX }),
+    scrollLines: (delta) => scrollEl?.scrollBy({ top: delta * linePx() }),
     scrollToEdge: (edge) =>
       scrollEl?.scrollTo({ top: edge < 0 ? 0 : scrollEl.scrollHeight }),
   };
@@ -819,7 +821,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
       const off = lineStartOffset(editorText(), at.line);
       taEl.setSelectionRange(off, off);
       if (at.offset === null) return;
-      taEl.scrollTop = editorScrollTop({ line: at.line, offset: at.offset }, LINE_PX);
+      taEl.scrollTop = editorScrollTop({ line: at.line, offset: at.offset }, linePx());
       // The textarea's own `onScroll` mirrors this into the gutter, but only
       // once the event is delivered; the numbers are set here as well so they
       // are never drawn a frame out of step with the text beside them.
@@ -1042,7 +1044,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
 
         {/* Which revision each side shows, and which of them cannot be edited. */}
         <Show when={labels()}>
-          <div class="flex items-center gap-2 border-b border-border bg-bg-subtle px-2 py-0.5 text-[11px] text-fg-muted">
+          <div class="flex items-center gap-2 border-b border-border bg-bg-subtle px-2 py-0.5 text-[0.6875rem] text-fg-muted">
             <Show when={split()} fallback={
               <span class="truncate font-mono">
                 {labels()!.left.text} → {labels()!.right.text}
@@ -1059,7 +1061,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
         </Show>
 
         <Show when={note() || shown()?.mergeFirstParent}>
-          <div class="border-b border-border px-2 py-0.5 text-[11px] text-warn">
+          <div class="border-b border-border px-2 py-0.5 text-[0.6875rem] text-warn">
             {note() || d().mergeFirstParentNote()}
           </div>
         </Show>
@@ -1187,14 +1189,14 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
               <div
                 ref={gutterEl}
                 class="shrink-0 select-none overflow-hidden whitespace-pre bg-bg-subtle px-2 text-right text-fg-muted"
-                style={{ "line-height": `${LINE_PX}px` }}
+                style={{ "line-height": `${linePx()}px` }}
               >
                 {gutter()}
               </div>
               <textarea
                 ref={taEl}
                 class="min-w-0 flex-1 resize-none border-0 bg-bg px-2 text-fg outline-none"
-                style={{ "line-height": `${LINE_PX}px` }}
+                style={{ "line-height": `${linePx()}px` }}
                 spellcheck={false}
                 wrap="off"
                 value={editorText()}
@@ -1419,7 +1421,7 @@ function HunkBtn(props: {
 }) {
   return (
     <button
-      class={`rounded border px-1 text-[11px] ${DISABLED_CLASS}`}
+      class={`rounded border px-1 text-[0.6875rem] ${DISABLED_CLASS}`}
       classList={{
         "border-danger/50 text-danger hover:bg-danger/10": props.danger,
         "border-border hover:bg-bg": !props.danger,

@@ -4,12 +4,13 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import {
+  FONT_SIZE_MAX,
+  FONT_SIZE_MIN,
   fontSize,
   registerModalSource,
   setFontSize,
   setTheme,
   theme,
-  type FontSize,
   type Theme,
 } from "../store";
 import { d, dateLocale, locale, setLocale, type Locale } from "../i18n";
@@ -225,15 +226,7 @@ function SettingsModal(props: { onClose: () => void }) {
                     label={d().fontSizeLabel()}
                     description={d().fontSizeDesc()}
                     control={
-                      <Segmented
-                        value={fontSize()}
-                        options={[
-                          { v: "small", label: d().fontSizeSmall() },
-                          { v: "medium", label: d().fontSizeMedium() },
-                          { v: "large", label: d().fontSizeLarge() },
-                        ]}
-                        onPick={(v) => setFontSize(v as FontSize)}
-                      />
+                      <FontSizeSlider />
                     }
                   />
                 </div>
@@ -287,6 +280,30 @@ function SettingRow(props: { label: string; description: string; control: any })
         <div class="text-xs text-fg-subtle">{props.description}</div>
       </div>
       <div class="shrink-0">{props.control}</div>
+    </div>
+  );
+}
+
+/**
+ * Applied on every step of the drag, not on release: the reader judges the size
+ * by the text it changes, and this dialog is part of that text.
+ */
+function FontSizeSlider() {
+  return (
+    <div class="flex items-center gap-3">
+      <input
+        type="range"
+        class="w-40 accent-accent"
+        min={FONT_SIZE_MIN}
+        max={FONT_SIZE_MAX}
+        step={1}
+        value={fontSize()}
+        aria-label={d().fontSizeLabel()}
+        onInput={(e) => setFontSize(e.currentTarget.valueAsNumber)}
+      />
+      <span class="w-10 text-right font-mono text-xs tabular-nums">
+        {d().fontSizeValue(fontSize())}
+      </span>
     </div>
   );
 }

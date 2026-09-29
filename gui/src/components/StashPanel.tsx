@@ -165,7 +165,7 @@ function StashPanelView() {
         </div>
 
         <Show when={listError()}>
-          <pre class="max-h-24 overflow-auto whitespace-pre-wrap border-b border-border bg-danger/10 px-3 py-2 font-mono text-[11px] text-danger">
+          <pre class="max-h-24 overflow-auto whitespace-pre-wrap border-b border-border bg-danger/10 px-3 py-2 font-mono text-[0.6875rem] text-danger">
             {listError()}
           </pre>
         </Show>
@@ -191,14 +191,14 @@ function StashPanelView() {
                       </span>
                       <Show when={s.fromApp}>
                         <span
-                          class="shrink-0 rounded bg-accent/20 px-1 text-[10px] text-accent"
+                          class="shrink-0 rounded bg-accent/20 px-1 text-[0.625rem] text-accent"
                           title={d().stashFromAppTip()}
                         >
                           {d().stashFromApp()}
                         </span>
                       </Show>
                     </span>
-                    <span class="w-full truncate text-[11px] text-fg-muted">
+                    <span class="w-full truncate text-[0.6875rem] text-fg-muted">
                       {fmtDateTime(s.at)} · {s.branch ?? d().stashNoBranch()} · {s.ref}
                     </span>
                   </button>
@@ -208,7 +208,7 @@ function StashPanelView() {
           </div>
 
           <div class="flex min-w-0 flex-1 flex-col">
-            <div class="border-b border-border px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-fg-subtle">
+            <div class="border-b border-border px-3 py-1 text-[0.6875rem] font-semibold uppercase tracking-wide text-fg-subtle">
               {d().stashFilesTitle()}
             </div>
             <div class="min-h-0 flex-1 overflow-auto py-1">
@@ -217,7 +217,7 @@ function StashPanelView() {
                   <Show
                     when={!files.error}
                     fallback={
-                      <pre class="m-2 overflow-auto whitespace-pre-wrap rounded border border-danger/40 bg-danger/10 p-2 font-mono text-[11px] text-danger">
+                      <pre class="m-2 overflow-auto whitespace-pre-wrap rounded border border-danger/40 bg-danger/10 p-2 font-mono text-[0.6875rem] text-danger">
                         {errText(files.error)}
                       </pre>
                     }
@@ -243,7 +243,7 @@ function StashPanelView() {
                 </Show>
               </Show>
             </div>
-            <div class="border-t border-border px-3 py-1 text-[11px] text-fg-subtle">
+            <div class="border-t border-border px-3 py-1 text-[0.6875rem] text-fg-subtle">
               {d().stashFilesNote()}
             </div>
           </div>

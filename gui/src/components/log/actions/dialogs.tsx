@@ -197,7 +197,7 @@ function DialogView(props: { spec: OpenDialog }) {
             )}
           </Show>
           <Show when={error()}>
-            <pre class="mb-3 max-h-32 overflow-auto whitespace-pre-wrap rounded border border-danger/40 bg-danger/10 p-2 font-mono text-[11px] text-danger">
+            <pre class="mb-3 max-h-32 overflow-auto whitespace-pre-wrap rounded border border-danger/40 bg-danger/10 p-2 font-mono text-[0.6875rem] text-danger">
               {error()}
             </pre>
           </Show>

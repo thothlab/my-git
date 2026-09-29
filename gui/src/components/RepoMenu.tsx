@@ -16,7 +16,7 @@ function avatarColor(name: string): string {
 function Avatar(props: { name: string }) {
   return (
     <span
-      class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[10px] font-bold uppercase text-white"
+      class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[0.625rem] font-bold uppercase text-white"
       style={{ "background-color": avatarColor(props.name) }}
     >
       {props.name.slice(0, 1)}
@@ -72,7 +72,7 @@ export default function RepoMenu() {
             </button>
 
             <Show when={others().length > 0}>
-              <div class="mt-1 border-t border-border px-3 py-0.5 text-[10px] uppercase text-fg-muted">
+              <div class="mt-1 border-t border-border px-3 py-0.5 text-[0.625rem] uppercase text-fg-muted">
                 {d().recentProjects()}
               </div>
               <For each={others()}>
@@ -85,7 +85,7 @@ export default function RepoMenu() {
                     <Avatar name={baseName(p)} />
                     <span class="min-w-0 flex-1">
                       <div class="truncate font-medium">{baseName(p)}</div>
-                      <div class="truncate text-[10px] text-fg-muted">{p}</div>
+                      <div class="truncate text-[0.625rem] text-fg-muted">{p}</div>
                     </span>
                   </button>
                 )}

@@ -330,14 +330,14 @@ export default function FilterBar() {
       </div>
 
       <Show when={patternError()}>
-        <div class="px-2 pb-1 text-[11px] text-danger">{d().fltRegexInvalid(patternError())}</div>
+        <div class="px-2 pb-1 text-[0.6875rem] text-danger">{d().fltRegexInvalid(patternError())}</div>
       </Show>
 
       <Show when={chips().length > 0}>
         <div class="flex flex-wrap items-center gap-1 px-2 pb-1">
           <For each={chips()}>
             {(c) => (
-              <span class="flex items-center gap-1 rounded border border-accent bg-accent/10 px-1.5 py-0.5 text-[11px] text-accent">
+              <span class="flex items-center gap-1 rounded border border-accent bg-accent/10 px-1.5 py-0.5 text-[0.6875rem] text-accent">
                 <span class="max-w-48 truncate">{c.label}</span>
                 <button class="text-fg-muted hover:text-danger" title={d().fltRemove()} onClick={c.clear}>
                   ×
@@ -356,7 +356,7 @@ export default function FilterBar() {
 function ToggleBtn(props: { label: string; tip: string; on: boolean; onClick: () => void }) {
   return (
     <button
-      class="rounded px-1 py-0.5 text-[11px] leading-none"
+      class="rounded px-1 py-0.5 text-[0.6875rem] leading-none"
       classList={{
         "bg-accent/20 text-accent": props.on,
         "text-fg-muted hover:bg-bg-muted": !props.on,
@@ -550,7 +550,7 @@ function DateMenu(props: {
   const now = () => Math.floor(Date.now() / 1000);
   return (
     <div>
-      <div class="px-2 py-1 text-[11px] text-fg-muted">{d().fltDateTip()}</div>
+      <div class="px-2 py-1 text-[0.6875rem] text-fg-muted">{d().fltDateTip()}</div>
       <Item
         label={d().fltDateAny()}
         on={props.since === null && props.until === null}
@@ -561,7 +561,7 @@ function DateMenu(props: {
       <Item label={d().fltDateMonth()} onClick={() => props.onPick(now() - 30 * DAY, null)} />
       <Item label={d().fltDateYear()} onClick={() => props.onPick(now() - 365 * DAY, null)} />
       <div class="mt-1 border-t border-border px-2 pt-1">
-        <div class="mb-1 text-[11px] text-fg-muted">{d().fltDateCustom()}</div>
+        <div class="mb-1 text-[0.6875rem] text-fg-muted">{d().fltDateCustom()}</div>
         <label class="mb-1 flex items-center gap-1">
           <span class="w-8 text-fg-muted">{d().fltDateFrom()}</span>
           <input
@@ -679,7 +679,7 @@ function PathsMenu(props: {
         </button>
       </div>
       <Show when={props.note}>
-        <div class="px-2 pb-1 text-[11px] text-warn">{props.note}</div>
+        <div class="px-2 pb-1 text-[0.6875rem] text-warn">{props.note}</div>
       </Show>
     </div>
   );

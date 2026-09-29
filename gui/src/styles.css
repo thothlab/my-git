@@ -32,10 +32,12 @@
 }
 
 html, body, #root { height: 100%; margin: 0; }
+/* 0.8125rem is 13px at the default root: the "Font size" setting is this
+   size, and every text size in the app is rem so that it follows. */
 body {
   background: rgb(var(--bg));
   color: rgb(var(--fg));
-  font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 0.8125rem/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
   user-select: none;
 }

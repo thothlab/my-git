@@ -677,7 +677,7 @@ function RowView(props: {
 function Section(props: { title: string; children: any }) {
   return (
     <div class="mb-1">
-      <div class="px-2 py-0.5 text-[10px] uppercase tracking-wide text-fg-subtle">
+      <div class="px-2 py-0.5 text-[0.625rem] uppercase tracking-wide text-fg-subtle">
         {props.title}
       </div>
       {props.children}

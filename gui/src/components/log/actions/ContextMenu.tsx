@@ -157,7 +157,7 @@ export default function ContextMenu(props: {
                   >
                     {a().label}
                     <Show when={a().disabled && a().reason}>
-                      <span class="block text-[10px] leading-3 text-fg-subtle">{a().reason}</span>
+                      <span class="block text-[0.625rem] leading-3 text-fg-subtle">{a().reason}</span>
                     </Show>
                   </button>
                 );

@@ -69,24 +69,60 @@ export function cycleTheme() {
 }
 applyTheme();
 
-// ── Font size (small / medium / large) ───────────────────────────────────────
-// Scales the root font-size, which every Tailwind text-* rem utility resolves
-// against. "medium" is 16px — the browser default — so a user who never opens
-// this setting sees the app exactly as before.
+// ── Font size ────────────────────────────────────────────────────────────────
+// One number, in px: the size of the app's main text (`body`). Everything else
+// is laid out relative to it — the root font-size every Tailwind rem utility
+// resolves against is `16 * uiScale()`, so the default of 13 is exactly the
+// 16px root the app was designed at, and a reader who never opens the setting
+// sees it unchanged.
+//
+// That only holds while nothing opts out: a text size written in px (`text-[11px]`)
+// or a px layout constant not multiplied by `uiScale()` stays put while the text
+// around it grows — which is how the old three-step setting ended up moving only
+// part of the window.
 
-export type FontSize = "small" | "medium" | "large";
-const FONT_SIZE_PX: Record<FontSize, string> = { small: "14px", medium: "16px", large: "18px" };
-const [fontSize, setFontSizeSignal] = createSignal<FontSize>(
-  (localStorage.getItem("fontSize") as FontSize) || "medium",
-);
+export const FONT_SIZE_MIN = 11;
+export const FONT_SIZE_MAX = 24;
+export const FONT_SIZE_DEFAULT = 13;
+/** What the retired small / medium / large setting looked like, in the new unit. */
+const LEGACY_FONT_SIZE: Record<string, number> = { small: 11, medium: 13, large: 15 };
+
+const clampFontSize = (n: number) =>
+  Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, Math.round(n)));
+
+function readFontSize(): number {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem("fontSize");
+  } catch {
+    return FONT_SIZE_DEFAULT;
+  }
+  if (raw === null) return FONT_SIZE_DEFAULT;
+  if (Object.hasOwn(LEGACY_FONT_SIZE, raw)) return LEGACY_FONT_SIZE[raw];
+  const n = Number(raw);
+  return Number.isFinite(n) ? clampFontSize(n) : FONT_SIZE_DEFAULT;
+}
+
+const [fontSize, setFontSizeSignal] = createSignal<number>(readFontSize());
 export { fontSize };
 
+/** Multiplier for px layout constants drawn at the default size. */
+export const uiScale = () => fontSize() / FONT_SIZE_DEFAULT;
+
+/** A px constant designed at the default size, at the current one — whole pixels. */
+export const scaledPx = (px: number) => Math.round(px * uiScale());
+
 function applyFontSize() {
-  document.documentElement.style.fontSize = FONT_SIZE_PX[fontSize()];
+  document.documentElement.style.fontSize = `${16 * uiScale()}px`;
 }
-export function setFontSize(f: FontSize) {
-  setFontSizeSignal(f);
-  localStorage.setItem("fontSize", f);
+export function setFontSize(n: number) {
+  if (!Number.isFinite(n)) return;
+  setFontSizeSignal(clampFontSize(n));
+  try {
+    localStorage.setItem("fontSize", String(fontSize()));
+  } catch {
+    // The size still applies for this session.
+  }
   applyFontSize();
 }
 applyFontSize();

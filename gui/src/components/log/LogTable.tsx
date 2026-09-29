@@ -41,7 +41,7 @@ import {
   setOrder,
   showNewCommits,
 } from "../../logStore";
-import { state } from "../../store";
+import { scaledPx, state } from "../../store";
 import { selectedBranch } from "./branchSelection";
 import FilterBar from "./FilterBar";
 import { commitMatches, matchRanges, type Span } from "./searchMatch";
@@ -65,13 +65,17 @@ import { IconRefresh } from "../IconButton";
  *  2. **A row reads its commit through `createMemo(() => commits()[vi.index])`.**
  *     Capturing the value at render time freezes rows: the list updates and the
  *     screen keeps the old text. This project hit it twice.
- *  3. **The row height is a constant and is applied to the row element**, not
+ *  3. **The row height is exact and is applied to the row element**, not
  *     merely estimated. The download anchor and the graph geometry both depend
- *     on it being exactly this many pixels.
+ *     on it being exactly this many pixels. It follows the font size setting
+ *     (`rowH()`, whole pixels), and a change of it re-measures the virtualizer
+ *     rather than re-creating it — rule 1.
  */
 
-/** Row height in px (PRD §Решения). Constant, in the element and in the graph. */
+/** Row height in px at the default font size (PRD §Решения): the element and the graph. */
 const ROW_H = 22;
+/** The row height at the current font size — text scales, so the row has to. */
+const rowH = () => scaledPx(ROW_H);
 const DEFAULT_AUTHOR_W = 150;
 const DEFAULT_DATE_W = 120;
 const MIN_COL_W = 60;
@@ -282,7 +286,7 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
                 class="absolute right-0 top-6 z-20 w-64 rounded border border-border bg-bg p-1 shadow-lg"
                 onMouseLeave={() => setMenuOpen(false)}
               >
-                <div class="px-2 py-1 text-[11px] uppercase text-fg-muted">
+                <div class="px-2 py-1 text-[0.6875rem] uppercase text-fg-muted">
                   {d().highlightHeader()}
                 </div>
                 <label class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-bg-muted">
@@ -298,7 +302,7 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
                     still showing everyone else's commits looked broken. It
                     dims; narrowing is the User filter's job, and the two are not
                     the same mechanism. */}
-                <div class="px-2 pb-1 pt-0.5 text-[11px] text-fg-subtle">{d().highlightHint()}</div>
+                <div class="px-2 pb-1 pt-0.5 text-[0.6875rem] text-fg-subtle">{d().highlightHint()}</div>
               </div>
             </Show>
           </div>
@@ -325,8 +329,8 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
             )}
           </Show>
           <div
-            class="grid shrink-0 select-none items-center border-b border-border bg-bg-subtle text-[11px] text-fg-muted"
-            style={{ "grid-template-columns": grid(), height: "20px" }}
+            class="grid shrink-0 select-none items-center border-b border-border bg-bg-subtle text-[0.6875rem] text-fg-muted"
+            style={{ "grid-template-columns": grid(), height: `${scaledPx(20)}px` }}
           >
             <div />
             <div class="truncate px-2">{d().colSubject()}</div>
@@ -439,9 +443,11 @@ function VirtualRows(props: {
       return rowCount();
     },
     getScrollElement: () => props.scrollEl,
-    estimateSize: () => ROW_H,
+    estimateSize: () => rowH(),
     overscan: 16,
   });
+  // The virtualizer caches sizes: a new font size re-lays the rows out in place.
+  createEffect(on(rowH, () => virt.measure(), { defer: true }));
 
   props.register((i) => virt.scrollToIndex(i, { align: "auto" }));
 
@@ -497,7 +503,7 @@ function VirtualRows(props: {
 /** The three terminal states of paging read differently and are not merged. */
 function ListEnd() {
   return (
-    <div class="px-2 py-1 text-center text-[11px] text-fg-muted">
+    <div class="px-2 py-1 text-center text-[0.6875rem] text-fg-muted">
       <Show when={loadingMore()}>{d().loadingMore()}</Show>
       <Show when={!loadingMore() && capped()}>{d().logCapReached()}</Show>
       <Show when={!loadingMore() && !capped() && atEnd()}>{d().logEnd()}</Show>
@@ -537,7 +543,7 @@ function Row(props: {
       }}
       style={{
         top: `${props.top}px`,
-        height: `${ROW_H}px`,
+        height: `${rowH()}px`,
         "grid-template-columns": props.grid,
       }}
       onClick={props.onClick}
@@ -562,7 +568,7 @@ function Row(props: {
           <LogGraph
             commit={props.commit}
             openAbove={props.openAbove}
-            height={ROW_H}
+            height={rowH()}
             width={props.graphW}
             capacity={props.capacity}
           />
@@ -574,7 +580,7 @@ function Row(props: {
       <div class="flex min-w-0 items-center gap-1 overflow-hidden px-2">
         <Show when={props.outside}>
           <span
-            class="shrink-0 rounded border border-border px-1 text-[10px] text-fg-subtle"
+            class="shrink-0 rounded border border-border px-1 text-[0.625rem] text-fg-subtle"
             title={d().offGraphTip()}
           >
             {d().offGraphLabel()}
@@ -642,7 +648,7 @@ function Refs(props: { refs: RefLabel[] }) {
       <For each={shown()}>
         {(r) => (
           <span
-            class={`max-w-64 shrink-0 truncate rounded border px-1 text-[10px] leading-4 ${cls(r)}`}
+            class={`max-w-64 shrink-0 truncate rounded border px-1 text-[0.625rem] leading-4 ${cls(r)}`}
             title={r.name}
           >
             {r.name}
@@ -651,7 +657,7 @@ function Refs(props: { refs: RefLabel[] }) {
       </For>
       <Show when={rest().length > 0}>
         <span
-          class="shrink-0 rounded border border-border px-1 text-[10px] leading-4 text-fg-muted"
+          class="shrink-0 rounded border border-border px-1 text-[0.625rem] leading-4 text-fg-muted"
           title={rest().map((r) => r.name).join("\n")}
         >
           {d().refsMore(rest().length)}

@@ -323,7 +323,7 @@ export default function CommitDetailsPane(props: {
                     />
                   )}
                 </Show>
-                <div class="border-t border-border px-2 py-1 text-[10px] uppercase tracking-wide text-fg-subtle">
+                <div class="border-t border-border px-2 py-1 text-[0.625rem] uppercase tracking-wide text-fg-subtle">
                   {loaded().cmp ? d().compareFilesTitle() : d().changedFiles()} ·{" "}
                   {d().filesCount(loaded().files.length)}
                 </div>
@@ -420,7 +420,7 @@ function CommitCard(props: {
         <div class="mt-1 whitespace-pre-wrap break-words text-fg-muted">{c().body.trim()}</div>
       </Show>
 
-      <div class="mt-2 font-mono text-[11px] text-fg-muted">{c().hash}</div>
+      <div class="mt-2 font-mono text-[0.6875rem] text-fg-muted">{c().hash}</div>
 
       <div class="mt-1 text-fg-muted">
         {d().authorLabel()}: {c().author} <MailLink email={c().authorEmail} /> ·{" "}

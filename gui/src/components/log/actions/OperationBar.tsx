@@ -97,14 +97,14 @@ export default function OperationBar() {
             <ul class="mt-0.5 max-h-24 overflow-auto">
               <For each={o().conflicted}>
                 {(p) => (
-                  <li class="truncate font-mono text-[11px] text-danger" title={p}>
+                  <li class="truncate font-mono text-[0.6875rem] text-danger" title={p}>
                     {p}
                   </li>
                 )}
               </For>
             </ul>
           </Show>
-          <div class="mt-0.5 text-[10px] text-fg-subtle">{d().opBlocksActions()}</div>
+          <div class="mt-0.5 text-[0.625rem] text-fg-subtle">{d().opBlocksActions()}</div>
         </div>
       )}
     </Show>

@@ -165,7 +165,7 @@ function GitConsoleView() {
 
 function Entry(props: { e: ConsoleEntry }) {
   return (
-    <div class="border-b border-border px-3 py-2 font-mono text-[11px]">
+    <div class="border-b border-border px-3 py-2 font-mono text-[0.6875rem]">
       <div class="text-fg-subtle">$ {props.e.command}</div>
       <Show when={props.e.kind === "error"}>
         <pre class="whitespace-pre-wrap text-danger">{(props.e as { message: string }).message}</pre>

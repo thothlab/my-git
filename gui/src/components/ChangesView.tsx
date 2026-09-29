@@ -253,7 +253,7 @@ function ListNode(props: { cl: ChangelistView }) {
         <span class="truncate font-semibold">{cl().name}</span>
         <span class="shrink-0 text-fg-muted">({cl().files.length})</span>
         <Show when={isActive()}>
-          <span class="shrink-0 rounded bg-accent/20 px-1 text-[10px] text-accent">
+          <span class="shrink-0 rounded bg-accent/20 px-1 text-[0.625rem] text-accent">
             {d().active()}
           </span>
         </Show>
@@ -418,7 +418,7 @@ function ContextMenu() {
           <Show when={mm().file}>
             {(path) => (
               <>
-                <div class="px-3 py-1 text-[10px] uppercase text-fg-muted">{d().moveTo()}</div>
+                <div class="px-3 py-1 text-[0.625rem] uppercase text-fg-muted">{d().moveTo()}</div>
                 <For each={moveTargets()}>
                   {(c) => (
                     <MenuItem
@@ -608,7 +608,7 @@ function ViewOptionsMenu() {
         <>
           <div class="fixed inset-0 z-20" onClick={() => setOpen(false)} />
           <div class="absolute left-0 top-full z-30 mt-1 min-w-44 rounded-md border border-border bg-bg py-1 text-xs text-fg shadow-lg">
-            <div class="px-3 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">
+            <div class="px-3 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-fg-subtle">
               {d().groupByHeader()}
             </div>
             <MenuToggle
@@ -616,7 +616,7 @@ function ViewOptionsMenu() {
               label={d().directory()}
               onClick={() => toggleGroupByDir()}
             />
-            <div class="mt-1 border-t border-border px-3 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fg-subtle">
+            <div class="mt-1 border-t border-border px-3 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-fg-subtle">
               {d().showHeader()}
             </div>
             <MenuToggle
