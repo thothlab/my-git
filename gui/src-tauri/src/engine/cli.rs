@@ -787,14 +787,14 @@ impl CliEngine {
         if against == "index" || against == "head" {
             return Ok(d);
         }
-        // "Empty diff ⇒ untracked file" is exactly right while nothing is
-        // ignored, and that is the behaviour `none` must keep. Only when a
-        // whitespace mode is active can an empty diff also mean "the change
-        // is whitespace-only" — there, and only there, ask git whether it
-        // knows the path, so a whitespace-only change is not re-rendered as
-        // an all-add diff of the whole file.
-        let empty_means_untracked = ws.is_empty() || !self.is_tracked(path);
-        if !d.iter().all(u8::is_ascii_whitespace) || !empty_means_untracked {
+        // An empty diff has two readings: the file is untracked (git compares
+        // nothing), or it is tracked and has nothing unstaged — staged whole, or
+        // only whitespace changed under an ignoring mode. Only the first is drawn
+        // as an all-add diff, so git is asked which one it is. Reading "empty" as
+        // "untracked" drew a fully staged file as new in the Unstaged view, and a
+        // revert there removed lines that were never a change. An intent-to-add
+        // file is in the index and has a diff of its own; it never gets here.
+        if !d.iter().all(u8::is_ascii_whitespace) || self.is_tracked(path) {
             return Ok(d);
         }
         // Untracked: an all-add diff against nothing. `--no-index` exits 1 exactly
@@ -833,6 +833,11 @@ impl CliEngine {
             ));
         }
         let raw = self.raw_diff(path, against, "none", context)?;
+        if raw.iter().all(u8::is_ascii_whitespace) {
+            return Err(Error::Rule(format!(
+                "{path} has no change here to choose from"
+            )));
+        }
         if fnv1a(&raw) != digest {
             return Err(Error::Stale(format!(
                 "{path} changed since its diff was shown; look at it again and choose anew"
@@ -2371,6 +2376,33 @@ pub(crate) mod tests {
         lines.iter().map(|l| format!("{l}\n")).collect()
     }
 
+    /// A tracked file staged whole has nothing unstaged: its working-tree diff is
+    /// empty, not the whole file drawn as new — and there is nothing to revert in it.
+    #[test]
+    fn a_fully_staged_file_has_no_unstaged_diff_and_nothing_to_revert() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "two\n").unwrap();
+        run(p, &["add", "a.txt"]);
+        let eng = CliEngine::new(p);
+
+        let d = eng.diff_file("a.txt", "worktree", "none", None).unwrap();
+        assert!(d.hunks.is_empty(), "no unstaged change: {:?}", d.hunks);
+        for ws in ["trailing", "all"] {
+            let w = eng.diff_file("a.txt", "worktree", ws, None).unwrap();
+            assert!(w.hunks.is_empty(), "{ws}: {:?}", w.hunks);
+        }
+
+        let r = eng.selection_patch("a.txt", "worktree", &[all(0)], &d.digest, None, true);
+        assert!(matches!(r, Err(Error::Rule(_))), "{r:?}");
+        assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap(), "two\n");
+
+        // An untracked file still gets its all-add diff.
+        std::fs::write(p.join("u.txt"), "u\n").unwrap();
+        let u = eng.diff_file("u.txt", "worktree", "none", None).unwrap();
+        assert_eq!(u.hunks.len(), 1);
+    }
+
     /// Two hunks; the first grows by one line, so the second one's written side
     /// sits where the earlier choices put it, not where git printed it.
     fn two_hunk_file(p: &Path) -> Vec<String> {
@@ -3267,11 +3299,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// DoD: `none` gives the prior result. A tracked file with everything staged had
-    /// an empty worktree diff even before whitespace modes existed, and the fallback
-    /// synthesized an all-add diff for it — that stays.
+    /// A tracked file with everything staged has an empty worktree diff in every
+    /// whitespace mode, `none` included. This test used to pin the opposite — the
+    /// all-add fallback for it, kept as "the prior result" — and that was the bug:
+    /// the Unstaged view drew a staged file as new, and a revert there removed real
+    /// lines. The staged change is where it belongs, against the index.
     #[test]
-    fn diff_file_none_mode_keeps_prior_empty_diff_fallback() {
+    fn diff_file_of_a_fully_staged_file_is_empty_against_the_worktree() {
         let dir = scratch_repo();
         let p = dir.path();
         std::fs::write(p.join("f.txt"), "alpha\n").unwrap();
@@ -3282,8 +3316,7 @@ pub(crate) mod tests {
 
         let eng = CliEngine::new(p);
         let d = eng.diff_file("f.txt", "worktree", "none", None).unwrap();
-        assert_eq!(d.hunks.len(), 1, "prior behaviour: synthesized all-add diff");
-        assert!(d.hunks[0].lines.iter().all(|l| l.origin == "+"));
+        assert!(d.hunks.is_empty(), "nothing unstaged: {:?}", d.hunks);
         assert_eq!(
             eng.diff_file("f.txt", "index", "none", None).unwrap().hunks.len(),
             1,
