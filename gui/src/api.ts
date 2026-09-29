@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // ── Types (mirror src-tauri/src/model.rs) ────────────────────────────────────
 
@@ -74,6 +75,19 @@ export const openRepo = (path?: string) =>
   invoke<RepoState>("repo_open", { path: path ?? null });
 
 export const repoState = () => invoke<RepoState>("repo_state");
+
+/** Payload of the `repo-external-change` event (`src-tauri/src/watch.rs`):
+ *  something outside Graft moved refs, HEAD or an operation marker. `repoPath`
+ *  is spelled exactly as `RepoState.repoPath`. */
+export interface RepoExternalChange {
+  repoPath: string;
+}
+
+/** Not a command: the backend's git-dir watcher pushes this on its own. */
+export const onRepoExternalChange = (
+  cb: (e: RepoExternalChange) => void,
+): Promise<UnlistenFn> =>
+  listen<RepoExternalChange>("repo-external-change", (e) => cb(e.payload));
 
 export const setShowIgnored = (value: boolean) =>
   invoke<RepoState>("set_show_ignored", { value });

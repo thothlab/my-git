@@ -31,6 +31,7 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -77,16 +78,76 @@ thread_local! {
 
 /// Run `f` as a user action named `action` (the Tauri command's name): every git
 /// process started inside is journaled with origin `user`.
+///
+/// It is also counted in [`OWN_ACTIONS`], process-wide: the thread-local above
+/// answers "is *this* thread inside an action", which the git-dir watcher, living on
+/// a thread of its own, can never ask.
 pub fn as_user<T>(action: &'static str, f: impl FnOnce() -> T) -> T {
     struct Restore(Option<&'static str>);
     impl Drop for Restore {
         fn drop(&mut self) {
             ACTION.with(|a| a.set(self.0));
+            OWN_ACTIONS.leave();
         }
     }
+    OWN_ACTIONS.enter();
     let _restore = Restore(ACTION.with(|a| a.replace(Some(action))));
     f()
 }
+
+/// User actions running right now, process-wide, and when the last one ended.
+///
+/// The watcher (`crate::watch`) asks it whether a change in the git directory is
+/// Graft's own doing: a commit made from the panel writes `HEAD` and `refs/` just as
+/// one typed in a terminal does, and the panel re-reads after its own action anyway.
+/// The grace after the end covers what the file-system events still have in flight
+/// when the command returns.
+pub struct Activity {
+    running: AtomicUsize,
+    ended: Mutex<Option<Instant>>,
+}
+
+impl Activity {
+    pub const fn new() -> Self {
+        Activity {
+            running: AtomicUsize::new(0),
+            ended: Mutex::new(None),
+        }
+    }
+
+    pub fn enter(&self) {
+        self.running.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn leave(&self) {
+        // Stamp first, then decrement: a reader seeing zero also sees the stamp.
+        if let Ok(mut e) = self.ended.lock() {
+            *e = Some(Instant::now());
+        }
+        self.running.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Is an action running, or did one end less than `grace` ago?
+    pub fn within(&self, grace: std::time::Duration) -> bool {
+        if self.running.load(Ordering::SeqCst) > 0 {
+            return true;
+        }
+        self.ended
+            .lock()
+            .ok()
+            .and_then(|e| *e)
+            .is_some_and(|at| at.elapsed() < grace)
+    }
+}
+
+impl Default for Activity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Every [`as_user`] scope of the process.
+pub static OWN_ACTIONS: Activity = Activity::new();
 
 /// One git invocation being prepared. Built by [`git`], finished by [`Git::run`].
 pub(crate) struct Git<'a> {

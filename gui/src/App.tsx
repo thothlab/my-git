@@ -29,6 +29,7 @@ import StashPanel from "./components/StashPanel";
 import GitConsolePanel, { openGitConsole } from "./components/GitConsolePanel";
 import DiscardPanel from "./components/DiscardPanel";
 import { DISABLED_CLASS } from "./components/IconButton";
+import { msSinceRefresh, nudgeRepoWatch, refreshOnFocus, startRepoWatch } from "./repoWatch";
 
 const LEFT_WIDTH_KEY = "leftPanelWidth";
 const TREE_WIDTH_KEY = "logTreeWidth";
@@ -77,6 +78,9 @@ export default function App() {
     registerHotkey("Digit1", () => setViewMode("changes"));
     registerHotkey("Digit2", () => setViewMode("log"));
     registerHotkey("Backquote", () => openGitConsole());
+    // External git activity while the window is open: the git-dir watcher.
+    // Before the first `await`, for the same reason as the update timer below.
+    onCleanup(startRepoWatch());
 
     // Automatic update checks, all silent: only the About button reports an
     // outcome. Once at boot is not enough — this window stays open for days, so
@@ -90,6 +94,11 @@ export default function App() {
     await openInitial();
 
     // resync on window focus — external git activity between interactions.
+    // Refs, HEAD and operation markers moved from a terminal are also caught by
+    // the git-dir watcher (`repoWatch.ts`) without a focus change; focus is still
+    // the only thing that sees an external `git add` (the watcher leaves `index`
+    // alone, see src-tauri/src/watch.rs), and it flushes a watcher refresh that
+    // was waiting for the window to be shown again.
     //
     // A macOS permission prompt (e.g. the Documents-folder TCC dialog a repo
     // under Documents/Desktop/Downloads can trigger) steals focus when it
@@ -103,14 +112,19 @@ export default function App() {
     // src-tauri/Info.plist), but it does stop this handler from being the
     // thing that keeps the loop alive: the burst of prompts from opening the
     // repo still happens once, then goes quiet instead of continuing forever.
-    let lastFocusRefreshAt = 0;
+    // The cooldown is measured from the last refresh of *either* kind: a
+    // watcher refresh whose `git` raised the prompt must not have the focus the
+    // prompt gives back start git again straight away.
     const FOCUS_REFRESH_COOLDOWN_MS = 3000;
     const unlisten = await getCurrentWindow().onFocusChanged(({ payload }) => {
       if (!payload) return;
-      const now = Date.now();
-      if (now - lastFocusRefreshAt < FOCUS_REFRESH_COOLDOWN_MS) return;
-      lastFocusRefreshAt = now;
-      void refresh();
+      if (msSinceRefresh() < FOCUS_REFRESH_COOLDOWN_MS) {
+        // Only acts if the watcher has an external change waiting — never
+        // runs git in answer to focus alone, so the loop above stays broken.
+        nudgeRepoWatch();
+        return;
+      }
+      void refreshOnFocus();
       void checkForUpdatesNow();
     });
     onCleanup(unlisten);

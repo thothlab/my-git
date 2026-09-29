@@ -109,6 +109,16 @@ pub struct BranchInfo {
     pub upstream: Option<String>,
 }
 
+/// Payload of the `repo-external-change` event (`crate::watch`): something outside
+/// Graft moved refs, `HEAD` or an operation marker of this repository. `repo_path` is
+/// spelled exactly as `RepoState.repo_path`, so the window can tell a late event of a
+/// repository it has already left.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoExternalChange {
+    pub repo_path: String,
+}
+
 /// Full repository state pushed to the UI on every mutation / refresh.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -4,6 +4,7 @@ mod engine;
 mod error;
 mod model;
 mod uistate;
+mod watch;
 
 use commands::AppState;
 use tauri::Emitter;

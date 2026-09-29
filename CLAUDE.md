@@ -27,8 +27,8 @@
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
 | `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, разбор и печать команды консоли), 150 утверждений |
-| `cargo test` | Оба крейта разом: 188 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 188 тестов |
+| `cargo test` | Оба крейта разом: 199 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 199 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -60,6 +60,7 @@ gui/src-tauri/src/  бэк GUI
   error.rs          Error и его сериализация
   changelists.rs    хранилище .git/changelists.json
   uistate.rs        хранилище .git/graft-ui.json
+  watch.rs          наблюдатель за git-dir (крейт notify): событие repo-external-change
   engine/exec.rs    единственный запуск процесса git, журнал команд, маскировка учётных данных
   engine/cli.rs     CliEngine — snapshot, диффы, стейджинг, ветки, push/pull + общие парсеры
   engine/log.rs     история и раскладка лейнов графа
@@ -71,6 +72,7 @@ gui/src/            фронт
   api.ts            зеркала всех команд в camelCase + типы
   store.ts          глобальное состояние окна, run(), модалки
   logStore.ts       состояние панели лога
+  repoWatch.ts      когда отвечать на repo-external-change: refreshKeepingError() + дерево веток
   hotkeys.ts        клавиатурный слой
   i18n.ts           словари en/ru
   components/       Changes-режим (ChangesView, DiffView, CommitPanel, Toolbar, ...);
@@ -89,6 +91,12 @@ gui/scripts/        check-log-filters.mjs
 Окно одно, режима два: `changes` и `log` (`store.viewMode`, `Cmd/Ctrl+1` / `Cmd/Ctrl+2`).
 Переключение размонтирует панели, состояние живёт в модульных сигналах и переживает это.
 История не читается, пока пользователь не открыл режим Log.
+
+Внешние изменения (коммит, checkout, fetch, stash из терминала) окно видит двумя путями:
+наблюдатель за git-dir (`watch.rs` → событие `repo-external-change` → `repoWatch.ts`:
+`refreshKeepingError()` + `afterRepoChange({ log: false })`) и `refresh()` на возврате фокуса
+(`App.tsx`). Фокус
+остаётся единственным, кто видит внешний `git add`: `index` наблюдатель не слушает.
 
 ### Rust
 
@@ -115,7 +123,9 @@ Git вызывается только как внешний процесс. `gix
   `BACKGROUND_CAP = 2000` фоновых чтений, чтобы частый фон не вытеснял «Мои»; каждый поток
   обрезан до `STREAM_CAP = 256 KiB` у действий пользователя и упавших фоновых запусков и до
   `QUIET_STREAM_CAP = 16 KiB` у успешных фоновых), `as_user(action, || …)` и
-  `mask_credentials`.
+  `mask_credentials`. `as_user` ведёт ещё и `OWN_ACTIONS: Activity` — счётчик действий на
+  весь процесс и время конца последнего (`within(grace)`): thread-local `ACTION` отвечает
+  только своему потоку, а наблюдатель за git-dir живёт на своём.
 - `engine::cli` — рабочее дерево, стейджинг, diff файла, коммит, базовые операции с ветками,
   push/fetch/pull. Плюс чтение и запись текстового файла рабочего дерева:
   `read_text_file(rel) -> TextFile`, `write_text_file(rel, text, eol, expect) -> новый
@@ -157,6 +167,19 @@ Git вызывается только как внешний процесс. `gix
   рабочее дерево; изменённые после отката пути — `Error::Stale`, с `force` — сначала копия
   текущего (каждое восстановление само записывается как `kind: restore`).
 - `uistate` — `get`, `set`, `state_path`. Атомарная запись через уникальный tmp + rename.
+- `watch` — `start(repo, own, report) -> RepoWatcher` (drop — остановка), `GitDirs::resolve`
+  (git-dir и common-dir через `git_paths`, канонизированные), чистые `relevant` /
+  `relevant_common` (фильтр путей), константы `DEBOUNCE = 300 мс`, `MAX_BATCH = 2 с`,
+  `OWN_GRACE = 1 с`. Крейт `notify` 8, пауза своя, а не `notify-debouncer-*`: каждое сырое
+  событие помечается «своё / чужое» в момент прихода. Сам git на событиях не запускает —
+  один `rev-parse` при создании. Слушается allowlist от корня git-dir, по компонентам:
+  `HEAD`, `ORIG_HEAD`, `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `packed-refs`,
+  `refs/`, `logs/HEAD`, `logs/refs/`, `rebase-merge/`, `rebase-apply/`, `sequencer/`; явно
+  **нет**: `index`, `FETCH_HEAD`, `*.lock`, `refs/graft/` и `logs/refs/graft/`,
+  `changelists.json*`, `graft-ui.json*`. В common-dir linked worktree — только общее (`refs/`,
+  `packed-refs`, `logs/refs/`), `worktrees/<чужой>/` — никогда. Свои действия Graft
+  подавляет `exec::OWN_ACTIONS` (счётчик областей `as_user` на процесс + `OWN_GRACE` после
+  конца).
 
 Соглашения слоя:
 
@@ -371,8 +394,10 @@ Git вызывается только как внешний процесс. `gix
   `logSplitRatio`, `logDetailsWidth`, `diffSplitRatio`, `diffWhitespace`, `diffHighlight`,
   `logOrder`, `logDimNonMatching`, `branchMenuOptions` (как показывать выпадающий список
   веток), `recentBranches` (недавние ветки по репозиториям).
-- Память процесса Rust: `AppState` — корень открытого репозитория и флаг «показывать
-  игнорируемые». Флаг живёт сессию приложения, при старте `store.openInitial` переприменяет
+- Память процесса Rust: `AppState` — корень открытого репозитория, флаг «показывать
+  игнорируемые» и наблюдатель за git-dir (`watcher`, пересоздаётся в `repo_open` при смене
+  корня, старый останавливается drop'ом; не завёлся — открытие не падает, остаётся фокус).
+  Флаг живёт сессию приложения, при старте `store.openInitial` переприменяет
   сохранённый выбор. Там же журнал команд (`engine::exec`, два статических кольца — 1000
   действий пользователя и 2000 фоновых чтений, общие для всех репозиториев, у записи есть поле
   `repo`; худший случай ≈ 512 МБ + 64 МБ, первое слагаемое достижимо только выводом команд
@@ -519,6 +544,40 @@ Git вызывается только как внешний процесс. `gix
   их каталоги остаются, ошибки удаления доезжают до UI.
 - Путь из hunk-патча берётся у git (`apply --numstat -z`), а не из заголовка `diff --git`:
   при `core.quotePath` заголовок экранирован.
+- **Наблюдатель за git-dir: пути канонизировать до `strip_prefix`.** macOS-поток FSEvents
+  отдаёт `/private/var/...` для наблюдения, поставленного на `/var/...`, и сравнение двух
+  написаний одного каталога молча не совпадает ни разу. `GitDirs::resolve` канонизирует оба
+  каталога, наблюдение ставится на канонизированные.
+- Фильтр наблюдателя матчит **компоненты от корня git-dir**, не суффикс: `worktrees/<другой>/HEAD`
+  и `modules/<sub>/HEAD` тоже кончаются на `HEAD`, но это чужой worktree и субмодуль.
+- `EventKind::Access` отбрасывается явно: inotify (Linux) сообщает о каждом *открытии*, и
+  `git status` собственного refresh'а будил бы наблюдателя без конца. По той же причине не
+  слушаются `index` (его переписывает `git status`) и `changelists.json` (его пишет
+  `build_state`): refresh не должен становиться причиной следующего refresh'а.
+- Refresh от наблюдателя не стартует, пока `busy()`: у `run()` нет `seq`, и чтение,
+  начатое до мутации и отвеченное после неё, поставило бы состояние старше мутации. Событие
+  ждёт конца мутации (эффект на `busy` в `repoWatch.ts`), а не теряется. Своё действие Graft
+  подавлено ещё на бэке (`OWN_ACTIONS` + `OWN_GRACE`); чужое изменение, попавшее в это окно,
+  неотличимо от своего — его подхватит перечитывание после самой мутации, следующее событие
+  или фокус.
+- Кулдаун фокуса (петля TCC-промптов, комментарий в `App.tsx`) считается от **последнего
+  refresh'а любого рода** (`msSinceRefresh`): промпт, поднятый git'ом refresh'а от
+  наблюдателя, возвращает фокус, и без общих часов тот сразу запустил бы git ещё раз.
+  Внутри кулдауна фокус только толкает отложенное внешнее изменение (`nudgeRepoWatch`) —
+  без него git не запускается.
+- Пока открыт редактор файла, наблюдатель перечитывает только лог и дерево веток, а
+  `RepoState` — после закрытия (или на фокусе): внешний коммит правимого файла убирает его из
+  changelist'ов, выделение сбрасывается, и редактор закрылся бы вместе с ним.
+- Refresh от наблюдателя лог **не перезагружает силой** (`afterRepoChange({ log: false })`):
+  свежий `RepoState` сам проходит через `checkNewCommits` в `LogTable` — наверху списка это
+  `reload({ keepSelection })`, прокрученному читателю — предложение «N новых». Принудительный
+  reload двигал бы строки под ним, а выделение за первой страницей заменял бы новейшим
+  коммитом: автообновление закрывало бы открытое. Явно лог перечитывается, только когда
+  `RepoState` отложен из-за открытого редактора.
+- Refresh от наблюдателя **не сбрасывает баннер ошибки**: `refreshKeepingError()` из
+  `store.ts` = `run(…, "", { keepError: true })`. Фокус и кнопка Refresh — это возврат
+  пользователя к окну, там успешное перечитывание ошибку снимает; наблюдатель срабатывает от
+  терминала, когда в окно могли не смотреть, и стёр бы непрочитанный отказ push'а или конфликт.
 
 ## Инициативы и PRD
 

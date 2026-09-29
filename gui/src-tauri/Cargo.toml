@@ -21,6 +21,10 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Watches the git directory so a commit / checkout / fetch made in a terminal shows up
+# without a focus change (`watch.rs`). The debounce is ours, not notify-debouncer-*:
+# each raw event is tagged "Graft's own action or not" the moment it arrives.
+notify = "8"
 
 # No gix/git2: the MVP engine is CLI-first (shell-out to system `git`), which ТЗ §2.1
 # explicitly endorses and which keeps the binary light. The GitEngine trait keeps a

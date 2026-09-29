@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::changelists::{self, Store};
 use crate::engine::cli::CliEngine;
@@ -14,9 +14,10 @@ use crate::model::{
     BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, DiscardEntry,
     DiscardKind, DiscardOutcome, Eol, FileDiff,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
-    LogFilter, LogPage, RepoState, StashEntry, TextFile, UiState,
+    LogFilter, LogPage, RepoExternalChange, RepoState, StashEntry, TextFile, UiState,
 };
 use crate::uistate;
+use crate::watch::{self, RepoWatcher};
 
 /// Holds the currently open repository root. Commands are `async` at the Tauri layer
 /// (see lib.rs) so long git work never blocks the UI thread.
@@ -25,6 +26,9 @@ pub struct AppState {
     pub repo: Mutex<Option<PathBuf>>,
     /// Whether the synthetic "Ignored Files" list is included in the state.
     pub show_ignored: AtomicBool,
+    /// The git-dir watcher of the open repository (`crate::watch`). Replaced when
+    /// another repository is opened — the old one stops on drop.
+    pub watcher: Mutex<Option<RepoWatcher>>,
 }
 
 impl AppState {
@@ -116,11 +120,47 @@ where
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn repo_open(state: State<'_, AppState>, path: Option<String>) -> Result<RepoState> {
+pub async fn repo_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: Option<String>,
+) -> Result<RepoState> {
     let start = path.unwrap_or_else(|| ".".to_string());
     let root = CliEngine::resolve_root(Path::new(&start))?;
-    *state.repo.lock().unwrap() = Some(root);
+    *state.repo.lock().unwrap() = Some(root.clone());
+    watch_repo(&app, &state, &root);
     build_state(&state)
+}
+
+/// Point the git-dir watcher at `root`: kept if it already watches it, else the old
+/// one is dropped (stopped) first and a new one started.
+///
+/// A watcher that cannot start is not a failed open: the repository is readable, and
+/// what the watcher would add — seeing a terminal's commit without coming back to
+/// the window — the focus refresh still delivers.
+fn watch_repo(app: &AppHandle, state: &State<AppState>, root: &Path) {
+    let mut slot = state.watcher.lock().unwrap();
+    if slot.as_ref().is_some_and(|w| w.repo() == root) {
+        return;
+    }
+    *slot = None;
+    let app = app.clone();
+    let started = watch::start(
+        root,
+        || exec::OWN_ACTIONS.within(watch::OWN_GRACE),
+        move |repo| {
+            let _ = app.emit(
+                "repo-external-change",
+                RepoExternalChange {
+                    repo_path: repo.display().to_string(),
+                },
+            );
+        },
+    );
+    match started {
+        Ok(w) => *slot = Some(w),
+        Err(e) => eprintln!("graft: not watching {}: {e}", root.display()),
+    }
 }
 
 #[tauri::command]

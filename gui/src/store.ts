@@ -200,13 +200,20 @@ function applyState(s: RepoState): void {
 /**
  * `label` names the operation for the busy indicator: an unlabelled bar during
  * a long fetch or rebase says only "something is happening".
+ *
+ * `keepError` leaves the banner alone on success — for a re-read nobody asked
+ * for (see `refreshKeepingError`). A failure still reports as always.
  */
-export async function run(p: Promise<RepoState>, label = ""): Promise<void> {
+export async function run(
+  p: Promise<RepoState>,
+  label = "",
+  opts: { keepError?: boolean } = {},
+): Promise<void> {
   setBusy(true);
   setBusyLabel(label);
   try {
     applyState(await p);
-    setError("");
+    if (!opts.keepError) setError("");
   } catch (e) {
     reportError(e);
     // A refused command is not the same as an unchanged repository. A revert,
@@ -232,6 +239,16 @@ export async function run(p: Promise<RepoState>, label = ""): Promise<void> {
 }
 
 export const refresh = () => run(apiRepoState());
+
+/**
+ * `refresh()` that does not clear the error banner — for the git-dir watcher
+ * (`repoWatch.ts`). A focus or the Refresh button is the user coming back to
+ * the window, and a successful re-read then retires the old error. The watcher
+ * fires because a terminal did something, while the reader may not have looked
+ * at the window at all: clearing there would erase a failed push or a conflict
+ * report before anyone read it.
+ */
+export const refreshKeepingError = () => run(apiRepoState(), "", { keepError: true });
 
 /**
  * Like `run()`, for a mutation whose result carries more than `RepoState` — the
