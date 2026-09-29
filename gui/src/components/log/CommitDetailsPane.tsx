@@ -13,6 +13,7 @@ import {
   commitFiles,
   commitsCompare,
   errText,
+  WORKING_TREE,
   type CommitDetails,
   type CommitFileEntry,
 } from "../../api";
@@ -22,6 +23,8 @@ import { setSelectedPath, setViewMode, state, statusMeta } from "../../store";
 import type { CompareTarget } from "./actions/compareSelection";
 import { PanelBtn, PanelChrome, PanelNote } from "./PanelChrome";
 import { IconCollapseAll, IconExpandAll } from "../IconButton";
+import { openFileHistory } from "../FileHistoryPanel";
+import ContextMenu, { anchorOfElement, type MenuAnchor } from "./actions/ContextMenu";
 import { setSelectedCommitFile, selectedCommitFile } from "./commitFileSelection";
 import {
   baseName,
@@ -233,6 +236,31 @@ export default function CommitDetailsPane(props: {
     setViewMode("changes");
   };
 
+  /**
+   * R05c: the history of a file, from the revision it was picked in — the path is
+   * the name the file has *there*, and after a later rename it may not exist at
+   * HEAD at all. A comparison against the working tree starts from HEAD.
+   */
+  const openHistory = (path: string) => {
+    const r = ready();
+    if (!r) return;
+    if (!r.cmp) openFileHistory(path, r.hash);
+    else if (r.cmp.to === WORKING_TREE) openFileHistory(path);
+    else openFileHistory(path, r.cmp.to, r.cmp.toLabel);
+  };
+
+  const [menu, setMenu] = createSignal<{ anchor: MenuAnchor; path: string } | null>(null);
+  const menuItems = () => {
+    const m = menu();
+    if (!m) return [];
+    return [{ label: d().fileHistoryItem(), run: () => openHistory(m.path) }];
+  };
+  const openMenuForCursor = () => {
+    const row = currentRow();
+    if (row?.kind !== "file") return;
+    setMenu({ anchor: anchorOfElement(anchors.get(row.key)), path: row.file.path });
+  };
+
   const onKey = (e: KeyboardEvent) => {
     const row = currentRow();
     if (!row || row.kind !== "dir") return false;
@@ -269,10 +297,21 @@ export default function CommitDetailsPane(props: {
           goToRow(edge === -1 ? list[0] : list[list.length - 1]);
         },
         activate,
+        contextMenu: openMenuForCursor,
         onKey,
       }}
       toolbar={
         <Show when={ready()}>
+          <PanelBtn
+            label="◷"
+            tip={d().fileHistoryTip()}
+            disabled={!pickedPath()}
+            disabledTip={d().fileHistoryPickFile()}
+            onClick={() => {
+              const p = pickedPath();
+              if (p) openHistory(p);
+            }}
+          />
           <PanelBtn
             label="⇱"
             tip={d().openCurrentVersionTip()}
@@ -343,6 +382,11 @@ export default function CommitDetailsPane(props: {
                             selected={selectedCommitFile()?.path === row.file.path}
                             cursor={cursor() === row.key}
                             onPick={() => pick(row.file)}
+                            onMenu={(e) => {
+                              e.preventDefault();
+                              pick(row.file);
+                              setMenu({ anchor: { x: e.clientX, y: e.clientY }, path: row.file.path });
+                            }}
                           />
                         ) : (
                           <DirRow
@@ -364,6 +408,11 @@ export default function CommitDetailsPane(props: {
             )}
           </Show>
         </Show>
+      </Show>
+      <Show when={menu()}>
+        {(m) => (
+          <ContextMenu anchor={m().anchor} items={menuItems} onClose={() => setMenu(null)} />
+        )}
       </Show>
     </PanelChrome>
   );
@@ -509,6 +558,7 @@ function FileRow(props: {
   selected: boolean;
   cursor: boolean;
   onPick: () => void;
+  onMenu: (e: MouseEvent) => void;
 }) {
   const f = () => props.row.file;
   const m = () => statusMeta(f().status);
@@ -519,6 +569,7 @@ function FileRow(props: {
       classList={{ "bg-accent/15": props.selected, "ring-1 ring-inset ring-accent/40": props.cursor }}
       style={{ "padding-left": `${8 + props.row.depth * 16 + 16}px` }}
       onClick={props.onPick}
+      onContextMenu={props.onMenu}
       title={f().oldPath ? `${f().oldPath} → ${f().path}` : f().path}
     >
       <span class={`w-3 shrink-0 text-center font-bold ${m().cls}`} title={f().status}>

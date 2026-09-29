@@ -242,6 +242,46 @@ pub struct LogPage {
     pub lane_overflow: bool,
 }
 
+/// A commit that touched one file, as the file history lists it
+/// (`engine::file_history`). The log's row fields, minus the graph, plus where the
+/// file was in **this** commit: `--follow` crosses renames, and the diff of an
+/// older row must be asked for under the name the file had then.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHistoryCommit {
+    pub hash: String,
+    pub short_hash: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub author_email: String,
+    pub author_at: i64,
+    pub subject: String,
+    pub refs: Vec<RefLabel>,
+    /// The file's path in this commit (the new name on the rename commit itself).
+    pub path: String,
+    /// The name before the change, on the commit that renamed the file.
+    pub old_path: Option<String>,
+    pub status: FileState,
+}
+
+/// Where the next page of a file history starts. Opaque to the client: handed
+/// back verbatim. `anchor` pins the history to the commit the first page was read
+/// from — see `engine::file_history` for why this is not the log's cursor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHistoryCursor {
+    pub skip: u32,
+    pub anchor: String,
+}
+
+/// One page of a file history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileHistoryPage {
+    pub commits: Vec<FileHistoryCommit>,
+    pub next_cursor: Option<FileHistoryCursor>,
+}
+
 /// Commit ordering requested by the filter bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

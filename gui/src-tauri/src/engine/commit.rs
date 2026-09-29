@@ -242,20 +242,31 @@ fn rename_source(entries: &[CommitFileEntry], path: &str) -> Option<String> {
 ///
 /// The raw patch is parsed by the one diff parser in the project, so a commit diff
 /// and a working-tree diff reach the panel in exactly the same shape.
+///
+/// `old_path` is the rename source when the caller knows it. The file history
+/// does: `git log --follow` reported the pair on the very commit that renamed the
+/// file, so the diff is asked for exactly the pair the list shows rather than
+/// whatever a whole-tree `-M` pairs up. `None` (or the path itself) is the
+/// ordinary lookup through [`files`].
 pub fn file_diff(
     repo: &Path,
     hash: &str,
     path: &str,
+    old_path: Option<&str>,
     ws: &str,
     context: Option<u32>,
 ) -> Result<FileDiff> {
+    let old_path = old_path.filter(|o| !o.is_empty() && *o != path);
     let wsa = whitespace_args(ws)?;
     let ctx = context_arg(context);
     let ctx: Vec<&str> = ctx.iter().map(String::as_str).collect();
     let parents = parents_of(repo, hash)?;
     let mut d = match parents.first() {
         Some(base) => {
-            let old = rename_source(&files(repo, hash)?, path);
+            let old = match old_path {
+                Some(o) => Some(o.to_string()),
+                None => rename_source(&files(repo, hash)?, path),
+            };
             let old_spec = old.as_deref().map(literal);
             let spec = literal(path);
             let mut a = vec!["diff", "-M"];
@@ -422,7 +433,7 @@ mod tests {
         let h = head(p);
 
         for d in [
-            file_diff(p, &h, "x[ab].txt", "none", None).unwrap(),
+            file_diff(p, &h, "x[ab].txt", None, "none", None).unwrap(),
             compare_diff(p, &format!("{h}~1"), &h, "x[ab].txt", "none", None).unwrap(),
         ] {
             let shown: Vec<&str> = d
@@ -464,13 +475,13 @@ mod tests {
         let h = head(p);
 
         // No context asked for: git's default of three, two hunks.
-        let d = file_diff(p, &h, "f.txt", "none", None).expect("default");
+        let d = file_diff(p, &h, "f.txt", None, "none", None).expect("default");
         assert_eq!(d.hunks.len(), 2, "the default keeps the two edits apart");
         let default_lines: usize = d.hunks.iter().map(|x| x.lines.len()).sum();
         assert_eq!(default_lines, 16, "3 context above and below each of two edits, plus the pairs");
 
         // Explicit 3 is the same command as no context at all.
-        let three = file_diff(p, &h, "f.txt", "none", Some(3)).expect("three");
+        let three = file_diff(p, &h, "f.txt", None, "none", Some(3)).expect("three");
         assert_eq!(three.hunks.len(), 2);
         assert_eq!(
             three.hunks.iter().map(|x| x.lines.len()).sum::<usize>(),
@@ -479,7 +490,7 @@ mod tests {
         );
 
         // Ten lines of context bridge the twenty-line gap: one hunk, whole file.
-        let wide = file_diff(p, &h, "f.txt", "none", Some(10)).expect("wide");
+        let wide = file_diff(p, &h, "f.txt", None, "none", Some(10)).expect("wide");
         assert_eq!(wide.hunks.len(), 1, "the gap is covered, so the edits share a hunk");
         assert_eq!(
             wide.hunks[0].lines.len(),
@@ -716,12 +727,12 @@ mod tests {
         run(p, &["commit", "-m", "drop b"]);
         let removed = head(p);
 
-        let d = file_diff(p, &added, "b.txt", "none", None).expect("added diff");
+        let d = file_diff(p, &added, "b.txt", None, "none", None).expect("added diff");
         assert!(!d.binary);
         assert_eq!(origins(&d), "++");
         assert_eq!(d.hunks[0].lines[1].content, "two");
 
-        let d = file_diff(p, &removed, "b.txt", "none", None).expect("deleted diff");
+        let d = file_diff(p, &removed, "b.txt", None, "none", None).expect("deleted diff");
         assert_eq!(origins(&d), "--");
     }
 
@@ -733,7 +744,7 @@ mod tests {
         // a.txt is "one" on the first parent and "one\ntwo" on the merge, so the
         // first-parent diff adds exactly one line. Against the second parent the
         // file is identical and the diff would have been empty.
-        let d = file_diff(p, &merge, "a.txt", "none", None).expect("merge diff");
+        let d = file_diff(p, &merge, "a.txt", None, "none", None).expect("merge diff");
         assert_eq!(origins(&d), " +");
         assert_eq!(d.hunks[0].lines[1].content, "two");
     }
@@ -756,7 +767,7 @@ mod tests {
         .trim()
         .to_string();
 
-        let d = file_diff(p, &root, "a.txt", "none", None).expect("root diff");
+        let d = file_diff(p, &root, "a.txt", None, "none", None).expect("root diff");
         assert_eq!(origins(&d), "+");
         assert_eq!(d.hunks[0].lines[0].content, "one");
     }
@@ -768,7 +779,7 @@ mod tests {
         std::fs::write(p.join("bin.dat"), [0u8, 1, 2, 3]).unwrap();
         run(p, &["add", "bin.dat"]);
         run(p, &["commit", "-m", "bin"]);
-        let d = file_diff(p, &head(p), "bin.dat", "none", None).expect("binary diff");
+        let d = file_diff(p, &head(p), "bin.dat", None, "none", None).expect("binary diff");
         assert!(d.binary, "binary file must be flagged");
         assert!(d.hunks.is_empty());
     }
@@ -788,27 +799,27 @@ mod tests {
         run(p, &["commit", "-am", "reindent"]);
         let h = head(p);
 
-        assert_eq!(origins(&file_diff(p, &h, "ws.txt", "none", None).unwrap()), "-+ ");
+        assert_eq!(origins(&file_diff(p, &h, "ws.txt", None, "none", None).unwrap()), "-+ ");
         assert!(
-            file_diff(p, &h, "ws.txt", "all", None).unwrap().hunks.is_empty(),
+            file_diff(p, &h, "ws.txt", None, "all", None).unwrap().hunks.is_empty(),
             "ignoring all whitespace must leave no difference"
         );
         // leading indentation is not at the end of the line
         assert_eq!(
-            origins(&file_diff(p, &h, "ws.txt", "trailing", None).unwrap()),
+            origins(&file_diff(p, &h, "ws.txt", None, "trailing", None).unwrap()),
             "-+ "
         );
 
-        assert_eq!(origins(&file_diff(p, &h, "eol.txt", "none", None).unwrap()), "-+");
+        assert_eq!(origins(&file_diff(p, &h, "eol.txt", None, "none", None).unwrap()), "-+");
         assert!(
-            file_diff(p, &h, "eol.txt", "trailing", None)
+            file_diff(p, &h, "eol.txt", None, "trailing", None)
                 .unwrap()
                 .hunks
                 .is_empty(),
             "ignoring trailing whitespace must leave no difference"
         );
 
-        let e = file_diff(p, &h, "ws.txt", "sideways", None).unwrap_err();
+        let e = file_diff(p, &h, "ws.txt", None, "sideways", None).unwrap_err();
         assert!(
             format!("{e:?}").contains("whitespace"),
             "unknown mode must be rejected, got {e:?}"
@@ -854,7 +865,7 @@ mod tests {
         assert_eq!(f[0].status, FileState::Renamed);
         // … and the diff must agree: two kept lines and one replaced, not a whole
         // file of additions.
-        let d = file_diff(p, &h, "renamed.txt", "none", None).expect("rename diff");
+        let d = file_diff(p, &h, "renamed.txt", None, "none", None).expect("rename diff");
         assert_eq!(origins(&d), "  -+");
 
         // the same for a comparison of two revisions
@@ -867,7 +878,7 @@ mod tests {
         let dir = scratch_repo();
         let p = dir.path();
         let (_main_tip, merge) = merge_repo(p);
-        let d = file_diff(p, &merge, "a.txt", "none", None).expect("merge diff");
+        let d = file_diff(p, &merge, "a.txt", None, "none", None).expect("merge diff");
         assert!(
             d.merge_first_parent,
             "a merge diff must carry the fact that it is against the first parent"
@@ -875,7 +886,7 @@ mod tests {
         // an ordinary commit on top of the merge must not claim it
         std::fs::write(p.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         run(p, &["commit", "-am", "plain"]);
-        let plain = file_diff(p, &head(p), "a.txt", "none", None).expect("plain diff");
+        let plain = file_diff(p, &head(p), "a.txt", None, "none", None).expect("plain diff");
         assert!(!plain.merge_first_parent);
     }
 
@@ -891,12 +902,12 @@ mod tests {
         run(p, &["commit", "-am", "bin two"]);
         let grown = head(p);
 
-        let d = file_diff(p, &added, "bin.dat", "none", None).expect("added binary");
+        let d = file_diff(p, &added, "bin.dat", None, "none", None).expect("added binary");
         assert!(d.binary);
         assert_eq!(d.old_size, None, "the file did not exist before");
         assert_eq!(d.new_size, Some(4));
 
-        let d = file_diff(p, &grown, "bin.dat", "none", None).expect("grown binary");
+        let d = file_diff(p, &grown, "bin.dat", None, "none", None).expect("grown binary");
         assert_eq!((d.old_size, d.new_size), (Some(4), Some(7)));
 
         // against the working tree the new side is the file on disk
@@ -905,7 +916,7 @@ mod tests {
         assert_eq!((d.old_size, d.new_size), (Some(4), Some(9)));
 
         // a text diff claims no sizes at all
-        let d = file_diff(p, &head(p), "a.txt", "none", None).unwrap_or_else(|_| unreachable!());
+        let d = file_diff(p, &head(p), "a.txt", None, "none", None).unwrap_or_else(|_| unreachable!());
         assert_eq!((d.old_size, d.new_size), (None, None));
     }
 
@@ -995,8 +1006,8 @@ mod tests {
         assert_eq!(d.parents.len(), 1);
         assert_eq!(files(p, "-t").unwrap().len(), 1);
         assert_eq!(files(p, "-r").unwrap().len(), 1, "root commit via diff-tree");
-        assert!(!file_diff(p, "-t", "b.txt", "none", None).unwrap().hunks.is_empty());
-        assert!(!file_diff(p, "-r", "a.txt", "none", None).unwrap().hunks.is_empty());
+        assert!(!file_diff(p, "-t", "b.txt", None, "none", None).unwrap().hunks.is_empty());
+        assert!(!file_diff(p, "-r", "a.txt", None, "none", None).unwrap().hunks.is_empty());
         assert_eq!(compare(p, "-r", "-t").unwrap().len(), 1);
         assert!(!compare_diff(p, "-r", "-t", "b.txt", "none", None).unwrap().hunks.is_empty());
         assert!(unreachable_from_head(p, &["-t".to_string()]).unwrap().is_empty());

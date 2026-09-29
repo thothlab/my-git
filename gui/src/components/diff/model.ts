@@ -20,7 +20,17 @@ export type DiffSource =
    * carry it, and a side header must name a revision rather than derive an
    * expression from the commit's own hash. `null` means a root commit.
    */
-  | { kind: "commit"; path: string; hash: string; parent: string | null }
+  | {
+      kind: "commit";
+      path: string;
+      hash: string;
+      parent: string | null;
+      /**
+       * Rename source, when the caller already knows it — the file history does,
+       * from `git log --follow`. Absent, the backend looks it up in the commit.
+       */
+      oldPath?: string | null;
+    }
   /** two revisions; `to === WORKING_TREE` means the working tree */
   | { kind: "compare"; path: string; from: string; to: string };
 
@@ -282,6 +292,10 @@ export function sameDiffSource(a: DiffSource | null, b: DiffSource | null): bool
   if (!a || !b || a.kind !== b.kind || a.path !== b.path) return false;
   if (a.kind === "worktree") return a.base === (b as typeof a).base;
   if (a.kind === "commit")
-    return a.hash === (b as typeof a).hash && a.parent === (b as typeof a).parent;
+    return (
+      a.hash === (b as typeof a).hash &&
+      a.parent === (b as typeof a).parent &&
+      (a.oldPath ?? null) === ((b as typeof a).oldPath ?? null)
+    );
   return a.from === (b as typeof a).from && a.to === (b as typeof a).to;
 }

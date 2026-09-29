@@ -27,6 +27,8 @@ import {
   orderKnown,
   pendingNew,
   refreshLog,
+  revealPending,
+  setRevealPending,
   resetColumnWidth,
   resetLog,
   saveColumnWidth,
@@ -195,6 +197,16 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
   const [scrollToRow, setScrollToRow] = createSignal<((i: number) => void) | null>(null);
 
   createEffect(() => props.onSelect?.(commits()[cursorIndex()]?.hash ?? null));
+
+  // A commit chosen from outside the log (file history → Enter) is selected by
+  // the store; bringing it on screen is this list's part, once it can scroll.
+  createEffect(() => {
+    const scroll = scrollToRow();
+    const i = cursorIndex();
+    if (!revealPending() || !scroll || i < 0) return;
+    setRevealPending(false);
+    scroll(i);
+  });
 
   const move = (delta: number, mode: "single" | "range" = "single") => {
     if (rowCount() === 0) return;

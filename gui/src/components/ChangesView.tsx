@@ -48,6 +48,7 @@ import {
 } from "../store";
 import { d } from "../i18n";
 import { openStashPanel, reloadStashes, stashCount } from "./StashPanel";
+import { openFileHistory } from "./FileHistoryPanel";
 
 // Which paths a drag carries: the checked set if the dragged row is part of it,
 // otherwise just that one file.
@@ -431,6 +432,17 @@ function ContextMenu() {
                     />
                   )}
                 </For>
+                {/* An untracked directory is one row (`dir/`): a history is of a file. */}
+                <Show when={!path().endsWith("/")}>
+                  <Divider />
+                  <MenuItem
+                    label={d().fileHistoryItem()}
+                    onClick={() => {
+                      setMenu(null);
+                      openFileHistory(historyPathOf(path()));
+                    }}
+                  />
+                </Show>
                 <Divider />
                 <MenuItem
                   label={d().revertToHead()}
@@ -488,6 +500,18 @@ function ContextMenu() {
       )}
     </Show>
   );
+}
+
+/**
+ * The name to ask the history for. A rename that is only staged is not in HEAD
+ * yet: under the new name the history would be empty, under the old one it is
+ * the file's history.
+ */
+function historyPathOf(path: string): string {
+  const f = (state()?.changelists ?? [])
+    .flatMap((cl) => cl.files)
+    .find((x) => x.path === path);
+  return f?.status === "renamed" && f.oldPath ? f.oldPath : path;
 }
 
 function MenuItem(props: { label: string; danger?: boolean; onClick: () => void }) {

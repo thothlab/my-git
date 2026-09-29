@@ -6,6 +6,7 @@ pub mod cli;
 pub mod commit;
 pub mod discard;
 pub mod exec;
+pub mod file_history;
 pub mod log;
 pub mod ops;
 pub mod patch;

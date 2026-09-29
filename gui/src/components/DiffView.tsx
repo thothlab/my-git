@@ -1481,7 +1481,8 @@ function fetchDiff(
   ws: WhitespaceMode,
   context?: number,
 ): Promise<FileDiff> {
-  if (src.kind === "commit") return commitFileDiff(src.hash, src.path, ws, context);
+  if (src.kind === "commit")
+    return commitFileDiff(src.hash, src.path, ws, context, src.oldPath);
   if (src.kind === "compare")
     return commitsCompareDiff(src.from, src.to, src.path, ws, context);
   return diffFile(src.path, src.base, ws, context);

@@ -444,12 +444,51 @@ export const commitDetails = (hash: string) =>
   invoke<CommitDetails>("commit_details", { hash });
 export const commitFiles = (hash: string) =>
   invoke<CommitFileEntry[]>("commit_files", { hash });
+/** `oldPath` — the rename source when the caller already knows it (the file
+ * history does); left out, the backend finds it in the commit's file list. */
 export const commitFileDiff = (
   hash: string,
   path: string,
   whitespace: WhitespaceMode = "none",
   context?: number,
-) => invoke<FileDiff>("commit_file_diff", { hash, path, whitespace, context });
+  oldPath?: string | null,
+) =>
+  invoke<FileDiff>("commit_file_diff", { hash, path, whitespace, context, oldPath: oldPath ?? null });
+
+// history of one file (R05c) — `engine::file_history`
+/** A commit that touched the file. `path` is the file's name **in this commit**
+ * (`--follow` crosses renames); `oldPath` is set on the commit that renamed it. */
+export interface FileHistoryCommit {
+  hash: string;
+  shortHash: string;
+  parents: string[];
+  author: string;
+  authorEmail: string;
+  authorAt: number;
+  subject: string;
+  refs: RefLabel[];
+  path: string;
+  oldPath: string | null;
+  status: FileState;
+}
+/** Opaque: handed back verbatim. It pins the history to the commit the first
+ * page was read from, so later pages never shift. */
+export interface FileHistoryCursor {
+  skip: number;
+  anchor: string;
+}
+export interface FileHistoryPage {
+  commits: FileHistoryCommit[];
+  nextCursor: FileHistoryCursor | null;
+}
+/** `rev` — where the history starts (`null` — HEAD). Merge commits are not
+ * listed, as with `git log --follow`. */
+export const fileHistory = (
+  path: string,
+  rev: string | null,
+  cursor: FileHistoryCursor | null,
+  limit: number,
+) => invoke<FileHistoryPage>("file_history", { path, rev, cursor, limit });
 /** The revision that means "the working tree" in `commitsCompare` /
  * `commitsCompareDiff` (prd_02 История 77). A comparison against a real revision
  * always names it, so passing this constant is a deliberate choice rather than an

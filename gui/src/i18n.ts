@@ -524,6 +524,25 @@ const en = {
   linesKeysWorktree: () =>
     "Cmd/Ctrl+Shift+J / K: extend · Cmd/Ctrl+Shift+S: stage · Cmd/Ctrl+Shift+Backspace: revert",
   linesKeysIndex: () => "Cmd/Ctrl+Shift+J / K: extend · Cmd/Ctrl+Shift+U: unstage",
+  fileHistoryItem: () => "File history",
+  fileHistoryTip: () => "Every commit that touched this file, renames followed",
+  fileHistoryPickFile: () => "Select a file first",
+  fileHistoryTitle: (path: string) => `History of ${path}`,
+  fileHistoryFrom: (rev: string) => `from ${rev}`,
+  fileHistoryLoading: () => "Reading the history…",
+  fileHistoryLoadingMore: () => "Loading more…",
+  fileHistoryEmpty: () => "No commit has touched this file yet",
+  fileHistoryEmptyHint: () =>
+    "An untracked or newly added file has no history until it is committed.",
+  fileHistoryCount: (n: number, more: boolean) =>
+    `${n}${more ? "+" : ""} ${n === 1 && !more ? "commit" : "commits"}`,
+  fileHistoryMergesNote: () =>
+    "Renames are followed. Merge commits are not listed, as in git log --follow: their changes appear on the commits they merged.",
+  fileHistoryRenamedFrom: (old: string) => `renamed from ${old}`,
+  fileHistoryKeys: () => "↑ ↓ Home End: move · Enter: show in the log · Esc: close",
+  fileHistoryShowInLog: () => "Show in log",
+  fileHistoryNotInLog: (hash: string) =>
+    `Commit ${hash} could not be found in the log — it may be outside every ref the log walks.`,
 };
 
 type Dict = typeof en;
@@ -1008,6 +1027,25 @@ const ru: Dict = {
   linesKeysWorktree: () =>
     "Cmd/Ctrl+Shift+J / K: расширить · Cmd/Ctrl+Shift+S: подготовить · Cmd/Ctrl+Shift+Backspace: откатить",
   linesKeysIndex: () => "Cmd/Ctrl+Shift+J / K: расширить · Cmd/Ctrl+Shift+U: убрать",
+  fileHistoryItem: () => "История файла",
+  fileHistoryTip: () => "Все коммиты, которые меняли этот файл, с учётом переименований",
+  fileHistoryPickFile: () => "Сначала выберите файл",
+  fileHistoryTitle: (path) => `История ${path}`,
+  fileHistoryFrom: (rev) => `от ${rev}`,
+  fileHistoryLoading: () => "Читаю историю…",
+  fileHistoryLoadingMore: () => "Загружаю ещё…",
+  fileHistoryEmpty: () => "Ни один коммит ещё не менял этот файл",
+  fileHistoryEmptyHint: () =>
+    "У неотслеживаемого или только что добавленного файла истории нет, пока его не закоммитят.",
+  fileHistoryCount: (n, more) =>
+    `${n}${more ? "+" : ""} ${ruPlural(n, "коммит", "коммита", "коммитов")}`,
+  fileHistoryMergesNote: () =>
+    "Переименования учитываются. Merge-коммиты не показываются, как в git log --follow: их изменения видны в тех коммитах, которые они слили.",
+  fileHistoryRenamedFrom: (old) => `переименован из ${old}`,
+  fileHistoryKeys: () => "↑ ↓ Home End: переход · Enter: показать в логе · Esc: закрыть",
+  fileHistoryShowInLog: () => "Показать в логе",
+  fileHistoryNotInLog: (hash) =>
+    `Коммит ${hash} не найден в логе — возможно, он недостижим ни от одной ссылки, которую обходит лог.`,
 };
 
 /** Current locale's dictionary. Reactive: reads the `locale` signal. */

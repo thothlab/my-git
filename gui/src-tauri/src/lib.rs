@@ -102,6 +102,7 @@ pub fn run() {
             commands::commit_details,
             commands::commit_files,
             commands::commit_file_diff,
+            commands::file_history,
             commands::commits_compare,
             commands::commits_unreachable,
             commands::commits_compare_diff,

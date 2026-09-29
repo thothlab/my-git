@@ -28,6 +28,7 @@ import { ModalHost } from "./components/Modals";
 import StashPanel from "./components/StashPanel";
 import GitConsolePanel, { openGitConsole } from "./components/GitConsolePanel";
 import DiscardPanel from "./components/DiscardPanel";
+import FileHistoryPanel from "./components/FileHistoryPanel";
 import { DISABLED_CLASS } from "./components/IconButton";
 import { msSinceRefresh, nudgeRepoWatch, refreshOnFocus, startRepoWatch } from "./repoWatch";
 
@@ -262,6 +263,8 @@ export default function App() {
             the Changes toolbar and the branch menu open the same one. */}
         <StashPanel />
         <GitConsolePanel />
+        {/* Opened from both modes (a file in Changes, a file of a commit). */}
+        <FileHistoryPanel />
         <DiscardPanel />
         <ModalHost />
       </div>

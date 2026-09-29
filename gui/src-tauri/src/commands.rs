@@ -9,10 +9,12 @@ use crate::engine::cli::CliEngine;
 use crate::engine::GitEngine;
 use crate::error::{Error, Result};
 use crate::engine::exec::{self, mask_credentials};
-use crate::engine::{branches, commit as commit_engine, discard, log as log_engine, ops};
+use crate::engine::{
+    branches, commit as commit_engine, discard, file_history as file_history_engine, log as log_engine, ops,
+};
 use crate::model::{
     BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, DiscardEntry,
-    DiscardKind, DiscardOutcome, Eol, FileDiff, HunkPick,
+    DiscardKind, DiscardOutcome, Eol, FileDiff, FileHistoryCursor, FileHistoryPage, HunkPick,
     LinePick,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
     LogFilter, LogPage, RepoExternalChange, RepoState, StashEntry, TextFile, UiState,
@@ -518,8 +520,30 @@ pub async fn commit_file_diff(
     path: String,
     whitespace: String,
     context: Option<u32>,
+    old_path: Option<String>,
 ) -> Result<FileDiff> {
-    commit_engine::file_diff(&state.repo_path()?, &hash, &path, &whitespace, context)
+    commit_engine::file_diff(
+        &state.repo_path()?,
+        &hash,
+        &path,
+        old_path.as_deref(),
+        &whitespace,
+        context,
+    )
+}
+
+/// Every commit that touched one file, renames followed (R05c). Read-only.
+/// `rev` is where the history starts — `None` is `HEAD`; the Log mode passes the
+/// commit whose file was picked, so the path is the one the file had there.
+#[tauri::command]
+pub async fn file_history(
+    state: State<'_, AppState>,
+    path: String,
+    rev: Option<String>,
+    cursor: Option<FileHistoryCursor>,
+    limit: u32,
+) -> Result<FileHistoryPage> {
+    file_history_engine::page(&state.repo_path()?, &path, rev.as_deref(), cursor.as_ref(), limit)
 }
 
 /// Which of these commits the current revision cannot reach — the input behind

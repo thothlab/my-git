@@ -1,4 +1,4 @@
-import { createMemo, createRoot, createSignal } from "solid-js";
+import { createEffect, createMemo, createRoot, createSignal } from "solid-js";
 import { compilePattern, matchesCommit } from "./components/log/searchPattern";
 import {
   emptyLogFilter,
@@ -521,6 +521,45 @@ export function selectHash(hash: string): boolean {
 export function selectAll(): void {
   setSelectedSet(new Set(commits().map((c) => c.hash)));
 }
+
+/** Resolves once the log has a first answer and nothing is reloading it. */
+function whenSettled(): Promise<void> {
+  return new Promise((resolve) =>
+    createRoot((dispose) => {
+      createEffect(() => {
+        if (loaded() && !loading()) {
+          dispose();
+          resolve();
+        }
+      });
+    }),
+  );
+}
+
+/**
+ * Select a commit named from outside the log (the file history's Enter) and
+ * bring it into view. Returns whether it was found.
+ *
+ * Waits for the log to settle first: entering the Log mode mounts `LogView`,
+ * whose first load would replace the rows — and with them a commit spliced in
+ * by hash — and select the newest one. Past the loaded pages the commit is
+ * fetched by hash (`findCommitByHash`), which works under any filter: the
+ * backend looks a hash up regardless of the filter it was asked with. `false`
+ * is left for the caller to say out loud.
+ */
+export async function revealCommit(hash: string): Promise<boolean> {
+  ensureLoaded();
+  await whenSettled();
+  const found = selectHash(hash) || (await findCommitByHash(hash));
+  // Selecting does not scroll — the list owns scrolling, and it answers this flag
+  // once its virtualised rows exist (`LogTable`).
+  if (found) setRevealPending(true);
+  return found;
+}
+
+/** A commit selected by `revealCommit` still waits to be scrolled into view. */
+const [revealPending, setRevealPending] = createSignal(false);
+export { revealPending, setRevealPending };
 
 // ── Jumping to search matches ────────────────────────────────────────────────
 
