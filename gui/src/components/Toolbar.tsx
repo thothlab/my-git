@@ -8,6 +8,7 @@ import BranchMenu from "./BranchMenu";
 import RepoMenu from "./RepoMenu";
 import { openGitConsole } from "./GitConsolePanel";
 import { pushCurrent } from "./log/actions/branchActions";
+import { afterRepoChange } from "./log/actions/repoRefresh";
 
 export default function Toolbar() {
   return (
@@ -22,8 +23,13 @@ export default function Toolbar() {
       </Show>
 
       <div class="ml-3 flex items-center gap-1">
-        <TBtn label="Fetch" onClick={() => void run(fetchRemote(), d().busyFetch())} />
-        <TBtn label="Pull" onClick={() => void run(pull(), d().busyPull())} />
+        {/* `run()` alone leaves the branch tree on its old counters: it re-reads
+            on the revision `afterRepoChange` bumps, and a fetch moves exactly
+            the remote-tracking refs its ↑/↓ are counted against. The log is
+            left to its own state effect, which offers new commits to a reader
+            scrolled away instead of reloading rows under the pointer. */}
+        <TBtn label="Fetch" onClick={() => void refreshAfter(run(fetchRemote(), d().busyFetch()))} />
+        <TBtn label="Pull" onClick={() => void refreshAfter(run(pull(), d().busyPull()))} />
         {/* One Push for the window: the same flow the Log panel's menu item
             runs, forcing offered on a refusal rather than guessed from the
             ahead/behind counters — a server can refuse a push that looks fine
@@ -50,6 +56,11 @@ export default function Toolbar() {
       <AppMenu />
     </header>
   );
+}
+
+async function refreshAfter(p: Promise<void>): Promise<void> {
+  await p;
+  afterRepoChange({ log: false });
 }
 
 function ModeBtn(props: { mode: "changes" | "log"; label: string; tip: string }) {

@@ -4,6 +4,7 @@ import { busy, chooseOption, promptText, run, state } from "../store";
 import { d } from "../i18n";
 import { baseName, buildFileTree, type FileTreeNode } from "./pathTree";
 import { IconFetch } from "./IconButton";
+import { afterRepoChange } from "./log/actions/repoRefresh";
 
 /**
  * The branch picker of the Changes toolbar.
@@ -132,19 +133,23 @@ export default function BranchMenu() {
     // Read before the await: `repo()` is a store signal.
     const at = repo();
     await run(branchCheckout(target, stash));
+    afterRepoChange();
     if (state()?.branch === target) noteRecent(at, target);
   };
 
   const newBranch = async () => {
     setOpen(false);
     const name = await promptText(d().newBranchFromHead(), "");
-    if (name && name.trim()) await run(branchCreate(name.trim()));
+    if (!name || !name.trim()) return;
+    await run(branchCreate(name.trim()));
+    afterRepoChange();
   };
 
   const doFetch = async () => {
     await run(fetchRemote(), d().fetching());
     // The snapshot above is now stale: the counters and the remote-tracking refs
-    // are exactly what the fetch moved.
+    // are exactly what the fetch moved. So is the Log mode's branch tree.
+    afterRepoChange({ log: false });
     await reload();
   };
 
