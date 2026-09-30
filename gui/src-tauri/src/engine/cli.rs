@@ -2779,6 +2779,31 @@ pub(crate) mod tests {
         assert!(head_files(p).contains("a.txt"));
     }
 
+    /// The message the co-author picker builds (`coAuthorRules.ts` puts the block
+    /// after a blank line) reaches the commit as trailers git itself reads — through
+    /// `commit -m`'s whitespace cleanup, and again on an amend of that commit.
+    #[test]
+    fn co_author_trailers_survive_commit_and_amend() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let trailers = |p: &Path| out(p, &["log", "-1", "--format=%(trailers:key=Co-authored-by,valueonly)"]);
+        std::fs::write(p.join("a.txt"), "two\n").unwrap();
+        CliEngine::new(p)
+            .commit_paths(&["a.txt".to_string()], "feat: x\n\nBody.\n\nCo-authored-by: Other One <o@example.com>", false)
+            .unwrap();
+        assert_eq!(trailers(p).trim(), "Other One <o@example.com>");
+
+        std::fs::write(p.join("a.txt"), "three\n").unwrap();
+        CliEngine::new(p)
+            .commit_paths(
+                &["a.txt".to_string()],
+                "feat: x\n\nBody.\n\nCo-authored-by: Other One <o@example.com>\nCo-authored-by: Third <t@example.com>",
+                true,
+            )
+            .unwrap();
+        assert_eq!(trailers(p).trim(), "Other One <o@example.com>\nThird <t@example.com>");
+    }
+
     // ---- commit_paths: the index wins, other lists stay out ----
 
     /// `git -C dir <args>` stdout as text; panics on failure.

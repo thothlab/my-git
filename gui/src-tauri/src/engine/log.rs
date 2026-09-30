@@ -12,7 +12,7 @@ use crate::engine::cli::{literal, parse_refs};
 use crate::engine::exec;
 use crate::error::{Error, Result};
 use crate::model::{
-    LaneEdge, LaneEdgeKind, LogCommit, LogCursor, LogFilter, LogOrder, LogPage,
+    CoAuthor, LaneEdge, LaneEdgeKind, LogCommit, LogCursor, LogFilter, LogOrder, LogPage,
 };
 
 /// First slot of `LogCursor.open_lanes`: not a lane but a header naming the history
@@ -463,9 +463,7 @@ fn commit_by_hash(repo: &Path, rev: &str) -> Result<Option<Row>> {
 /// --all` reads more than that: an author existing only in a stash commit would be
 /// offered by the filter and then select nothing.
 pub fn authors(repo: &Path) -> Result<Vec<String>> {
-    let mut args = vec![s("log"), s("--format=%an")];
-    args.extend(filter_args(&LogFilter::default()));
-    let out = git_text(repo, &args)?;
+    let out = walk_history(repo, "--format=%an")?;
 
     let mut count: HashMap<&str, usize> = HashMap::new();
     for name in out.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
@@ -475,6 +473,74 @@ pub fn authors(repo: &Path) -> Result<Vec<String>> {
     // by commits, then by name: two authors with the same count keep a stable order
     list.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
     Ok(list.into_iter().map(|(n, _)| n.to_string()).collect())
+}
+
+/// `git log` over the history [`page`] walks — refs and exclusions included — with
+/// its own `--format`. Shared by [`authors`] and [`co_authors`] so neither offers
+/// someone the log cannot show (a stash commit, a discard backup).
+fn walk_history(repo: &Path, format: &str) -> Result<String> {
+    let mut args = vec![s("log"), s(format)];
+    args.extend(filter_args(&LogFilter::default()));
+    git_text(repo, &args)
+}
+
+/// The people who authored commits in this history, for the co-author picker —
+/// most prolific first, one entry per address.
+///
+/// Unlike [`authors`] (which feeds `--author` and so is keyed by name) this is keyed
+/// by **e-mail, compared without case**: a `Co-authored-by:` trailer credits an
+/// address, and `A@X.org` and `a@x.org` are one person to every forge. Per address
+/// the name shown is the one used most often with it, ties broken alphabetically,
+/// so the pick is stable; the address keeps its most frequent spelling the same way.
+/// `%aN` / `%aE` go through `.mailmap`, which is exactly the merging a repository
+/// asks for. A commit without an address credits no one and is skipped. Excluding
+/// the reader is the picker's business (`RepoState.userEmail`), not this walk's.
+pub fn co_authors(repo: &Path) -> Result<Vec<CoAuthor>> {
+    let out = walk_history(repo, "--format=%aN%x00%aE%x01")?;
+
+    // lower-cased address -> (commits, name -> uses, spelling -> uses)
+    type Tally<'a> = (u32, HashMap<&'a str, u32>, HashMap<&'a str, u32>);
+    let mut by_email: HashMap<String, Tally> = HashMap::new();
+    for record in out.split('\u{1}') {
+        let record = record.trim_start_matches('\n');
+        if record.is_empty() {
+            continue;
+        }
+        let (name, email) = record
+            .split_once('\0')
+            .ok_or_else(|| Error::Parse(format!("unreadable author record: {record:?}")))?;
+        let (name, email) = (name.trim(), email.trim());
+        if email.is_empty() {
+            continue;
+        }
+        let entry = by_email.entry(email.to_lowercase()).or_default();
+        entry.0 += 1;
+        *entry.1.entry(name).or_default() += 1;
+        *entry.2.entry(email).or_default() += 1;
+    }
+
+    // most uses first, then alphabetical: one rule for the name and the spelling
+    let favourite = |uses: &HashMap<&str, u32>| -> String {
+        uses.iter()
+            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+            .map(|(v, _)| v.to_string())
+            .unwrap_or_default()
+    };
+    let mut list: Vec<CoAuthor> = by_email
+        .values()
+        .map(|(commits, names, spellings)| CoAuthor {
+            name: favourite(names),
+            email: favourite(spellings),
+            commits: *commits,
+        })
+        .collect();
+    list.sort_by(|a, b| {
+        b.commits
+            .cmp(&a.commits)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.email.cmp(&b.email))
+    });
+    Ok(list)
 }
 
 #[cfg(test)]
@@ -914,6 +980,52 @@ mod tests {
 
         let a = authors(p).unwrap();
         assert_eq!(a, vec!["Test".to_string()], "the log does not show stash commits, so the filter must not offer their author: {a:?}");
+    }
+
+    #[test]
+    fn co_authors_are_one_per_address_whatever_its_case() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        commit_as(p, "o1.txt", "x", "Other One", "Other@Example.com");
+        commit_as(p, "o2.txt", "x", "Other One", "other@example.com");
+        commit_as(p, "o3.txt", "x", "O. One", "other@example.com");
+        commit_as(p, "n.txt", "x", "Name  With Spaces", "n@example.com");
+        let c = co_authors(p).unwrap();
+        let rows: Vec<(&str, &str, u32)> = c.iter().map(|a| (a.name.as_str(), a.email.as_str(), a.commits)).collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Other One", "other@example.com", 3),
+                ("Name  With Spaces", "n@example.com", 1),
+                ("Test", "t@example.com", 1),
+            ],
+            "one row per address, the most used name and spelling, most prolific first"
+        );
+    }
+
+    #[test]
+    fn co_authors_tie_on_the_name_is_broken_alphabetically() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        commit_as(p, "o1.txt", "x", "Zed", "z@example.com");
+        commit_as(p, "o2.txt", "x", "Ann", "z@example.com");
+        let c = co_authors(p).unwrap();
+        assert_eq!(c[0].name, "Ann", "equal uses: the pick does not depend on hash order: {c:?}");
+    }
+
+    #[test]
+    fn co_authors_leave_out_stashes_and_empty_histories() {
+        let empty = tempfile::tempdir().unwrap();
+        run(empty.path(), &["init", "-b", "main"]);
+        assert!(co_authors(empty.path()).unwrap().is_empty());
+
+        let dir = scratch_repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "dirty\n").unwrap();
+        run(p, &["-c", "user.name=Stash Only", "-c", "user.email=s@example.com", "stash", "push", "-m", "wip"]);
+        let c = co_authors(p).unwrap();
+        assert_eq!(c.len(), 1, "only the log's own author: {c:?}");
+        assert_eq!(c[0].email, "t@example.com");
     }
 
     #[test]

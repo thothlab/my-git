@@ -257,6 +257,17 @@ pub struct LogCursor {
     pub open_lanes: Vec<String>,
 }
 
+/// Someone who authored commits in this history, offered as a co-author
+/// (`log_co_authors`). One entry per address, compared without case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoAuthor {
+    pub name: String,
+    pub email: String,
+    /// Commits authored with this address in the walked history.
+    pub commits: u32,
+}
+
 /// One page of the log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

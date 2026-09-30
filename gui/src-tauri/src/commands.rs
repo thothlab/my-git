@@ -15,7 +15,7 @@ use crate::engine::{
     undo::{self, Hint},
 };
 use crate::model::{
-    Blame, BlameBefore, BranchInfo, CloneProgress, RemoteInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, ConflictFile, DiscardEntry,
+    Blame, BlameBefore, BranchInfo, CloneProgress, CoAuthor, RemoteInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, ConflictFile, DiscardEntry,
     DiscardKind, DiscardOutcome, Eol, FileDiff, FileHistoryCursor, FileHistoryPage, HunkPick,
     LinePick,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
@@ -681,6 +681,14 @@ pub async fn log_page(
 #[tauri::command]
 pub async fn log_authors(state: State<'_, AppState>) -> Result<Vec<String>> {
     log_engine::authors(&state.repo_path()?)
+}
+
+/// People of this history to credit as co-authors of a commit — name and address,
+/// one per address. Read-only; the trailers themselves are written into the message
+/// by the client (`coAuthorRules.ts`), so the commit stays an ordinary `commit_list`.
+#[tauri::command]
+pub async fn log_co_authors(state: State<'_, AppState>) -> Result<Vec<CoAuthor>> {
+    log_engine::co_authors(&state.repo_path()?)
 }
 
 // ── history panel: one commit (prd_02, task 04) ──────────────────────────────

@@ -592,6 +592,14 @@ export const emptyUiState = (): UiState => ({
 export const logPage = (filter: LogFilter, cursor: LogCursor | null, limit: number) =>
   invoke<LogPage>("log_page", { filter, cursor, limit });
 export const logAuthors = () => invoke<string[]>("log_authors");
+/** Someone of this history to credit as a co-author: one per address. */
+export interface CoAuthor {
+  name: string;
+  email: string;
+  commits: number;
+}
+/** People of the log's history, most prolific first, one per address (no case). */
+export const logCoAuthors = () => invoke<CoAuthor[]>("log_co_authors");
 
 // one commit (task 04)
 export const commitDetails = (hash: string) =>

@@ -24,7 +24,10 @@
  *     selection is one unbroken run that can be squashed;
  *   - `src/components/log/bisectMarks.ts` - which bisect mark a log row carries
  *     (first bad, candidate, bad, good, skipped, under test), what the search is
- *     waiting for, and when the repository's own terms replace the UI's words.
+ *     waiting for, and when the repository's own terms replace the UI's words;
+ *   - `src/components/coAuthorRules.ts` - whom the co-author picker offers and
+ *     where `Co-authored-by:` lines go in a message, cross-checked against
+ *     `git interpret-trailers` itself (so `git` must be on PATH).
  *
  * Run it:  node scripts/check-log-filters.mjs      (from `gui/`)
  * Another time zone:  TZ=America/Los_Angeles node scripts/check-log-filters.mjs
@@ -52,7 +55,7 @@ await build({
   logLevel: "warning",
 });
 
-// `pathTree.ts`, `gitConsoleCommand.ts` and `cloneRules.ts` share this directory, so bundling
+// `pathTree.ts`, `gitConsoleCommand.ts`, `cloneRules.ts` and `coAuthorRules.ts` share this directory, so bundling
 // them together keeps a flat common base and both outputs land as flat
 // basenames the loader below can find.
 await build({
@@ -60,6 +63,7 @@ await build({
     join(here, "..", "src", "components", "pathTree.ts"),
     join(here, "..", "src", "components", "gitConsoleCommand.ts"),
     join(here, "..", "src", "components", "cloneRules.ts"),
+    join(here, "..", "src", "components", "coAuthorRules.ts"),
   ],
   outdir: out,
   format: "esm",
@@ -138,6 +142,7 @@ const cr = await load("conflictRules.js");
 const rb = await load("rebaseRules.js");
 const bm = await load("bisectMarks.js");
 const clone = await load("cloneRules.js");
+const co = await load("coAuthorRules.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -904,6 +909,76 @@ for (const argv of [
     ["/Users/me/src/r", "/r", "r"],
     "the destination shown",
   );
+}
+
+// -- Co-authors: whom the picker offers, where the trailers go -----------------
+{
+  const A = { name: "Ann Lee", email: "ann@example.com" };
+  const B = { name: "Bob", email: "Bob@Example.com" };
+  const people = [A, B, { name: "Me", email: "ME@example.com" }, { name: "No Mail", email: "" },
+    { name: "Local", email: "root" }, { name: "Bad <x>", email: "b@x.y" }];
+  eq(co.pickable(people, "", [], "me@example.com").map((p) => p.name), ["Ann Lee", "Bob"],
+    "the reader, an empty or local-only address and a malformed name are not offered");
+  eq(co.pickable(people, "", [{ name: "B.", email: "bob@example.COM" }], null).map((p) => p.name),
+    ["Ann Lee", "Me"], "someone chosen is not offered again, whatever the case of the address");
+  eq([co.pickable(people, "EXAMPLE.com", [], null).length, co.pickable(people, "lee", [], null)[0]?.name,
+    co.pickable(people, "", [], null, 1).length], [3, "Ann Lee", 1], "the query reads name and address without case; the limit holds");
+  eq(co.trailerLine({ name: " Ann Lee ", email: " ann@example.com " }), "Co-authored-by: Ann Lee <ann@example.com>", "the trailer line");
+
+  const w = co.withCoAuthors;
+  const cases = [
+    ["subject only", "Fix it", [A], "Fix it\n\nCo-authored-by: Ann Lee <ann@example.com>"],
+    ["a subject that looks like a trailer is still the subject", "feat: x", [A],
+      "feat: x\n\nCo-authored-by: Ann Lee <ann@example.com>"],
+    ["subject and body", "Fix it\n\nWhy it broke.", [A, B],
+      "Fix it\n\nWhy it broke.\n\nCo-authored-by: Ann Lee <ann@example.com>\nCo-authored-by: Bob <Bob@Example.com>"],
+    ["an existing block is joined, no blank line", "Fix\n\nBody\n\nReviewed-by: Z <z@z.z>", [A],
+      "Fix\n\nBody\n\nReviewed-by: Z <z@z.z>\nCo-authored-by: Ann Lee <ann@example.com>"],
+    ["trailing blank lines and spaces go", "Fix  \n\n\n", [A], "Fix\n\nCo-authored-by: Ann Lee <ann@example.com>"],
+    ["a trailer-like line inside the subject paragraph is not a block", "Fix\nKey: v", [A],
+      "Fix\nKey: v\n\nCo-authored-by: Ann Lee <ann@example.com>"],
+    ["a mixed last paragraph is text", "Fix\n\nSee: the docs\nand more", [A],
+      "Fix\n\nSee: the docs\nand more\n\nCo-authored-by: Ann Lee <ann@example.com>"],
+    ["git's own line makes a quarter enough", "Fix\n\ntext one\ntext two\nSigned-off-by: Z <z@z.z>", [A],
+      "Fix\n\ntext one\ntext two\nSigned-off-by: Z <z@z.z>\nCo-authored-by: Ann Lee <ann@example.com>"],
+    ["a continuation line belongs to its trailer", "Fix\n\nNote: one\n  two\nAcked-by: Q", [A],
+      "Fix\n\nNote: one\n  two\nAcked-by: Q\nCo-authored-by: Ann Lee <ann@example.com>"],
+    ["already credited is not repeated (amend)", "Fix\n\nCo-authored-by: Ann Lee <ann@example.com>", [A, B],
+      "Fix\n\nCo-authored-by: Ann Lee <ann@example.com>\nCo-authored-by: Bob <Bob@Example.com>"],
+  ];
+  for (const [what, msg, ps, want] of cases) eq(w(msg, ps), want, `trailers: ${what}`);
+
+  eq(w("Fix\n\nco-authored-by:   A. Lee <ANN@example.com>", [A]), "Fix\n\nco-authored-by:   A. Lee <ANN@example.com>",
+    "credited by address: another name or case is still the same person");
+  eq(co.trailersToAdd("Fix\n\nCo-authored-by: Ann Lee <ANN@example.com>", [A, B]), ["Co-authored-by: Bob <Bob@Example.com>"],
+    "the preview leaves out whom the message already credits");
+  eq(co.trailersToAdd("", [A, B, A]).length, 2, "an empty message: everyone chosen, each address once");
+  eq(co.trailersToAdd("Fix\nCo-authored-by: Ann Lee <ann@example.com>", [A]).length, 1,
+    "a credit inside the subject paragraph is no trailer, so the preview keeps it");
+  eq(w("Fix", []), "Fix", "nobody to add: the message is untouched");
+  eq(w("Fix  ", [{ name: "Bad <x>", email: "b@x.y" }]), "Fix  ", "an uncreditable person adds nothing");
+  eq(w("Fix\r\n\r\nBody\r\n", [A, A]), "Fix\n\nBody\n\nCo-authored-by: Ann Lee <ann@example.com>",
+    "CRLF is read as line breaks; the same person twice is added once");
+  eq(w("Fix\n\nCo-authored-by: Ann Lee <ann@example.com>\nand some prose", [A]),
+    "Fix\n\nCo-authored-by: Ann Lee <ann@example.com>\nand some prose\n\nCo-authored-by: Ann Lee <ann@example.com>",
+    "a trailer-looking line outside a block credits no one, as for git");
+
+  // The same messages through git itself: the placement must be the one
+  // `interpret-trailers` makes (compared without the final newline git adds).
+  // Neutral config: a user's trailer.* settings must not change the answer.
+  const { spawnSync } = await import("node:child_process");
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+  for (const [what, msg, ps] of cases) {
+    if (/\n\n\n|  \n/.test(msg)) continue; // trailing blanks: git keeps them, `commit -m` does not
+    const args = ["interpret-trailers", "--if-exists", "addIfDifferent", ...ps.flatMap((p) => ["--trailer", co.trailerLine(p)])];
+    const r = spawnSync("git", args, { input: msg, env, encoding: "utf8" });
+    if (r.status !== 0) {
+      failed++;
+      console.log("FAIL", "git interpret-trailers ran", r.stderr || r.error);
+      continue;
+    }
+    eq(w(msg, ps), r.stdout.replace(/\n+$/, ""), `same as git interpret-trailers: ${what}`);
+  }
 }
 
 await rm(out, { recursive: true, force: true });

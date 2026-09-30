@@ -26,9 +26,9 @@
 | `cd gui && npm run tauri dev` | Запустить Graft локально (нужен дисплей) |
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
-| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `cloneRules`, разбор и печать команды консоли), 314 утверждений |
-| `cargo test` | Оба крейта разом: 350 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 350 тестов |
+| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; разбор и печать команды консоли), 345 утверждений |
+| `cargo test` | Оба крейта разом: 354 теста GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 354 теста |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -94,7 +94,9 @@ gui/src/            фронт
                     UndoButtons — Undo/Redo в тулбаре и Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z;
                     RemotesPanel — диалог «Remotes…» (список + форма add / rename / адрес);
                     CloneDialog — «Клонировать…»; cloneRules.ts — имя папки из адреса и
-                    прочие чистые правила диалога, без единого импорта
+                    прочие чистые правила диалога, без единого импорта;
+                    CommitPanel — ещё и выбор соавторов; coAuthorRules.ts — кого предлагать
+                    и куда встают строки `Co-authored-by:` (правило трейлеров git), без импортов
   components/blame/ BlamePanel — оверлей blame (строки + коммит строки + DiffView, стек
                     «blame до изменения»); blameRules.ts — чистые правила, без единого импорта
   components/conflicts/ ConflictPanel — оверлей редактора конфликта (блоки ours · base ·
@@ -185,8 +187,11 @@ Git вызывается только как внешний процесс. `gix
   пробелов, разбор меток `%D`, резолв путей внутри git-dir и отпечаток FNV-1a живут здесь по
   одному разу — тем же `fnv1a` `engine::log` отпечатывает аргументы фильтра, и вторая копия
   цикла была бы вторым шансом перепутать константы.
-- `engine::log` — `page(&Path, &LogFilter, Option<&LogCursor>, u32)`, `authors(&Path)`.
-  Прячет формат `git log`, устройство курсора и потоковый алгоритм лейнов. Плюс
+- `engine::log` — `page(&Path, &LogFilter, Option<&LogCursor>, u32)`, `authors(&Path)`,
+  `co_authors(&Path)`. Прячет формат `git log`, устройство курсора и потоковый алгоритм лейнов.
+  `authors` — ключ по **имени** (кормит `--author` фильтра), `co_authors` — по **почте без
+  учёта регистра** (`%aN`/`%aE`, через `.mailmap`; имя — самое частое при этой почте). Оба
+  ходят по той же истории, что `page` (`walk_history`): стеш и бэкапы отката не предлагаются. Плюс
   `pub(crate)` `remotes` и `short` — ими же пользуется `engine::file_history`.
 - `engine::file_history` — `page(&Path, path, rev, Option<&FileHistoryCursor>, u32)`:
   `log --follow -M --name-status -z` по одному пути (`literal()`), строка — поля строки лога
@@ -636,6 +641,14 @@ Git вызывается только как внешний процесс. `gix
   каталога — путь **нарисованной** строки, то есть схлопнутого узла (`treeDirPaths`), а не
   каждого промежуточного сегмента. Дерево веток (`log/BranchTree.tsx`) сознательно осталось
   отдельным — причины в его докблоке над `buildTree`.
+- **Соавторы коммита вписываются в сообщение на клиенте, в момент коммита** —
+  `withCoAuthors` из `coAuthorRules.ts`, а не в поле ввода и не отдельным параметром
+  `commit_list`: мутация остаётся одной, Undo и amend работают без изменений, а убранный
+  чип не приходится искать строкой в тексте. Место — по правилу git (`interpret-trailers`,
+  харнесс сверяется с ним самим): тема блоком трейлеров не бывает, иначе `feat: x` принял бы
+  трейлер без пустой строки. Уже указанный соавтор не дублируется по **почте** — строже
+  `addIfDifferent`. Список людей (`log_co_authors`) читается на первый фокус поля, не при
+  монтировании панели: режим Changes историю сам не читает.
 
 ## Где живёт состояние
 

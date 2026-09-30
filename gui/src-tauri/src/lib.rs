@@ -115,6 +115,7 @@ pub fn run() {
             commands::repo_clone_cancel,
             commands::log_page,
             commands::log_authors,
+            commands::log_co_authors,
             commands::commit_details,
             commands::commit_files,
             commands::commit_file_diff,
