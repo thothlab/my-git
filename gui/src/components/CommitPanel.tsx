@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createResource, createSignal, on } from "solid-js";
+import { For, Show, createEffect, createResource, createSignal } from "solid-js";
 import { commitList, errText, logCoAuthors, push, type CoAuthor } from "../api";
 import { d } from "../i18n";
 import {
@@ -12,11 +12,17 @@ import {
 } from "../store";
 import { DISABLED_CLASS } from "./IconButton";
 import { pickable, trailerLine, trailersToAdd, withCoAuthors, type Person } from "./coAuthorRules";
+import { clearCommitDraft, commitDraft, draftRepo, patchCommitDraft } from "./commitDraft";
 
 export default function CommitPanel() {
-  const [message, setMessage] = createSignal("");
-  const [amend, setAmend] = createSignal(false);
-  const [coAuthors, setCoAuthors] = createSignal<Person[]>([]);
+  // The draft outlives the panel (Cmd+2 / Cmd+1 unmount it) and is kept per
+  // repository — see `commitDraft.ts`.
+  const message = () => commitDraft().message;
+  const setMessage = (message: string) => patchCommitDraft({ message });
+  const amend = () => commitDraft().amend;
+  const setAmend = (amend: boolean) => patchCommitDraft({ amend });
+  const coAuthors = () => commitDraft().coAuthors;
+  const setCoAuthors = (coAuthors: Person[]) => patchCommitDraft({ coAuthors });
 
   const list = () => state()?.changelists.find((c) => c.id === selectedListId());
 
@@ -30,16 +36,15 @@ export default function CommitPanel() {
     if (l && !message().trim() && l.comment) setMessage(l.comment);
   });
 
-  // Another repository has other people.
-  createEffect(on(() => state()?.repoPath, () => setCoAuthors([]), { defer: true }));
-
   const disabled = () =>
     busy() ||
     count() === 0 ||
     !message().trim() ||
     (!!list()?.isUnversioned && !subset());
 
-  const runCommit = async (): Promise<boolean> => {
+  /** Commit the draft; the repository it went to when it did, else null. */
+  const runCommit = async (): Promise<string | null> => {
+    const repo = draftRepo();
     // The trailers go in here, not into the field: the field stays what the user
     // typed, and removing a chip never has to find its line again.
     const text = withCoAuthors(message(), coAuthors());
@@ -47,20 +52,20 @@ export default function CommitPanel() {
       ? { paths: [...checked()], message: text, amend: amend() }
       : { id: selectedListId(), message: text, amend: amend() };
     await run(commitList(args));
-    return !error();
+    return error() ? null : repo;
   };
-  const clear = () => {
-    setMessage("");
-    setAmend(false);
-    setCoAuthors([]);
+  const clear = (repo: string) => {
+    clearCommitDraft(repo);
     setChecked(new Set<string>());
   };
   const doCommit = async () => {
-    if (await runCommit()) clear();
+    const repo = await runCommit();
+    if (repo !== null) clear(repo);
   };
   const doCommitAndPush = async () => {
-    if (!(await runCommit())) return;
-    clear();
+    const repo = await runCommit();
+    if (repo === null) return;
+    clear(repo);
     const s = state();
     await run(push(s?.upstream ? "normal" : "upstream"));
   };
@@ -105,7 +110,7 @@ export default function CommitPanel() {
             onClick={() => void doCommit()}
             title={list()?.isUnversioned && !subset() ? d().untrackedSelectTip() : ""}
           >
-            Commit
+            {d().commitBtn()}
           </button>
           <button
             class={`border-l border-white/20 bg-accent px-2 py-1 text-sm text-white ${DISABLED_CLASS}`}
@@ -113,7 +118,7 @@ export default function CommitPanel() {
             onClick={() => void doCommitAndPush()}
             title={d().commitAndPushTip()}
           >
-            + Push
+            {d().commitPushBtn()}
           </button>
         </div>
       </div>
