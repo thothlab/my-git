@@ -40,7 +40,10 @@
  *   - `src/components/worktreeRules.ts` - what a row of the Worktrees dialog may
  *     do and why not, which branches a new worktree can take;
  *   - `src/components/log/signatureRules.ts` - how alarming a signature verdict is
- *     and which explanation fits it (SSH and OpenPGP fail differently).
+ *     and which explanation fits it (SSH and OpenPGP fail differently);
+ *   - `src/components/log/branchMarks.ts` - the branch tree's multi-selection: the
+ *     Shift range, which marks count (only drawn ones), what a context menu acts
+ *     on, and whether a group of branches can be deleted.
  *
  * Run it:  node scripts/check-log-filters.mjs      (from `gui/`)
  * Another time zone:  TZ=America/Los_Angeles node scripts/check-log-filters.mjs
@@ -69,6 +72,7 @@ await build({
     join(src, "forgeUrl.ts"),
     join(src, "ageColor.ts"),
     join(src, "signatureRules.ts"),
+    join(src, "branchMarks.ts"),
   ],
   outdir: out,
   format: "esm",
@@ -175,6 +179,7 @@ const wt = await load("worktreeRules.js");
 const fu = await load("forgeUrl.js");
 const ag = await load("ageColor.js");
 const sig = await load("signatureRules.js");
+const bmk = await load("branchMarks.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -1344,6 +1349,39 @@ for (const argv of [
     ],
     [null, "no-branch", "exists", "taken", null, "no-path", "relative-path", null],
     "create form: a branch, not an existing name for a new one, not one held elsewhere, an absolute folder",
+  );
+}
+
+// -- Branch tree multi-selection (branchMarks.ts) --------------------------------
+{
+  const r = (key, kind = "branch") => ({ key, kind });
+  const rows = [r("head", "head"), r("f:local:p2p", "folder"), r("b:a"), r("b:b"), r("f:local:x", "folder"), r("b:c"), r("b:d")];
+  eq(bmk.rangeKeys(rows, "b:a", "b:c"), ["b:a", "b:b", "b:c"], "a range steps over the folder between");
+  eq(bmk.rangeKeys(rows, "b:d", "b:b"), ["b:b", "b:c", "b:d"], "a range upwards is the same range");
+  eq(bmk.rangeKeys(rows, "head", "b:b"), ["b:a", "b:b"], "HEAD and folders as an anchor mark nothing themselves");
+  eq(bmk.rangeKeys(rows, "b:gone", "b:c"), ["b:c"], "an anchor no longer drawn starts the range at the row");
+  eq(bmk.rangeKeys(rows, null, "b:c"), ["b:c"], "no anchor yet: the row alone");
+  eq(bmk.rangeKeys(rows, "b:a", "b:gone"), [], "a target that is not drawn marks nothing");
+  eq([...bmk.toggled(new Set(["b:a"]), "b:b")], ["b:a", "b:b"], "toggle adds");
+  eq([...bmk.toggled(new Set(["b:a", "b:b"]), "b:a")], ["b:b"], "toggle takes out");
+  const marks = new Set(["b:d", "b:a", "b:hidden", "f:local:x"]);
+  eq(
+    bmk.drawnMarks(rows, marks).map((x) => x.key),
+    ["b:a", "b:d"],
+    "only drawn branch marks count, in drawn order: hidden ones are kept but never acted on",
+  );
+  const drawn = bmk.drawnMarks(rows, marks);
+  eq(bmk.menuTargets(drawn, rows[2]).map((x) => x.key), ["b:a", "b:d"], "a right-click inside the selection acts on all of it");
+  eq(bmk.menuTargets(drawn, rows[3]).map((x) => x.key), ["b:b"], "a right-click outside it acts on that row alone");
+  eq(bmk.menuTargets([rows[2]], rows[2]).map((x) => x.key), ["b:a"], "one mark is no group");
+  const n = (name, isRemote = false, isCurrent = false) => ({ name, isRemote, isCurrent });
+  eq(bmk.groupDeleteBlock([n("a"), n("b")]), null, "local branches can go together");
+  eq(bmk.groupDeleteBlock([n("origin/a", true), n("origin/b", true)]), null, "so can remote ones");
+  eq(bmk.groupDeleteBlock([n("a"), n("origin/a", true)]), { code: "mixed" }, "but never local and remote under one confirmation");
+  eq(
+    bmk.groupDeleteBlock([n("a"), n("main", false, true)]),
+    { code: "current", name: "main" },
+    "the current branch blocks the group, by name",
   );
 }
 

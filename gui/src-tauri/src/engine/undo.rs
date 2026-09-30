@@ -39,8 +39,8 @@
 //!   revert, a hard reset. Only when no tracked change existed before or after
 //!   (untracked files are left alone by both directions); a confirmation first.
 //! - [`Inverse::Refs`] — checkout plus ref changes: switching branch or revision,
-//!   creating a branch (switching to it), deleting a local branch (its upstream is
-//!   put back too), creating a tag. A switch that stashed first pops the stash back.
+//!   creating a branch (switching to it), deleting local branches — one, or a group
+//!   from the tree in one step (their upstreams are put back too), creating a tag. A switch that stashed first pops the stash back.
 //! - [`Inverse::Rename`] — `branch -m` back and forth (moves config and reflog).
 //! - [`Inverse::StashPush`], [`Inverse::StashRestore`], [`Inverse::StashDrop`] —
 //!   the stash stack, top entry only, and restoring only onto a clean tree.
@@ -409,7 +409,12 @@ enum Inverse {
         /// `target` is the name it switched to, for Redo.
         stash: bool,
         target: Option<String>,
+        /// Written by chains saved before the group delete; read, never written.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         upstream: Option<Upstream>,
+        /// The upstreams of the deleted local branches, one per branch that had one.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        upstreams: Vec<Upstream>,
     },
     Rename {
         from: String,
@@ -672,7 +677,7 @@ impl Ctx<'_> {
         }
     }
 
-    fn refs(&self, detail: String, upstream: Option<Upstream>) -> Verdict {
+    fn refs(&self, detail: String, upstreams: Vec<Upstream>) -> Verdict {
         let (b, a) = (self.b, self.a);
         let delta = ref_delta(b, a);
         if delta.iter().any(|r| !heads_or_tags(&r.name)) || b.discard_tip != a.discard_tip {
@@ -708,7 +713,8 @@ impl Ctx<'_> {
             Inverse::Refs {
                 stash: stashed,
                 target,
-                upstream,
+                upstream: None,
+                upstreams,
             },
             detail,
         )
@@ -893,7 +899,7 @@ fn classify(
     ok: bool,
     b: &Snapshot,
     a: &Snapshot,
-    upstream: Option<Upstream>,
+    upstreams: Vec<Upstream>,
 ) -> Verdict {
     let cx = Ctx {
         repo,
@@ -902,7 +908,11 @@ fn classify(
         b,
         a,
     };
-    let remote_delete = action == "branch_delete" && hint.arg(1) == Some("remote");
+    let remote_delete = match action {
+        "branch_delete" => hint.arg(1) == Some("remote"),
+        "branch_delete_many" => hint.arg(0) == Some("remote"),
+        _ => false,
+    };
     // Remotes live in `.git/config` and `refs/remotes/`, neither of which the digest
     // reads, so their arms come before the "nothing changed" answer — otherwise the
     // verdict would depend on whether HEAD's branch happened to track the remote (the
@@ -983,12 +993,18 @@ fn classify(
         "commit_cherry_pick" | "commit_revert" => cx.hard(head_subject()),
         "branch_checkout" => cx.refs(
             a.branch.clone().unwrap_or_else(|| short(a.head.as_deref())),
-            None,
+            Vec::new(),
         ),
-        "commit_checkout" => cx.refs(short(a.head.as_deref()), None),
-        "branch_create" | "tag_create" => cx.refs(arg0(), None),
-        "branch_delete" if remote_delete => cx.brk(UndoReasonCode::Published),
-        "branch_delete" => cx.refs(arg0(), upstream),
+        "commit_checkout" => cx.refs(short(a.head.as_deref()), Vec::new()),
+        "branch_create" | "tag_create" => cx.refs(arg0(), Vec::new()),
+        "branch_delete" | "branch_delete_many" if remote_delete => {
+            cx.brk(UndoReasonCode::Published)
+        }
+        "branch_delete" => cx.refs(arg0(), upstreams),
+        // The names, joined: `, ` cannot occur inside a branch name (no spaces).
+        "branch_delete_many" => {
+            cx.refs(hint.args.get(1..).unwrap_or_default().join(", "), upstreams)
+        }
         "branch_rename" => cx.rename(),
         "stash_push" => cx.stash_push(),
         "stash_pop" => cx.stash_restore(true),
@@ -1134,14 +1150,16 @@ fn run_inverse(repo: &Path, step: &mut Step, dir: UndoDirection) -> Result<()> {
             stash,
             target,
             upstream,
+            upstreams,
         } => {
+            let upstreams = upstream.iter().chain(upstreams.iter());
             let moved = from.position_differs(&to);
             if back {
                 if moved {
                     checkout(repo, &to)?;
                 }
                 set_refs(repo, &step.refs, true, &why)?;
-                if let Some(u) = upstream {
+                for u in upstreams {
                     let (r, m) = (
                         format!("branch.{}.remote", u.branch),
                         format!("branch.{}.merge", u.branch),
@@ -1154,7 +1172,7 @@ fn run_inverse(repo: &Path, step: &mut Step, dir: UndoDirection) -> Result<()> {
                 }
             } else {
                 set_refs(repo, &step.refs, false, &why)?;
-                if let Some(u) = upstream {
+                for u in upstreams {
                     let section = format!("branch.{}", u.branch);
                     let _ = exec::git(repo, &["config", "--remove-section", &section]).run();
                 }
@@ -1526,16 +1544,24 @@ impl Undo {
         f: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
         let key = key.to_path_buf();
-        let upstream = if action == "branch_delete" && hint.arg(1) != Some("remote") {
-            hint.arg(0).and_then(|n| upstream_of(repo, n))
-        } else {
-            None
+        // Read before the action: deleting a branch removes its config section.
+        let upstreams: Vec<Upstream> = match action {
+            "branch_delete" if hint.arg(1) != Some("remote") => {
+                hint.arg(0).and_then(|n| upstream_of(repo, n)).into_iter().collect()
+            }
+            "branch_delete_many" if hint.arg(0) != Some("remote") => hint
+                .args
+                .iter()
+                .skip(1)
+                .filter_map(|n| upstream_of(repo, n))
+                .collect(),
+            _ => Vec::new(),
         };
         let before = capture(repo, &[]);
         let out = f();
         let after = before.as_ref().ok().map(|b| capture(repo, &b.paths_vec()));
         let verdict = match (&before, &after) {
-            (Ok(b), Some(Ok(a))) => classify(repo, action, &hint, out.is_ok(), b, a, upstream),
+            (Ok(b), Some(Ok(a))) => classify(repo, action, &hint, out.is_ok(), b, a, upstreams),
             _ => Verdict::Break(reason(UndoReasonCode::Unverifiable, Some(action))),
         };
 
@@ -1997,6 +2023,92 @@ mod tests {
         r.round_trip("tag_create", Hint::args(["v1"]), || {
             ops::tag_create(p, &first, "v1", Some("annotated"))
         });
+    }
+
+    #[test]
+    fn a_group_delete_is_one_step_that_brings_every_branch_back() {
+        let r = Rig::new();
+        let p = r.p();
+        let head = g(p, &["rev-parse", "HEAD"]).trim().to_string();
+        for b in ["x", "y", "z"] {
+            g(p, &["branch", b]);
+        }
+        g(p, &["config", "branch.x.remote", "origin"]);
+        g(p, &["config", "branch.x.merge", "refs/heads/x"]);
+        g(p, &["config", "branch.z.remote", "origin"]);
+        g(p, &["config", "branch.z.merge", "refs/heads/zz"]);
+        let exists = |b: &str| {
+            exec::git(p, &["rev-parse", "--verify", "-q", b])
+                .run()
+                .unwrap()
+                .code
+                == Some(0)
+        };
+
+        let names: Vec<String> = ["x", "y", "z"].iter().map(|s| s.to_string()).collect();
+        r.act(
+            "branch_delete_many",
+            Hint::args(["local", "x", "y", "z"]),
+            || branches::delete_many(p, &names, false, false),
+        );
+        assert!(!exists("x") && !exists("y") && !exists("z"));
+        assert_eq!(r.state().undo.detail.as_deref(), Some("x, y, z"));
+
+        r.undo();
+        for b in ["x", "y", "z"] {
+            assert_eq!(g(p, &["rev-parse", b]).trim(), head, "{b} is back, one Undo");
+        }
+        assert_eq!(g(p, &["config", "branch.x.merge"]).trim(), "refs/heads/x");
+        assert_eq!(g(p, &["config", "branch.z.merge"]).trim(), "refs/heads/zz");
+
+        r.redo();
+        assert!(!exists("x") && !exists("y") && !exists("z"));
+        assert!(
+            exec::git(p, &["config", "--get", "branch.z.merge"])
+                .run()
+                .unwrap()
+                .code
+                == Some(1),
+            "redo drops the upstreams again"
+        );
+    }
+
+    #[test]
+    fn a_remote_group_delete_ends_the_chain_as_published() {
+        let r = Rig::new();
+        let p = r.p();
+        r.act("branch_create", Hint::args(["other"]), || {
+            CliEngine::new(p).create_branch("other", None)
+        });
+        // No server here: the push itself is not the point, its verdict is. A
+        // remote deletion moves nothing the digest reads, and still has to end the
+        // chain — the branch is gone for everyone who fetches.
+        r.act("branch_delete_many", Hint::args(["remote", "origin/x"]), || {
+            Ok(())
+        });
+        assert_eq!(r.reason(), UndoReasonCode::Published);
+    }
+
+    #[test]
+    fn a_chain_saved_with_a_single_upstream_still_reads() {
+        let old = r#"{"type":"refs","stash":false,"target":null,
+            "upstream":{"branch":"side","remote":"origin","merge":"refs/heads/side"}}"#;
+        match serde_json::from_str::<Inverse>(old).unwrap() {
+            Inverse::Refs {
+                upstream,
+                upstreams,
+                ..
+            } => {
+                assert_eq!(upstream.map(|u| u.branch).as_deref(), Some("side"));
+                assert!(upstreams.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+        let none = r#"{"type":"refs","stash":false,"target":null,"upstream":null}"#;
+        assert!(matches!(
+            serde_json::from_str::<Inverse>(none).unwrap(),
+            Inverse::Refs { upstream: None, .. }
+        ));
     }
 
     #[test]

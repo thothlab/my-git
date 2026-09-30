@@ -248,11 +248,7 @@ pub fn unmerged_count(repo: &Path, name: &str) -> Result<u32> {
 /// commits found nowhere else, whose number the message names for the dialog.
 pub fn delete(repo: &Path, name: &str, remote: bool, force: bool) -> Result<()> {
     if remote {
-        let (remote_name, branch) = name.split_once('/').ok_or_else(|| {
-            Error::Rule(format!(
-                "{name} is not a remote branch name (expected <remote>/<branch>)"
-            ))
-        })?;
+        let (remote_name, branch) = split_remote(name)?;
         exec::git(
             repo,
             &["push", "--delete", "--end-of-options", remote_name, branch],
@@ -276,6 +272,104 @@ pub fn delete(repo: &Path, name: &str, remote: bool, force: bool) -> Result<()> 
         }
     }
     git(repo, &["branch", if force { "-D" } else { "-d" }, "--end-of-options", name])?;
+    Ok(())
+}
+
+/// `origin/feature/x` → (`origin`, `feature/x`): the remote is the first segment.
+fn split_remote(name: &str) -> Result<(&str, &str)> {
+    name.split_once('/')
+        .filter(|(r, b)| !r.is_empty() && !b.is_empty())
+        .ok_or_else(|| {
+            Error::Rule(format!(
+                "{name} is not a remote branch name (expected <remote>/<branch>)"
+            ))
+        })
+}
+
+/// Delete several branches at once: all local (`remote = false`) or all on their
+/// remotes. The tree's group delete; one call is one Undo step.
+///
+/// **Local: every name is checked before anything is deleted.** `git branch -d a b
+/// c` deletes what it can and fails on the rest (git 2.54: a branch checked out in
+/// another worktree is refused, the others go), and a half-done batch is neither
+/// what the reader confirmed nor something Undo can take back — a failed action ends
+/// the chain. So each name must be a local branch, not the current one, not checked
+/// out in another worktree and, unless `force`, hold no commit found nowhere else
+/// ([`unmerged_count`], the same rule as [`delete`]); the first that is not refuses
+/// the whole batch. Only then one `git branch -d|-D` deletes them all.
+///
+/// **Remote: one `push --delete` per remote**, every branch of that remote in it.
+/// Not `--atomic`: a server without it would refuse the whole push, and a remote
+/// deletion cannot be undone anyway. What the server did not delete (a branch
+/// someone removed meanwhile) comes back in git's own words; the names are checked
+/// against the remote-tracking refs first, so a tree the reader has not refreshed
+/// is caught before the network.
+pub fn delete_many(repo: &Path, names: &[String], remote: bool, force: bool) -> Result<()> {
+    let mut unique: Vec<&str> = Vec::new();
+    for n in names {
+        if !unique.contains(&n.as_str()) {
+            unique.push(n);
+        }
+    }
+    if unique.is_empty() {
+        return Err(Error::Rule("no branches to delete".into()));
+    }
+    if remote {
+        let mut by_remote: Vec<(&str, Vec<&str>)> = Vec::new();
+        for &name in &unique {
+            let (remote_name, branch) = split_remote(name)?;
+            if !ref_exists(repo, name, false)? {
+                return Err(Error::Rule(format!(
+                    "{name} is not a remote branch; refresh the tree"
+                )));
+            }
+            match by_remote.iter_mut().find(|(r, _)| *r == remote_name) {
+                Some((_, list)) => list.push(branch),
+                None => by_remote.push((remote_name, vec![branch])),
+            }
+        }
+        for (remote_name, branches) in by_remote {
+            let mut args = vec!["push", "--delete", "--end-of-options", remote_name];
+            args.extend(branches);
+            exec::git(repo, &args).network().run()?.checked_both()?;
+        }
+        return Ok(());
+    }
+
+    let current = current_branch(repo)?;
+    let worktrees = crate::engine::worktrees::list(repo)?;
+    for &name in &unique {
+        if !ref_exists(repo, name, true)? {
+            return Err(Error::Rule(format!(
+                "{name} is not a local branch; refresh the tree"
+            )));
+        }
+        if current.as_deref() == Some(name) {
+            return Err(Error::Rule(format!(
+                "{name} is the current branch; check out another branch first"
+            )));
+        }
+        if let Some(w) = worktrees
+            .iter()
+            .find(|w| !w.is_current && w.branch.as_deref() == Some(name))
+        {
+            return Err(Error::Rule(format!(
+                "{name} is checked out in the worktree at {}; nothing was deleted",
+                w.path
+            )));
+        }
+        if !force {
+            let n = unmerged_count(repo, name)?;
+            if n > 0 {
+                return Err(Error::Rule(format!(
+                    "{name} has {n} commits that are on no other branch; nothing was deleted"
+                )));
+            }
+        }
+    }
+    let mut args = vec!["branch", if force { "-D" } else { "-d" }, "--end-of-options"];
+    args.extend(unique);
+    git(repo, &args)?;
     Ok(())
 }
 
@@ -694,6 +788,73 @@ mod tests {
         delete(p, "origin/side", true, false).unwrap();
         run(p, &["fetch", "--prune", "origin"]);
         assert!(!tree(p).unwrap().iter().any(|n| n.name == "origin/side"));
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn delete_many_checks_every_name_before_deleting_any() {
+        let dir = repo_with_unmerged_feat();
+        let p = dir.path();
+        run(p, &["branch", "a"]);
+        run(p, &["branch", "b"]);
+        let has = |n: &str| tree(p).unwrap().iter().any(|x| x.name == n && !x.is_remote);
+
+        // `feat` holds two commits of its own and comes last: git alone would have
+        // deleted `a` and `b` before refusing it
+        let err = delete_many(p, &names(&["a", "b", "feat"]), false, false).unwrap_err();
+        assert!(
+            matches!(err, Error::Rule(ref m) if m.contains("feat") && m.contains('2')),
+            "{err:?}"
+        );
+        assert!(has("a") && has("b") && has("feat"), "a refusal deletes nothing");
+
+        let err = delete_many(p, &names(&["a", "main"]), false, true).unwrap_err();
+        assert!(matches!(err, Error::Rule(ref m) if m.contains("main")), "{err:?}");
+        assert!(has("a"), "not even with force");
+
+        // checked out in another worktree: the case `git branch -d a b` half-refuses
+        let wt = tempfile::tempdir().unwrap();
+        let at = wt.path().join("wb");
+        run(p, &["worktree", "add", "-q", at.to_str().unwrap(), "b"]);
+        let err = delete_many(p, &names(&["a", "b"]), false, true).unwrap_err();
+        assert!(matches!(err, Error::Rule(ref m) if m.contains("worktree")), "{err:?}");
+        assert!(has("a") && has("b"));
+        run(p, &["worktree", "remove", at.to_str().unwrap()]);
+
+        let err = delete_many(p, &names(&["a", "nope"]), false, false).unwrap_err();
+        assert!(matches!(err, Error::Rule(ref m) if m.contains("nope")), "{err:?}");
+        assert!(has("a"), "a name the tree no longer has refuses the batch");
+
+        delete_many(p, &names(&["a", "b", "feat", "a"]), false, true).unwrap();
+        assert!(
+            !has("a") && !has("b") && !has("feat"),
+            "force deletes them all, a repeated name once"
+        );
+        assert!(has("main"));
+    }
+
+    #[test]
+    fn delete_many_removes_remote_branches() {
+        let (work, _bare) = repo_with_origin();
+        let p = work.path();
+        for b in ["s1", "s2"] {
+            run(p, &["branch", b]);
+            run(p, &["push", "origin", b]);
+        }
+        delete_many(p, &names(&["origin/s1", "origin/s2"]), true, false).unwrap();
+        run(p, &["fetch", "--prune", "origin"]);
+        let nodes = tree(p).unwrap();
+        assert!(!nodes.iter().any(|n| n.name == "origin/s1" || n.name == "origin/s2"));
+        assert!(nodes.iter().any(|n| n.name == "s1"), "the local branches stay");
+
+        let err = delete_many(p, &names(&["origin/s1"]), true, false).unwrap_err();
+        assert!(
+            matches!(err, Error::Rule(ref m) if m.contains("origin/s1")),
+            "a remote branch the tree no longer has is refused before the network: {err:?}"
+        );
     }
 
     #[test]

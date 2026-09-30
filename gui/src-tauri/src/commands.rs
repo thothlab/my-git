@@ -986,6 +986,24 @@ pub async fn branch_delete(
     build_state(&state)
 }
 
+/// The tree's group delete: several local branches, or several remote ones, in one
+/// action and one Undo step. The hint is `["local" | "remote", names…]` — the flag
+/// first, because the names are a list (`branch_delete` has it second).
+#[tauri::command]
+pub async fn branch_delete_many(
+    state: State<'_, AppState>,
+    names: Vec<String>,
+    remote: bool,
+    force: bool,
+) -> Result<RepoState> {
+    let mut hint = vec![if remote { "remote" } else { "local" }.to_string()];
+    hint.extend(names.iter().cloned());
+    undoable(&state, "branch_delete_many", Hint::args(hint), || {
+        branches::delete_many(&state.repo_path()?, &names, remote, force)
+    })?;
+    build_state(&state)
+}
+
 /// Read-only: how many commits deleting `name` would lose, by git's own definition
 /// of "not fully merged". Its own command because the confirmation dialog has to
 /// name the number **before** the deletion, not learn it from a failed attempt.

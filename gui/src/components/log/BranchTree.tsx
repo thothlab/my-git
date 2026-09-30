@@ -19,7 +19,9 @@ import {
   IconStar,
 } from "../IconButton";
 import { setSelectedBranch } from "./branchSelection";
+import { drawnMarks, menuTargets, rangeKeys, toggled } from "./branchMarks";
 import {
+  branchGroupMenuItems,
   branchMenuItems,
   checkoutBranch,
   fetchAll,
@@ -57,6 +59,12 @@ import { operationActive, operationReason, repoRevision } from "./actions/repoRe
  *  3. **The filter expands folders by derivation, never by writing.** Effective
  *     collapse = persisted collapse minus what the filter reveals. Persisting
  *     the expansion would leave every folder open once the filter is cleared.
+ *  4. **Selection is a cursor plus marks.** The cursor (`selectedKey`) is the
+ *     one row the keyboard stands on and the one branch that scopes the log;
+ *     the marks are the branches a group action takes — Cmd/Ctrl+click, Shift
+ *     range, Cmd/Ctrl+A, as in the log. Only marks that are *drawn* count
+ *     (`branchMarks.ts`): one hidden by the filter or a folded folder is kept,
+ *     never acted on.
  */
 
 /** `full_ref` of the synthetic detached-HEAD node (engine `branches::DETACHED_REF`). */
@@ -119,11 +127,16 @@ export default function BranchTree() {
   const [filter, setFilter] = createSignal("");
   const [favOnly, setFavOnly] = createSignal(false);
   const [selectedKey, setSelectedKey] = createSignal<string>("head");
-  // The context menu's target is captured when the menu opens: a right-click on
-  // a row acts on that row without moving the selection, because the selection
-  // is what scopes the log and the reader did not ask for that to change.
+  // Row keys of the marked branches (`b:<full ref>`), and where a Shift range
+  // starts. The anchor is not a signal: nothing is drawn from it.
+  const [marks, setMarks] = createSignal<ReadonlySet<string>>(new Set());
+  let anchor: string | null = null;
+  // The context menu's targets are captured when the menu opens: a right-click
+  // on a row acts on that row (or on the marked group it belongs to) without
+  // moving the selection, because the selection is what scopes the log and the
+  // reader did not ask for that to change.
   const menu = createMenuController();
-  const [menuNode, setMenuNode] = createSignal<BranchNode | null>(null);
+  const [menuNodes, setMenuNodes] = createSignal<BranchNode[]>([]);
 
   /**
    * The element of a row, for the keyboard path of the menu. Asked of the DOM
@@ -165,6 +178,17 @@ export default function BranchTree() {
     const list = ui()?.favorites ?? [];
     const next = list.includes(key) ? list.filter((x) => x !== key) : [...list, key];
     void patchUi({ favorites: next });
+  };
+
+  /** Star or unstar a group in one write — the group menu's two items. */
+  const setFavorites = (nodes: BranchNode[], on: boolean) => {
+    const list = ui()?.favorites ?? [];
+    const keys = nodes.map(favKey);
+    void patchUi({
+      favorites: on
+        ? [...list, ...keys.filter((k) => !list.includes(k))]
+        : list.filter((k) => !keys.includes(k)),
+    });
   };
 
   const toggleFolder = (key: string) => {
@@ -275,13 +299,71 @@ export default function BranchTree() {
     return [{ key: "head", kind: "head", label: d().onBranch(s.branch), depth: 0 }];
   });
 
-  /** Flat order for the keyboard only — each section renders its own slice. */
+  /**
+   * The rows as drawn, in order — each section renders its own slice. Local and
+   * Remote are left out under "favourites only", which hides them: the keyboard
+   * would otherwise walk into rows nobody sees, and a Shift range or Cmd/Ctrl+A
+   * would mark them.
+   */
   const rows = createMemo<Row[]>(() => [
     ...headRow(),
     ...favRows(),
-    ...localRows(),
-    ...remoteRows(),
+    ...(favOnly() ? [] : [...localRows(), ...remoteRows()]),
   ]);
+
+  // Below `rows` and `marks`: a memo runs the moment it is created.
+  const drawn = createMemo(() => drawnMarks(rows(), marks()));
+  const drawnKeys = createMemo(() => new Set(drawn().map((r) => r.key)));
+  /** Background of a row: a drawn mark, or the cursor while nothing is marked (HEAD, a folder). */
+  const isSelected = (row: Row) =>
+    drawnKeys().has(row.key) || (drawnKeys().size === 0 && row.key === selectedKey());
+  /** The ring on the cursor — only where the background alone would not show it. */
+  const isCursor = (row: Row) =>
+    row.key === selectedKey() && (drawnKeys().size > 1 || !isSelected(row));
+
+  /** A plain selection: the row becomes the cursor and, if a branch, the only mark. */
+  const selectOnly = (key: string) => {
+    setSelectedKey(key);
+    setMarks(key.startsWith("b:") ? new Set([key]) : new Set<string>());
+    anchor = key;
+  };
+
+  /** Shift range from the anchor to `key`; the cursor goes to `key`. */
+  const selectRange = (key: string) => {
+    if (anchor === null) anchor = selectedKey();
+    setMarks(new Set(rangeKeys(rows(), anchor, key)));
+    setSelectedKey(key);
+  };
+
+  /**
+   * A click, read the way the log reads it: plain selects one row, Cmd/Ctrl
+   * adds or removes a branch, Shift takes the range. HEAD and folders are never
+   * marked; with a modifier a folder still folds, and the marks stay.
+   */
+  const clickRow = (row: Row, e: MouseEvent) => {
+    const range = e.shiftKey;
+    const toggle = e.metaKey || e.ctrlKey;
+    if (range || toggle) {
+      if (row.kind === "branch") {
+        if (range) {
+          selectRange(row.key);
+        } else {
+          setMarks((m) => toggled(m, row.key));
+          setSelectedKey(row.key);
+          anchor = row.key;
+        }
+      } else if (row.kind === "folder" && row.folderKey) {
+        toggleFolder(row.folderKey);
+      }
+      return;
+    }
+    selectOnly(row.key);
+    if (row.kind === "folder" && row.folderKey) toggleFolder(row.folderKey);
+  };
+
+  /** What a menu opened on `row` acts on: its marked group, or the branch alone, or nothing (HEAD, a folder). */
+  const targetsOf = (row: Row | undefined): BranchNode[] =>
+    row?.kind === "branch" ? menuTargets(drawn(), row).flatMap((r) => (r.node ? [r.node] : [])) : [];
 
   // A change of repository drops the selection back to HEAD. Keeping the row
   // selected by key alone would carry a branch name into a repository that need
@@ -293,6 +375,20 @@ export default function BranchTree() {
     if (repo === lastRepoPath) return;
     lastRepoPath = repo;
     setSelectedKey("head");
+    setMarks(new Set<string>());
+    anchor = null;
+  });
+
+  // A branch that is gone (deleted here or from a terminal) leaves the marks:
+  // a new branch of the same name must not come back marked.
+  createEffect(() => {
+    const list = branches();
+    if (!list) return;
+    const live = new Set(list.map((b) => `b:${b.fullRef}`));
+    setMarks((m) => {
+      const kept = [...m].filter((k) => live.has(k));
+      return kept.length === m.size ? m : new Set(kept);
+    });
   });
 
   const current = createMemo(() => rows().find((r) => r.key === selectedKey()));
@@ -305,12 +401,13 @@ export default function BranchTree() {
     setSelectedBranch(r.kind === "branch" ? (r.node?.name ?? null) : null);
   });
 
-  const move = (delta: number) => {
+  const move = (delta: number, range = false) => {
     const list = rows();
     if (list.length === 0) return;
     const i = list.findIndex((r) => r.key === selectedKey());
     const next = Math.max(0, Math.min((i < 0 ? 0 : i) + delta, list.length - 1));
-    setSelectedKey(list[next].key);
+    if (range) selectRange(list[next].key);
+    else selectOnly(list[next].key);
   };
 
   const activate = () => {
@@ -321,8 +418,8 @@ export default function BranchTree() {
     if (r?.kind === "branch" && r.node && !r.node.isCurrent) void checkoutBranch(r.node);
   };
 
-  const openMenuFor = (node: BranchNode | null, at: { x: number; y: number } | HTMLElement | undefined) => {
-    setMenuNode(node);
+  const openMenuFor = (nodes: BranchNode[], at: { x: number; y: number } | HTMLElement | undefined) => {
+    setMenuNodes(nodes);
     if (at && "x" in at) menu.open(at);
     else menu.openAt(at as HTMLElement | undefined);
   };
@@ -338,7 +435,21 @@ export default function BranchTree() {
       if (r?.kind === "branch" && r.node) toggleFavorite(r.node);
       return true;
     }
+    if ((e.metaKey || e.ctrlKey) && e.code === "KeyA") {
+      setMarks(new Set(rows().filter((x) => x.kind === "branch").map((x) => x.key)));
+      return true;
+    }
     if (e.metaKey || e.ctrlKey) return false;
+    if (e.shiftKey && (e.code === "ArrowDown" || e.code === "ArrowUp")) {
+      move(e.code === "ArrowDown" ? 1 : -1, true);
+      return true;
+    }
+    // Esc leaves the cursor's branch alone marked; with one mark or none it is
+    // not this panel's key.
+    if (e.code === "Escape" && drawn().length > 1) {
+      selectOnly(selectedKey());
+      return true;
+    }
     if (e.code === "ArrowRight" && r?.kind === "folder" && r.folderKey) {
       setFolder(r.folderKey, false);
       return true;
@@ -397,6 +508,21 @@ export default function BranchTree() {
     refetchUi();
   };
 
+  /** One row of any section — HEAD, Favourites, Local, Remote read clicks alike. */
+  const renderRow = (row: Row) => (
+    <RowView
+      row={row}
+      selected={isSelected(row)}
+      cursor={isCursor(row)}
+      onSelect={(e) => clickRow(row, e)}
+      onToggleFavorite={() => row.node && toggleFavorite(row.node)}
+      onActivate={() => {
+        if (row.node && !row.node.isCurrent) void checkoutBranch(row.node);
+      }}
+      onContextMenu={(e) => openMenuFor(targetsOf(row), { x: e.clientX, y: e.clientY })}
+    />
+  );
+
   // Fetch lives in the action layer now (it is also a menu item there): the
   // counters come from `%(upstream:track)`, so the tree has to be re-read after
   // the remote-tracking refs move — which `afterRepoChange` does through the
@@ -410,20 +536,20 @@ export default function BranchTree() {
         moveSelection: move,
         moveToEdge: (e) => {
           const list = rows();
-          if (list.length > 0) setSelectedKey(list[e === -1 ? 0 : list.length - 1].key);
+          if (list.length > 0) selectOnly(list[e === -1 ? 0 : list.length - 1].key);
         },
         activate,
-        contextMenu: () => {
-          const r = current();
-          openMenuFor(
-            r?.kind === "branch" ? (r.node ?? null) : null,
-            rowElement(selectedKey()) ?? undefined,
-          );
-        },
+        contextMenu: () =>
+          openMenuFor(targetsOf(current()), rowElement(selectedKey()) ?? undefined),
         onKey,
       }}
       toolbar={
         <>
+          <Show when={drawn().length > 1}>
+            <span class="mr-1 shrink-0 text-xs text-fg-muted" title={d().selectedBranchesTip()}>
+              {d().selectedBranches(drawn().length)}
+            </span>
+          </Show>
           <PanelBtn label={<IconRefresh />} tip={d().refreshTip()} onClick={refreshAll} />
           <PanelBtn
             label={<IconFetch />}
@@ -463,7 +589,12 @@ export default function BranchTree() {
         {(a) => (
           <ContextMenu
             anchor={a()}
-            items={() => branchMenuItems(menuNode(), refreshAll)}
+            items={() => {
+              const nodes = menuNodes();
+              return nodes.length > 1
+                ? branchGroupMenuItems(nodes, { has: (n) => favorites().has(favKey(n)), set: setFavorites }, refreshAll)
+                : branchMenuItems(nodes[0] ?? null, refreshAll);
+            }}
             onClose={menu.close}
           />
         )}
@@ -522,39 +653,11 @@ export default function BranchTree() {
                 }
               >
                 <div ref={listEl} class="min-h-0 flex-1 overflow-auto py-1">
-                  <For each={headRow()}>
-                    {(row) => (
-                      <RowView
-                        row={row}
-                        selected={selectedKey() === row.key}
-                        onSelect={() => setSelectedKey(row.key)}
-                        onToggleFavorite={() => {}}
-                        onContextMenu={(e) => openMenuFor(null, { x: e.clientX, y: e.clientY })}
-                      />
-                    )}
-                  </For>
+                  <For each={headRow()}>{renderRow}</For>
 
                   <Show when={favRows().length > 0}>
                     <Section title={d().favoritesSection()}>
-                      <For each={favRows()}>
-                        {(row) => (
-                          <RowView
-                            row={row}
-                            selected={selectedKey() === row.key}
-                            onSelect={() => {
-                              setSelectedKey(row.key);
-                              if (row.kind === "folder" && row.folderKey) toggleFolder(row.folderKey);
-                            }}
-                            onToggleFavorite={() => row.node && toggleFavorite(row.node)}
-                            onActivate={() => {
-                              if (row.node && !row.node.isCurrent) void checkoutBranch(row.node);
-                            }}
-                            onContextMenu={(e) =>
-                              openMenuFor(row.node ?? null, { x: e.clientX, y: e.clientY })
-                            }
-                          />
-                        )}
-                      </For>
+                      <For each={favRows()}>{renderRow}</For>
                     </Section>
                   </Show>
 
@@ -567,25 +670,7 @@ export default function BranchTree() {
                       when={localRows().length > 0}
                       fallback={<Note text={narrowed() ? d().noMatches() : d().noBranchesYet()} />}
                     >
-                      <For each={localRows()}>
-                        {(row) => (
-                          <RowView
-                            row={row}
-                            selected={selectedKey() === row.key}
-                            onSelect={() => {
-                              setSelectedKey(row.key);
-                              if (row.kind === "folder" && row.folderKey) toggleFolder(row.folderKey);
-                            }}
-                            onToggleFavorite={() => row.node && toggleFavorite(row.node)}
-                                onActivate={() => {
-                              if (row.node && !row.node.isCurrent) void checkoutBranch(row.node);
-                            }}
-                            onContextMenu={(e) =>
-                              openMenuFor(row.node ?? null, { x: e.clientX, y: e.clientY })
-                            }
-                          />
-                        )}
-                      </For>
+                      <For each={localRows()}>{renderRow}</For>
                     </Show>
                   </Section>
 
@@ -596,25 +681,7 @@ export default function BranchTree() {
                         <Note text={narrowed() ? d().noMatches() : d().noRemoteBranches()} />
                       }
                     >
-                      <For each={remoteRows()}>
-                        {(row) => (
-                          <RowView
-                            row={row}
-                            selected={selectedKey() === row.key}
-                            onSelect={() => {
-                              setSelectedKey(row.key);
-                              if (row.kind === "folder" && row.folderKey) toggleFolder(row.folderKey);
-                            }}
-                            onToggleFavorite={() => row.node && toggleFavorite(row.node)}
-                                onActivate={() => {
-                              if (row.node && !row.node.isCurrent) void checkoutBranch(row.node);
-                            }}
-                            onContextMenu={(e) =>
-                              openMenuFor(row.node ?? null, { x: e.clientX, y: e.clientY })
-                            }
-                          />
-                        )}
-                      </For>
+                      <For each={remoteRows()}>{renderRow}</For>
                     </Show>
                   </Section>
                   </Show>
@@ -631,7 +698,9 @@ export default function BranchTree() {
 function RowView(props: {
   row: Row;
   selected: boolean;
-  onSelect: () => void;
+  /** The keyboard's row inside a group of marks — a ring, as in the log. */
+  cursor: boolean;
+  onSelect: (e: MouseEvent) => void;
   onToggleFavorite: () => void;
   onContextMenu?: (e: MouseEvent) => void;
   onActivate?: () => void;
@@ -645,10 +714,11 @@ function RowView(props: {
   return (
     <div
       data-row-key={props.row.key}
-      class="flex cursor-default items-center gap-1 px-2 py-0.5 font-mono"
+      class="flex cursor-default select-none items-center gap-1 px-2 py-0.5 font-mono"
       style={{ "padding-left": `${8 + props.row.depth * 12}px` }}
       classList={{
         "bg-accent/20 text-fg": props.selected,
+        "ring-1 ring-inset ring-accent": props.cursor,
         "text-fg-muted": !props.selected,
         "font-semibold": props.row.kind === "head" || props.row.node?.isCurrent,
       }}

@@ -30,9 +30,9 @@ git-dir этого worktree (`.git/worktrees/<имя>/changelists.json`); TUI
 | `cd gui && npm run tauri dev` | Запустить Graft локально (нужен дисплей) |
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
-| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `ageColor`, `signatureRules`, `backgroundFetchRules`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; `lfsRules`, `worktreeRules`; разбор и печать команды консоли), 394 утверждения |
-| `cargo test` | Оба крейта разом: 411 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 411 тестов |
+| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `ageColor`, `signatureRules`, `backgroundFetchRules`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; `lfsRules`, `worktreeRules`, `branchMarks`; разбор и печать команды консоли), 410 утверждений |
+| `cargo test` | Оба крейта разом: 416 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 416 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -127,7 +127,10 @@ gui/src/            фронт
                     bisectMarks.ts — метка bisect у строки лога и фаза поиска, без единого импорта;
                     forgeUrl.ts — ссылки «Открыть на GitHub / GitLab / Bitbucket» из адреса remote;
                     ageColor.ts — ступень возраста коммита для раскраски графа «по возрасту»;
-                    signatureRules.ts — тон и пояснение строки «Подпись» в карточке коммита
+                    signatureRules.ts — тон и пояснение строки «Подпись» в карточке коммита;
+                    branchMarks.ts — мультивыбор дерева веток: диапазон Shift, какие отметки
+                    считаются (только нарисованные), на что действует меню, можно ли удалить
+                    группу и почему нет; без единого импорта
   components/log/actions/  действия над коммитами и ветками, контекстное меню, диалоги;
                     operation.ts — `continueOperation`, `operationWord` (полоса операции и
                     редактор конфликта зовут одно и то же)
@@ -268,8 +271,15 @@ Git вызывается только как внешний процесс. `gix
   git-lfs найден (exec-path, затем PATH — поиском файла, а не запуском), путь выразим
   шаблоном, у пути `filter=lfs`, и в индексе (`:0:<путь>`) указатель на тот же oid. Коммит
   из истории показывает размеры и наличие, но кнопки не получает.
-- `engine::branches` — `tree`, `rename`, `delete`, `merge`, `rebase_onto`, `unmerged_count`,
-  `update_from_upstream`, константа `DETACHED_REF = "HEAD"`.
+- `engine::branches` — `tree`, `rename`, `delete`, `delete_many`, `merge`, `rebase_onto`,
+  `unmerged_count`, `update_from_upstream`, константа `DETACHED_REF = "HEAD"`. `delete_many`
+  (групповое удаление из дерева, команда `branch_delete_many`, одна мутация и один шаг Undo):
+  локальные — **все имена проверяются до удаления хоть одного** (существует, не текущая, не
+  выгружена в другом worktree, без `force` — `unmerged_count == 0`), потом один `git branch
+  -d|-D`: сам git на `branch -d a b c` удаляет что может и падает на остальных (выгруженную в
+  worktree), а половина пачки — ни то, что подтвердили, ни то, что Undo вернёт. Удалённые —
+  один `push --delete` на remote, без `--atomic` (сервер без него отказал бы во всём);
+  смешанную группу клиент не отправляет.
 - `engine::remotes` — `fetch_background(undo, data, repo) -> BackgroundFetch`: нет remotes —
   `no-remotes`, незавершённая операция — `operation`, иначе `CliEngine::fetch_background`
   (`fetch --quiet --all --no-prune --no-write-fetch-head --no-auto-maintenance`, сетевой режим,
@@ -394,7 +404,9 @@ Git вызывается только как внешний процесс. `gix
   (`Soft` — ссылки + записи индекса, дерево не тронуто: коммит в т.ч. changelist'а, amend и
   первый, reword HEAD, reset soft/mixed, stage/unstage строк; `Hard` — `reset --hard`, только
   без отслеживаемых изменений до и после: merge, cherry-pick, revert, reset hard; `Refs` —
-  checkout + ссылки: переключение, создание/удаление ветки (с upstream), тег, переключение со
+  checkout + ссылки: переключение, создание/удаление ветки (с upstream; групповое удаление —
+  один шаг со всеми upstream, `Inverse::Refs.upstreams`; старое поле `upstream` только
+  читается — цепочки на диске, записанные до группового удаления), тег, переключение со
   стешем; `Rename`; `StashPush` / `StashRestore` / `StashDrop` — только верхний стеш и
   восстановление только на чистое дерево; `Discard` — `discard::restore` копии отката и
   копии самого restore, плюс записи индекса; `Ignore` — `file_ignore`: `IgnoreEdit` из
@@ -752,7 +764,11 @@ Git вызывается только как внешний процесс. `gix
   только через `setBranchScope` — не писать `filter.branch` руками. Бюджеты:
   `PAGE_LIMIT = 200`, `ROW_CAP = 20000`, `LANE_BUDGET = 12`.
 - **Состояние выбора живёт в трёх местах** — коммит в `logStore`, ветка в `branchSelection.ts`,
-  файл в `commitFileSelection.ts`. Четвёртого не заводить.
+  файл в `commitFileSelection.ts`. Четвёртого не заводить. Отметки мультивыбора дерева веток —
+  не четвёртое место: это сигнал `marks` рядом с курсором `selectedKey` в `BranchTree`, лог
+  по-прежнему скоупится одной веткой курсора. Действуют только **нарисованные** отметки
+  (`branchMarks.drawnMarks`): скрытая фильтром, свёрнутой папкой или «только избранное» ветка
+  остаётся отмеченной, но в группу не входит — удалить невидимое нельзя.
 - `DiffSource` требует `parent`: короткий хэш родителя, `null` — корневой коммит. Компилятор
   отличит отсутствие поля, но не подставленный наугад `null`.
 - **Раскладка путей живёт в `components/pathTree.ts`** — split по `/` плюс схлопывание

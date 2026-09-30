@@ -2,6 +2,7 @@ import {
   branchCheckout,
   branchCreate,
   branchDelete,
+  branchDeleteMany,
   branchMerge,
   branchRebaseOnto,
   branchRename,
@@ -16,6 +17,7 @@ import { chooseOption, confirmAction, reportError, run, setError, state } from "
 import { openStashPanel } from "../../StashPanel";
 import { openWorktreeCreate } from "../../WorktreesPanel";
 import { selectedBranch, setSelectedBranch } from "../branchSelection";
+import { groupDeleteBlock } from "../branchMarks";
 import { copyText } from "./clipboard";
 import type { MenuEntry } from "./ContextMenu";
 import { openDialog } from "./dialogs";
@@ -147,6 +149,44 @@ export async function deleteBranch(node: BranchNode): Promise<void> {
   if (!ok) return;
   await run(branchDelete(node.name, false, unmerged > 0), d().phaseDeleteBranch());
   if (selectedBranch() === node.name) setSelectedBranch(null);
+  afterRepoChange();
+}
+
+/**
+ * Delete a group from the tree's multi-selection — all local or all remote
+ * (`groupDeleteBlock` keeps a mixed group, and one holding the current branch,
+ * from getting here).
+ *
+ * The confirmation lists every branch, and each local one with the commits only
+ * it holds, counted before the dialog exactly as for one branch; `force` is
+ * passed only when that list named some. One backend call deletes them all or —
+ * local ones — none (`branches::delete_many` checks every name first), and it is
+ * one Undo step, not one per branch.
+ */
+export async function deleteBranches(nodes: BranchNode[]): Promise<void> {
+  if (nodes.length === 0) return;
+  const remote = nodes[0].isRemote;
+  const names = nodes.map((n) => n.name);
+  let counts = names.map(() => 0);
+  if (!remote) {
+    try {
+      counts = await Promise.all(names.map((n) => branchUnmergedCount(n)));
+    } catch (e) {
+      reportError(e);
+      return;
+    }
+  }
+  const lossy = counts.some((n) => n > 0);
+  const ok = await confirmAction(
+    remote
+      ? d().confirmDeleteRemoteBranches(names)
+      : d().confirmDeleteBranches(names.map((name, i) => ({ name, unmerged: counts[i] }))),
+    remote || lossy,
+  );
+  if (!ok) return;
+  await run(branchDeleteMany(names, remote, lossy), d().phaseDeleteBranches());
+  const scoped = selectedBranch();
+  if (scoped !== null && names.includes(scoped)) setSelectedBranch(null);
   afterRepoChange();
 }
 
@@ -355,6 +395,52 @@ export function branchMenuItems(node: BranchNode | null, refreshTree: () => void
     run: () => openStashPanel(),
   });
 
+  return items;
+}
+
+/**
+ * Items of the tree's context menu for a group: more than one branch marked, and
+ * the menu opened on one of them (`branchMarks.menuTargets`). Only what means the
+ * same for many branches at once; checkout, merge and the rest stay single.
+ *
+ * Favourites are the tree's own (`.git/graft-ui.json`), so the tree passes how to
+ * read and write them.
+ */
+export function branchGroupMenuItems(
+  nodes: BranchNode[],
+  favorites: { has: (n: BranchNode) => boolean; set: (nodes: BranchNode[], on: boolean) => void },
+  refreshTree: () => void,
+): MenuEntry[] {
+  const busyOp = operationActive();
+  const block = groupDeleteBlock(nodes);
+  const deleteReason = busyOp
+    ? operationReason()
+    : block?.code === "mixed"
+      ? d().whyMixedDelete()
+      : block?.code === "current"
+        ? d().whyCurrentSelected(block.name)
+        : undefined;
+  const remote = nodes.every((n) => n.isRemote);
+  const items: MenuEntry[] = [
+    {
+      label: remote ? d().menuDeleteRemoteBranches(nodes.length) : d().menuDeleteBranches(nodes.length),
+      danger: true,
+      disabled: busyOp || block !== null,
+      reason: deleteReason,
+      run: () => void deleteBranches(nodes).then(refreshTree),
+    },
+    { kind: "sep" },
+  ];
+  const plain = nodes.filter((n) => !favorites.has(n));
+  const starred = nodes.filter((n) => favorites.has(n));
+  if (plain.length > 0) items.push({ label: d().menuFavoriteAdd(), run: () => favorites.set(plain, true) });
+  if (starred.length > 0) {
+    items.push({ label: d().menuFavoriteRemove(), run: () => favorites.set(starred, false) });
+  }
+  items.push({
+    label: d().menuCopyBranchNames(nodes.length),
+    run: () => void copyOrReport(nodes.map((n) => n.name).join("\n")),
+  });
   return items;
 }
 

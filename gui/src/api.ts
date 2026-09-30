@@ -856,6 +856,11 @@ export const branchRename = (from: string, to: string) =>
   invoke<RepoState>("branch_rename", { from, to });
 export const branchDelete = (name: string, remote: boolean, force: boolean) =>
   invoke<RepoState>("branch_delete", { name, remote, force });
+/// The tree's group delete: several local branches, or several remote ones, in
+/// one action and one Undo step. Local ones go all or none: every name is checked
+/// before any is deleted (`branches::delete_many`).
+export const branchDeleteMany = (names: string[], remote: boolean, force: boolean) =>
+  invoke<RepoState>("branch_delete_many", { names, remote, force });
 /// Commits that deleting the branch would lose — asked before the delete, so the
 /// confirmation can name the number instead of parsing a failed attempt.
 export const branchUnmergedCount = (name: string) =>

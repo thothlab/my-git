@@ -227,6 +227,12 @@ const en = {
         return `new branch ${x}`;
       case "branch_delete":
         return `deleting branch ${x}`;
+      case "branch_delete_many": {
+        const names = x.split(", ");
+        return names.length <= 3
+          ? `deleting branches ${x}`
+          : `deleting ${names.length} branches: ${names.slice(0, 3).join(", ")}…`;
+      }
       case "branch_rename":
         return `renaming ${x}`;
       case "tag_create":
@@ -483,6 +489,9 @@ const en = {
   searchCappedNote: () => "The search stopped at the row cap",
   refsMore: (n: number) => `+${n}`,
   selectedCommits: (n: number) => `${n} selected`,
+  selectedBranches: (n: number) => `${n} selected`,
+  selectedBranchesTip: () =>
+    "Cmd/Ctrl+click adds or removes a branch, Shift+click takes a range, Cmd/Ctrl+A every branch shown, Esc keeps one. Right-click a marked branch for what applies to all of them.",
   graphSuppressedTip: () =>
     "The filter breaks the history, so edges between commits are not drawn",
   offGraphLabel: () => "found by hash",
@@ -547,6 +556,11 @@ const en = {
   menuStashes: () => "Stashed changes…",
   menuUpdateBranch: (name: string) => `Update "${name}" from upstream`,
   menuCopyBranchName: () => "Copy branch name",
+  menuDeleteBranches: (n: number) => `Delete ${n} branches…`,
+  menuDeleteRemoteBranches: (n: number) => `Delete ${n} branches on the remote…`,
+  menuFavoriteAdd: () => "Add to favourites",
+  menuFavoriteRemove: () => "Remove from favourites",
+  menuCopyBranchNames: (n: number) => `Copy ${n} branch names`,
   menuCopyHash: (n: number) => (n === 1 ? "Copy hash" : `Copy hashes (${n})`),
   menuCompare: (n: number) => `Compare (${n})`,
   menuCompareWorktree: () => "Compare with the working tree",
@@ -631,6 +645,10 @@ const en = {
   phaseRebaseInteractive: () => "interactive rebase",
   whyCurrentBranch: () => "this is the current branch",
   whyRemoteBranch: () => "this is a remote branch",
+  whyMixedDelete: () =>
+    "local and remote branches are selected together; a deletion on the remote cannot be undone, so it is done on its own",
+  whyCurrentSelected: (name: string) =>
+    `the current branch "${name}" is selected; Cmd/Ctrl+click it to take it out`,
   whyAlreadyContained: () => "the commit is already on the current branch",
   whyOperationRunning: () => "an unfinished operation is in progress — finish it first",
   whyMergeHasNoSkip: () => "a merge has no step to skip",
@@ -657,6 +675,21 @@ const en = {
     `Branch "${name}" has ${n} ${n === 1 ? "commit" : "commits"} that no other branch contains. Deleting it loses ${n === 1 ? "it" : "them"}.\n\nDelete anyway?`,
   confirmDeleteRemote: (name: string) =>
     `Delete "${name}" on the remote? Everyone who fetches from it loses the branch.`,
+  confirmDeleteBranches: (items: { name: string; unmerged: number }[]) => {
+    const lost = items.filter((i) => i.unmerged > 0).length;
+    const lines = items.map((i) =>
+      i.unmerged > 0
+        ? `  ${i.name} (${i.unmerged} ${i.unmerged === 1 ? "commit" : "commits"} no other branch has)`
+        : `  ${i.name}`,
+    );
+    const warn =
+      lost === 0
+        ? ""
+        : `\n\n${lost === 1 ? "One of them holds" : `${lost} of them hold`} commits that no other branch contains. Deleting loses them.`;
+    return `Delete ${items.length} branches?\n\n${lines.join("\n")}${warn}`;
+  },
+  confirmDeleteRemoteBranches: (names: string[]) =>
+    `Delete ${names.length} branches on the remote? Everyone who fetches from it loses them, and this cannot be undone.\n\n${names.map((n) => `  ${n}`).join("\n")}`,
   pushRejected: (branch: string, remote: string, why: string) =>
     `Pushing "${branch}" to ${remote} was refused:\n\n${why}\n\nForcing overwrites what is on the remote; commits pushed there by other people may be lost.`,
   pushForceLease: () => "Force push with lease — refuse if the remote moved since your last fetch",
@@ -694,6 +727,7 @@ const en = {
   phaseForcePush: () => "push --force-with-lease",
   phaseForcePushHard: () => "push --force",
   phaseDeleteBranch: () => "delete branch",
+  phaseDeleteBranches: () => "delete branches",
   phaseRenameBranch: () => "rename branch",
   phaseCreateBranch: () => "create branch",
   phaseTag: () => "tag",
@@ -1335,6 +1369,12 @@ const ru: Dict = {
         return `создание ветки ${x}`;
       case "branch_delete":
         return `удаление ветки ${x}`;
+      case "branch_delete_many": {
+        const names = x.split(", ");
+        return names.length <= 3
+          ? `удаление веток ${x}`
+          : `удаление ${names.length} ${ruPlural(names.length, "ветки", "веток", "веток")}: ${names.slice(0, 3).join(", ")}…`;
+      }
       case "branch_rename":
         return `переименование ${x}`;
       case "tag_create":
@@ -1587,6 +1627,9 @@ const ru: Dict = {
   searchCappedNote: () => "Поиск остановился на потолке строк",
   refsMore: (n) => `+${n}`,
   selectedCommits: (n) => `выбрано ${n}`,
+  selectedBranches: (n) => `выбрано ${n}`,
+  selectedBranchesTip: () =>
+    "Cmd/Ctrl+щелчок добавляет или снимает ветку, Shift+щелчок - диапазон, Cmd/Ctrl+A - все показанные ветки, Esc - оставить одну. Правый щелчок по выделенной ветке - действия над всеми сразу.",
   graphSuppressedTip: () =>
     "Фильтр разрывает историю, поэтому связи между коммитами не рисуются",
   offGraphLabel: () => "найден по хэшу",
@@ -1650,6 +1693,12 @@ const ru: Dict = {
   menuStashes: () => "Спрятанные изменения…",
   menuUpdateBranch: (name: string) => `Обновить "${name}" из upstream`,
   menuCopyBranchName: () => "Копировать имя ветки",
+  menuDeleteBranches: (n) => `Удалить ${n} ${ruPlural(n, "ветку", "ветки", "веток")}…`,
+  menuDeleteRemoteBranches: (n) =>
+    `Удалить ${n} ${ruPlural(n, "ветку", "ветки", "веток")} на сервере…`,
+  menuFavoriteAdd: () => "В избранное",
+  menuFavoriteRemove: () => "Убрать из избранного",
+  menuCopyBranchNames: (n) => `Копировать имена веток (${n})`,
   menuCopyHash: (n) => (n === 1 ? "Копировать хэш" : `Копировать хэши (${n})`),
   menuCompare: (n) => `Сравнить (${n})`,
   menuCompareWorktree: () => "Сравнить с рабочим деревом",
@@ -1735,6 +1784,10 @@ const ru: Dict = {
   phaseRebaseInteractive: () => "интерактивный rebase",
   whyCurrentBranch: () => "это текущая ветка",
   whyRemoteBranch: () => "это удалённая ветка",
+  whyMixedDelete: () =>
+    "выделены и локальные, и удалённые ветки; удаление на сервере не отменить, поэтому оно делается отдельно",
+  whyCurrentSelected: (name) =>
+    `среди выделенных текущая ветка "${name}"; снимите с неё выделение Cmd/Ctrl+щелчком`,
   whyAlreadyContained: () => "коммит уже содержится в текущей ветке",
   whyOperationRunning: () => "идёт незавершённая операция — сначала завершите её",
   whyMergeHasNoSkip: () => "у merge нет пропуска шага",
@@ -1761,6 +1814,24 @@ const ru: Dict = {
     `У ветки "${name}" ${n} ${ruPlural(n, "коммит", "коммита", "коммитов")}, которых нет ни в одной другой ветке. Удаление потеряет их.\n\nВсё равно удалить?`,
   confirmDeleteRemote: (name) =>
     `Удалить "${name}" на сервере? Ветка исчезнет у всех, кто оттуда получает.`,
+  confirmDeleteBranches: (items) => {
+    const lost = items.filter((i) => i.unmerged > 0).length;
+    const lines = items.map((i) =>
+      i.unmerged > 0
+        ? `  ${i.name} (${i.unmerged} ${ruPlural(i.unmerged, "коммит", "коммита", "коммитов")}, которых нет в других ветках)`
+        : `  ${i.name}`,
+    );
+    const warn =
+      lost === 0
+        ? ""
+        : `\n\n${lost === 1 ? "У одной из них есть коммиты" : `У ${lost} из них есть коммиты`}, которых нет ни в одной другой ветке. Удаление потеряет их.`;
+    const n = items.length;
+    return `Удалить ${n} ${ruPlural(n, "ветку", "ветки", "веток")}?\n\n${lines.join("\n")}${warn}`;
+  },
+  confirmDeleteRemoteBranches: (names) => {
+    const n = names.length;
+    return `Удалить ${n} ${ruPlural(n, "ветку", "ветки", "веток")} на сервере? Они исчезнут у всех, кто оттуда получает, и это не отменить.\n\n${names.map((x) => `  ${x}`).join("\n")}`;
+  },
   pushRejected: (branch, remote, why) =>
     `Отправка "${branch}" в ${remote} отклонена:\n\n${why}\n\nПринудительная отправка перезапишет то, что лежит на сервере; коммиты, отправленные туда другими, могут быть потеряны.`,
   pushForceLease: () => "Принудительно с проверкой - откажет, если сервер ушёл вперёд с вашего последнего fetch",
@@ -1799,6 +1870,7 @@ const ru: Dict = {
   phaseForcePush: () => "push --force-with-lease",
   phaseForcePushHard: () => "push --force",
   phaseDeleteBranch: () => "удаление ветки",
+  phaseDeleteBranches: () => "удаление веток",
   phaseRenameBranch: () => "переименование ветки",
   phaseCreateBranch: () => "создание ветки",
   phaseTag: () => "тег",

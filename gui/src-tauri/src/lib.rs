@@ -141,6 +141,7 @@ pub fn run() {
             commands::branch_tree,
             commands::branch_rename,
             commands::branch_delete,
+            commands::branch_delete_many,
             commands::branch_unmerged_count,
             commands::branch_merge,
             commands::branch_rebase_onto,

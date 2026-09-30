@@ -67,7 +67,9 @@ function ConfirmHost() {
     <Show when={confirmState()}>
       {(s) => (
         <Backdrop>
-          <div class="mb-4 whitespace-pre-wrap text-sm">{s().message}</div>
+          {/* Scrolls rather than grows: a group delete lists every branch, and a
+              window-tall message would push the buttons off screen. */}
+          <div class="mb-4 max-h-[60vh] overflow-auto whitespace-pre-wrap text-sm">{s().message}</div>
           <div class="flex justify-end gap-2">
             <button
               ref={cancelBtn}
