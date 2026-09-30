@@ -408,6 +408,13 @@ const en = {
   highlightHeader: () => "Emphasis",
   highlightMine: () => "Dim commits that are neither mine nor on this branch",
   highlightHint: () => "Nothing leaves the list. To show only some people, use the User filter.",
+  graphColorHeader: () => "Graph colours",
+  graphColorBranch: () => "By branch",
+  graphColorAge: () => "By commit age",
+  graphAgeLegendTip: () =>
+    "Each commit's node and date by the age of its author date: under a day · a week · a month · a year · older",
+  ageStepLabel: (key: string): string =>
+    ({ day: "< 1 day", week: "< 1 week", month: "< 1 month", year: "< 1 year" })[key] ?? "Older",
   loadingMore: () => "Loading more commits…",
   logEnd: () => "End of history",
   logCapReached: () => "The first 20 000 commits are shown — narrow the filter",
@@ -1383,6 +1390,13 @@ const ru: Dict = {
   highlightHeader: () => "Подсветка",
   highlightMine: () => "Приглушать чужие коммиты и коммиты не из этой ветки",
   highlightHint: () => "Из списка ничего не исчезает. Чтобы оставить только нужных людей, есть фильтр User.",
+  graphColorHeader: () => "Цвета графа",
+  graphColorBranch: () => "По веткам",
+  graphColorAge: () => "По возрасту коммита",
+  graphAgeLegendTip: () =>
+    "Узел и дата коммита — по возрасту даты автора: меньше суток · недели · месяца · года · старше",
+  ageStepLabel: (key) =>
+    ({ day: "< суток", week: "< недели", month: "< месяца", year: "< года" })[key] ?? "Старше",
   loadingMore: () => "Загружаем ещё коммиты…",
   logEnd: () => "Конец истории",
   logCapReached: () => "Показаны первые 20 000 коммитов — уточните фильтр",

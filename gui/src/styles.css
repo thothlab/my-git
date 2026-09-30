@@ -94,3 +94,24 @@ body {
   --lane-10: 200 145 110;
   --lane-11: 150 160 195;
 }
+/* Commit age steps for the "by age" graph colouring (`log/ageColor.ts`): the
+   node and the date of a row. Green through lime, amber and rust to a faded
+   stone. Absolute steps — under a day, a week, a month, a year, older — so a
+   colour means the same age in every repository and on every page. No step is
+   blue: that is `--accent` and `--lane-0`, and on a selected row (`bg-accent/25`)
+   a blue date would sink into its background. Every step keeps a contrast of at
+   least 4.5 against a selected row, and higher on a plain one, in both themes. */
+:root {
+  --age-0: 16 100 45;
+  --age-1: 63 98 18;
+  --age-2: 133 77 14;
+  --age-3: 160 50 10;
+  --age-4: 100 85 78;
+}
+:root.dark {
+  --age-0: 74 222 128;
+  --age-1: 163 230 53;
+  --age-2: 251 191 36;
+  --age-3: 251 146 60;
+  --age-4: 185 168 158;
+}

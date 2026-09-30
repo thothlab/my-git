@@ -66,7 +66,16 @@ export default function LogGraph(props: {
    * Anything deeper folds into the row's "+N" marker instead of widening the
    * column and pushing every row's text sideways. Never above the lane budget. */
   capacity: number;
+  /**
+   * Set in the "by age" colouring: the **node** takes the colour of its commit's
+   * age (`ageColor.ts`); `null` for a date that says nothing (a neutral colour).
+   * Lines keep their lane's colour either way — a line recoloured row by row
+   * would be striped by time, and following a branch is what the lines are for.
+   */
+  age?: { color: string | null; label: string };
 }) {
+  const nodeColor = () =>
+    props.age ? (props.age.color ?? "rgb(var(--fg-subtle))") : color(props.commit.lane);
   // Lanes past the column's capacity are not drawn as lines. Routing them into a
   // shared slot made them indistinguishable from each other and from a real
   // neighbouring line, and an edge clamped into that slot read as a genuine
@@ -169,7 +178,7 @@ export default function LogGraph(props: {
             width={6}
             height={6}
             fill="rgb(var(--bg))"
-            stroke={color(props.commit.lane)}
+            stroke={nodeColor()}
             stroke-width="1.5"
           />
         }
@@ -178,10 +187,12 @@ export default function LogGraph(props: {
           cx={px(props.commit.lane)}
           cy={mid()}
           r={props.commit.parents.length > 1 ? 3.5 : 3}
-          fill={props.commit.parents.length > 1 ? "rgb(var(--bg))" : color(props.commit.lane)}
-          stroke={color(props.commit.lane)}
+          fill={props.commit.parents.length > 1 ? "rgb(var(--bg))" : nodeColor()}
+          stroke={nodeColor()}
           stroke-width="1.5"
-        />
+        >
+          <Show when={props.age?.label}>{(label) => <title>{label()}</title>}</Show>
+        </circle>
       </Show>
       <Show when={over().length > 0}>
         <text

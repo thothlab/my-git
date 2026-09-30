@@ -30,7 +30,9 @@
  *     `git interpret-trailers` itself (so `git` must be on PATH);
  *   - `src/components/log/forgeUrl.ts` - which remote the commit links are
  *     about, and the GitHub / GitLab / Bitbucket URLs built from its address
- *     (https, ssh, scp syntax, credentials that must never reach a link).
+ *     (https, ssh, scp syntax, credentials that must never reach a link);
+ *   - `src/components/log/ageColor.ts` - the absolute age step of a commit for
+ *     the "by age" graph colouring.
  *
  * Run it:  node scripts/check-log-filters.mjs      (from `gui/`)
  * Another time zone:  TZ=America/Los_Angeles node scripts/check-log-filters.mjs
@@ -57,6 +59,7 @@ await build({
     join(src, "filterValues.ts"),
     join(src, "bisectMarks.ts"),
     join(src, "forgeUrl.ts"),
+    join(src, "ageColor.ts"),
   ],
   outdir: out,
   format: "esm",
@@ -152,6 +155,7 @@ const bm = await load("bisectMarks.js");
 const clone = await load("cloneRules.js");
 const co = await load("coAuthorRules.js");
 const fu = await load("forgeUrl.js");
+const ag = await load("ageColor.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -1101,6 +1105,22 @@ for (const argv of [
     ["team/main", "team", "origin", "origin", "fork", null, null],
     "the upstream's remote (longest name), else origin, else the first; none without an address",
   );
+}
+
+// -- Graph colour by commit age -------------------------------------------------
+{
+  const now = Date.UTC(2026, 8, 30, 12, 0, 0);
+  const ago = (days) => Math.floor(now / 1000 - days * 86400);
+  eq(
+    [0.01, 0.99, 1, 6.9, 7, 30.9, 31, 364, 365, 3650].map((d) => ag.ageStep(ago(d), now)),
+    [0, 0, 1, 1, 2, 2, 3, 3, 4, 4],
+    "steps by days: < 1, < 7, < 31, < 365, older — each bound belongs to the next step",
+  );
+  eq([ag.ageStep(ago(-5), now), ag.ageStep(now / 1000, now)], [0, 0], "a future date or this very second is the freshest");
+  eq([ag.ageStep(NaN, now), ag.ageStep(0, now), ag.ageStep(-1, now), ag.ageStep(ago(1), NaN)], [null, null, null, null],
+    "no date, the epoch or no clock: no step, no colour");
+  eq(ag.AGE_STEPS.map((s) => s.key), ["day", "week", "month", "year", "older"], "five steps, freshest first");
+  eq([ag.ageColor(0), ag.ageColor(4)], ["rgb(var(--age-0))", "rgb(var(--age-4))"], "a step is a theme variable, never a literal");
 }
 
 await rm(out, { recursive: true, force: true });

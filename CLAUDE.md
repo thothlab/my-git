@@ -26,7 +26,7 @@
 | `cd gui && npm run tauri dev` | Запустить Graft локально (нужен дисплей) |
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
-| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; разбор и печать команды консоли), 356 утверждений |
+| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `ageColor`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; разбор и печать команды консоли), 361 утверждение |
 | `cargo test` | Оба крейта разом: 365 тестов GUI + 73 TUI |
 | `cargo test -p graft` | Только Rust-сторона GUI, 365 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
@@ -111,7 +111,8 @@ gui/src/            фронт
                     первым родителям, без единого импорта
   components/log/   панель Git: BranchTree, LogTable, LogGraph, CommitDetailsPane, FilterBar, LogView, PanelChrome + чистые модули;
                     bisectMarks.ts — метка bisect у строки лога и фаза поиска, без единого импорта;
-                    forgeUrl.ts — ссылки «Открыть на GitHub / GitLab / Bitbucket» из адреса remote
+                    forgeUrl.ts — ссылки «Открыть на GitHub / GitLab / Bitbucket» из адреса remote;
+                    ageColor.ts — ступень возраста коммита для раскраски графа «по возрасту»
   components/log/actions/  действия над коммитами и ветками, контекстное меню, диалоги;
                     operation.ts — `continueOperation`, `operationWord` (полоса операции и
                     редактор конфликта зовут одно и то же)
@@ -713,7 +714,7 @@ Git вызывается только как внешний процесс. `gix
 - `localStorage` — всё, что про окно и не про репозиторий: `viewMode`, `theme`, `fontSize`,
   `locale`, `lastRepo`, `recentRepos`, `showIgnored`, `groupByDir`, `leftPanelWidth`, `logTreeWidth`,
   `logSplitRatio`, `logDetailsWidth`, `diffSplitRatio`, `diffWhitespace`, `diffHighlight`,
-  `logOrder`, `logDimNonMatching`, `cloneParent` (последняя папка, куда клонировали), `branchMenuOptions` (как показывать выпадающий список
+  `logOrder`, `logDimNonMatching`, `logGraphColor` (раскраска графа: `branch` | `age`), `cloneParent` (последняя папка, куда клонировали), `branchMenuOptions` (как показывать выпадающий список
   веток), `recentBranches` (недавние ветки по репозиториям).
 - Память процесса Rust: `AppState` — корень открытого репозитория, флаг «показывать
   игнорируемые» и наблюдатель за git-dir (`watcher`, пересоздаётся в `repo_open` при смене
@@ -761,6 +762,13 @@ Git вызывается только как внешний процесс. `gix
   коммит в первую страницу, и он может встретиться в выдаче ещё раз.
 - Цвет лейна — его индекс по модулю 12, индекс назначает открывающий линию коммит. Цвет от
   хэша здесь невозможен: курсор несёт хэш ожидаемого родителя, а не открывшего коммита.
+- Раскраска графа «по возрасту» (`logGraphColor = age`) красит **только узел и дату**
+  строки — цветом ступени даты автора (`ageColor.ts`, переменные `--age-0…4` в
+  `styles.css`). Линии остаются цвета своего лейна: перекрашенные по строкам, они
+  становились полосатыми по времени и ломали чтение графа. Синего среди ступеней нет —
+  это `--accent` / `--lane-0`, и на выделенной строке дата тонула бы в фоне. Ступени **абсолютные** (< суток, недели, месяца, года, старше), а не ранг
+  среди загруженных строк, как у `blameRules.ageLevels`: лог листается страницами, и
+  относительная шкала перекрашивала бы всё при подгрузке более старой страницы.
 - «Фильтр разорвал историю» отдельным полем не едет: признак — пустые рёбра **и** нулевой
   лейн разом у всех загруженных строк, кроме подколотых поиском по хэшу (`graphSuppressed`).
   По одной строке вывести нельзя: одинокий корневой коммит выглядит так же.

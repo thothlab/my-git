@@ -52,6 +52,20 @@ export const LANE_BUDGET = 12;
 
 const ORDER_KEY = "logOrder";
 const DIM_KEY = "logDimNonMatching";
+const GRAPH_COLOR_KEY = "logGraphColor";
+
+/** How the graph is coloured: by lane (a line keeps its colour — the default) or
+ * by the age of each row's commit (`ageColor.ts`). A view preference of the
+ * window, like the order and dimming; lanes and their layout are the same. */
+export type GraphColor = "branch" | "age";
+
+const readGraphColor = (): GraphColor => {
+  try {
+    return localStorage.getItem(GRAPH_COLOR_KEY) === "age" ? "age" : "branch";
+  } catch {
+    return "branch";
+  }
+};
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -112,8 +126,10 @@ const [columnWidths, setColumnWidthsSignal] = createSignal<Record<string, number
 const [selectedSet, setSelectedSet] = createSignal<Set<string>>(new Set());
 const [cursorIndex, setCursorIndex] = createSignal(-1);
 const [search, setSearchSignal] = createSignal({ text: "", regex: false, matchCase: false });
+const [graphColor, setGraphColorSignal] = createSignal<GraphColor>(readGraphColor());
 
 export {
+  graphColor,
   atTop,
   columnWidths,
   commits,
@@ -140,6 +156,16 @@ export {
  * dismissable.
  */
 export const note = (): string => (searching() ? "searching" : noteText());
+
+/** Colour the graph by lane or by commit age (view menu of the log). */
+export function setGraphColor(mode: GraphColor): void {
+  setGraphColorSignal(mode);
+  try {
+    localStorage.setItem(GRAPH_COLOR_KEY, mode);
+  } catch {
+    /* the choice still holds for this window */
+  }
+}
 
 /** Turn dimming of non-matching rows on or off (view menu of the log). */
 export function setDim(on: boolean): void {

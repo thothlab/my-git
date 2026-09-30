@@ -42,6 +42,8 @@ import {
   setAtTop,
   setOrder,
   showNewCommits,
+  graphColor,
+  setGraphColor,
 } from "../../logStore";
 import { scaledPx, state } from "../../store";
 import { selectedBranch } from "./branchSelection";
@@ -52,6 +54,7 @@ import { commitMenuItems, rewriteAnchor, type RangeAnswer } from "./actions/comm
 import ContextMenu, { createMenuController, type MenuAnchor } from "./actions/ContextMenu";
 import { ActionDialogHost } from "./actions/dialogs";
 import LogGraph, { LANE_W, lanesBelow } from "./LogGraph";
+import { AGE_STEPS, ageColor, ageStep } from "./ageColor";
 import { bisectMarks, customTerm, type BisectMarkKind } from "./bisectMarks";
 import { PanelBtn, PanelChrome, PanelNote } from "./PanelChrome";
 import { IconRefresh } from "../IconButton";
@@ -328,6 +331,39 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
                     dims; narrowing is the User filter's job, and the two are not
                     the same mechanism. */}
                 <div class="px-2 pb-1 pt-0.5 text-[0.6875rem] text-fg-subtle">{d().highlightHint()}</div>
+                <div class="mt-1 border-t border-border px-2 pb-1 pt-1.5 text-[0.6875rem] uppercase text-fg-muted">
+                  {d().graphColorHeader()}
+                </div>
+                <For each={["branch", "age"] as const}>
+                  {(mode) => (
+                    <label
+                      class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-bg-muted"
+                      title={mode === "age" ? d().graphAgeLegendTip() : undefined}
+                    >
+                      <input
+                        type="radio"
+                        name="log-graph-color"
+                        checked={graphColor() === mode}
+                        onChange={() => setGraphColor(mode)}
+                      />
+                      {mode === "age" ? d().graphColorAge() : d().graphColorBranch()}
+                    </label>
+                  )}
+                </For>
+                {/* The legend: the steps are absolute, so it reads the same in
+                    every repository. */}
+                <Show when={graphColor() === "age"}>
+                  <div class="flex flex-wrap gap-x-3 gap-y-0.5 px-2 pb-1 text-[0.6875rem] text-fg-subtle">
+                    <For each={AGE_STEPS}>
+                      {(s, i) => (
+                        <span class="flex items-center gap-1">
+                          <span class="inline-block h-2 w-2 rounded-full" style={{ background: ageColor(i()) }} />
+                          {d().ageStepLabel(s.key)}
+                        </span>
+                      )}
+                    </For>
+                  </div>
+                </Show>
               </div>
             </Show>
           </div>
@@ -560,6 +596,16 @@ function Row(props: {
   /** This commit's mark in the bisect under way, if any. */
   bisect?: BisectMarkKind;
 }) {
+  // "By age": the row's node and its date take the colour of the author date's
+  // step; the lines stay lane-coloured. The clock is read per render — a colour going stale over an open
+  // evening is not worth a timer repainting every row.
+  const age = () => {
+    if (graphColor() !== "age") return undefined;
+    const step = ageStep(props.commit.authorAt, Date.now());
+    return step === null
+      ? { color: null, label: "" }
+      : { color: ageColor(step), label: d().ageStepLabel(AGE_STEPS[step].key) };
+  };
   return (
     <div
       data-row={props.index}
@@ -603,6 +649,7 @@ function Row(props: {
             height={rowH()}
             width={props.graphW}
             capacity={props.capacity}
+            age={age()}
           />
         </Show>
       </div>
@@ -625,7 +672,11 @@ function Row(props: {
         </span>
       </div>
       <div class="truncate px-2 text-fg-subtle">{props.commit.author}</div>
-      <div class="truncate px-2 text-fg-subtle" title={absolute(props.commit.authorAt)}>
+      <div
+        class="truncate px-2 text-fg-subtle"
+        style={age()?.color ? { color: age()!.color! } : undefined}
+        title={absolute(props.commit.authorAt)}
+      >
         {relative(props.commit.authorAt)}
       </div>
     </div>
