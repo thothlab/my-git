@@ -11,11 +11,11 @@ use crate::error::{Error, Result};
 use crate::engine::exec::{self, mask_credentials};
 use crate::engine::{
     bisect, blame as blame_engine, branches, commit as commit_engine, conflict as conflict_engine, discard, file_history as file_history_engine, ignore, lfs, log as log_engine, ops,
-    rebase, remotes,
+    rebase, remotes, signature,
     undo::{self, Hint},
 };
 use crate::model::{
-    Blame, BlameBefore, BranchInfo, CloneProgress, CoAuthor, IgnoreChoice, IgnoreKind, RemoteInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, ConflictFile, DiscardEntry,
+    Blame, BlameBefore, BranchInfo, CloneProgress, CoAuthor, IgnoreChoice, IgnoreKind, RemoteInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, CommitSignature, ConflictFile, DiscardEntry,
     DiscardKind, DiscardOutcome, Eol, FileDiff, FileHistoryCursor, FileHistoryPage, HunkPick,
     LinePick,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
@@ -761,6 +761,16 @@ pub async fn commit_file_diff(
         &whitespace,
         context,
     )
+}
+
+/// The signature of one commit and what checking it gave. Read-only; asked for the
+/// commit open in the details pane, never per log row — it runs the verifier.
+#[tauri::command]
+pub async fn commit_signature(
+    state: State<'_, AppState>,
+    hash: String,
+) -> Result<CommitSignature> {
+    signature::commit_signature(&state.repo_path()?, &hash)
 }
 
 /// Every commit that touched one file, renames followed (R05c). Read-only.

@@ -34,7 +34,9 @@
  *     about, and the GitHub / GitLab / Bitbucket URLs built from its address
  *     (https, ssh, scp syntax, credentials that must never reach a link);
  *   - `src/components/log/ageColor.ts` - the absolute age step of a commit for
- *     the "by age" graph colouring.
+ *     the "by age" graph colouring;
+ *   - `src/components/log/signatureRules.ts` - how alarming a signature verdict is
+ *     and which explanation fits it (SSH and OpenPGP fail differently).
  *
  * Run it:  node scripts/check-log-filters.mjs      (from `gui/`)
  * Another time zone:  TZ=America/Los_Angeles node scripts/check-log-filters.mjs
@@ -62,6 +64,7 @@ await build({
     join(src, "bisectMarks.ts"),
     join(src, "forgeUrl.ts"),
     join(src, "ageColor.ts"),
+    join(src, "signatureRules.ts"),
   ],
   outdir: out,
   format: "esm",
@@ -163,6 +166,7 @@ const clone = await load("cloneRules.js");
 const co = await load("coAuthorRules.js");
 const fu = await load("forgeUrl.js");
 const ag = await load("ageColor.js");
+const sig = await load("signatureRules.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -1182,6 +1186,32 @@ for (const argv of [
   eq(lfs.shortOid("0123456789abcdef"), "0123456789ab", "twelve digits of the oid");
   eq(cond({ lfs: true }), "lfs", "an LFS pointer card is not edited");
   eq(cond({ lfs: true, readOnly: true }), "read-only", "...but a read-only side says so first");
+}
+
+// -- Commit signature line -----------------------------------------------------
+{
+  eq(
+    ["verified", "bad", "revoked", "unsigned", "unknown-key", "missing-key", "expired", "expired-key", "unchecked"].map(
+      sig.signatureTone,
+    ),
+    ["good", "bad", "bad", "none", "warn", "warn", "warn", "warn", "warn"],
+    "only a verified signature is good; bad and revoked are alarms; no signature is not a warning",
+  );
+  eq(
+    [
+      sig.signatureHint("unknown-key", "ssh"),
+      sig.signatureHint("unknown-key", "openpgp"),
+      sig.signatureHint("unchecked", "ssh"),
+      sig.signatureHint("unchecked", "openpgp"),
+      sig.signatureHint("unchecked", "x509"),
+      sig.signatureHint("unchecked", "unknown"),
+      sig.signatureHint("missing-key", "openpgp"),
+      sig.signatureHint("verified", "ssh"),
+      sig.signatureHint("unsigned", null),
+    ],
+    ["ssh-not-listed", "untrusted", "ssh-no-signers-file", "no-gpg", "no-gpgsm", "unknown-format", "missing-key", "none", "none"],
+    "SSH and OpenPGP get their own reason for the same verdict",
+  );
 }
 
 await rm(out, { recursive: true, force: true });

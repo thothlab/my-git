@@ -518,6 +518,56 @@ pub struct CommitDetails {
     pub branches_truncated: bool,
 }
 
+/// The kind of a commit signature, read from its armour line (`engine::signature`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SignatureFormat {
+    Openpgp,
+    Ssh,
+    X509,
+    Unknown,
+}
+
+/// What checking a commit's signature gave. `%G?` letters, except `Unsigned` (no
+/// `gpgsig` header) and `Unchecked` (a signature git did not check: `N` for a signed
+/// commit — no allowed signers file, no `gpg` — or a verifier that failed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SignatureStatus {
+    Unsigned,
+    /// `G`
+    Verified,
+    /// `U`: valid, but the key is not trusted / not in the allowed signers file.
+    UnknownKey,
+    /// `E`: cannot be checked, typically the public key is missing.
+    MissingKey,
+    /// `X`: a good signature that has expired.
+    Expired,
+    /// `Y`: a good signature made by a key that has expired.
+    ExpiredKey,
+    /// `R`: a good signature made by a revoked key.
+    Revoked,
+    /// `B`
+    Bad,
+    Unchecked,
+}
+
+/// The signature of one commit (`commit_signature`). Asked for the open commit
+/// only: verifying runs gpg / ssh-keygen / gpgsm.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitSignature {
+    pub status: SignatureStatus,
+    /// `None` exactly when `Unsigned`.
+    pub format: Option<SignatureFormat>,
+    /// `%GS`: who signed, as the verifier names them.
+    pub signer: Option<String>,
+    /// `%GK`: the key (id, or the SSH key's fingerprint).
+    pub key: Option<String>,
+    /// `%GF`: the key's fingerprint.
+    pub fingerprint: Option<String>,
+}
+
 /// A file touched by a commit (or by a comparison of two revisions).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

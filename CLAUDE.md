@@ -26,9 +26,9 @@
 | `cd gui && npm run tauri dev` | Запустить Graft локально (нужен дисплей) |
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
-| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `ageColor`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; `lfsRules`; разбор и печать команды консоли), 372 утверждения |
-| `cargo test` | Оба крейта разом: 379 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 379 тестов |
+| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `ageColor`, `signatureRules`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; `lfsRules`; разбор и печать команды консоли), 374 утверждения |
+| `cargo test` | Оба крейта разом: 386 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 386 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -76,6 +76,7 @@ gui/src-tauri/src/  бэк GUI
   engine/discard.rs резервная копия перед откатом (refs/graft/discard) и её восстановление
   engine/ignore.rs  «Игнорировать» из меню: варианты правила по пути, дописывание в корневой
                     `.gitignore`, обратная операция для Undo
+  engine/signature.rs подпись коммита: вид по заголовку `gpgsig`, вердикт по `%G?`
   engine/lfs.rs     указатели Git LFS в диффе (строгий разбор по спеке), локальное хранилище
                     объектов, поиск программы git-lfs, `git lfs pull --include` одного файла
   engine/patch.rs   патч по выбранным строкам диффа (чистый, без git) + единая нумерация строк хунков
@@ -114,7 +115,8 @@ gui/src/            фронт
   components/log/   панель Git: BranchTree, LogTable, LogGraph, CommitDetailsPane, FilterBar, LogView, PanelChrome + чистые модули;
                     bisectMarks.ts — метка bisect у строки лога и фаза поиска, без единого импорта;
                     forgeUrl.ts — ссылки «Открыть на GitHub / GitLab / Bitbucket» из адреса remote;
-                    ageColor.ts — ступень возраста коммита для раскраски графа «по возрасту»
+                    ageColor.ts — ступень возраста коммита для раскраски графа «по возрасту»;
+                    signatureRules.ts — тон и пояснение строки «Подпись» в карточке коммита
   components/log/actions/  действия над коммитами и ветками, контекстное меню, диалоги;
                     operation.ts — `continueOperation`, `operationWord` (полоса операции и
                     редактор конфликта зовут одно и то же)
@@ -228,6 +230,15 @@ Git вызывается только как внешний процесс. `gix
   `unreachable_from_head`; общий `pub(crate) parse_name_status` (разбор `--name-status -z`,
   им же `commit_paths` читает, что подготовлено у списка — своей копии не писать). Всё
   сравнивается с первым родителем; корневой коммит читается через `diff-tree --root`.
+- `engine::signature` — `commit_signature(repo, rev) -> CommitSignature`,
+  `signature_format(raw)`, `parse_verification`. Подпись **есть** — это заголовок `gpgsig` /
+  `gpgsig-sha256` в `cat-file commit`, а не `%G?`; вид (OpenPGP / SSH / X.509) — по строке
+  брони подписи, не по `gpg.format` (тот про то, как подписывает этот пользователь).
+  Вердикт — `log -1 --no-show-signature --format=%G?%x00%GS%x00%GK%x00%GF`; неизвестная буква —
+  `Error::Parse`. Неподписанный коммит верификатор не запускает. Отказ верификатора и `N`
+  при наличии подписи — `unchecked` («не удалось проверить»), не ошибка. Команда
+  `commit_signature` зовётся только для открытого в деталях коммита (`SignatureLine` в
+  `CommitDetailsPane`, свой ресурс по хэшу — карточка его не ждёт), никогда на строку лога.
 - `engine::lfs` — `parse_pointer`, `pointer_sides`, `include_pattern`, `pull`,
   `pub(crate) attach(repo, &mut FileDiff, raw)`, `object_dir`, `has_object`,
   `find_program`, `installed`. **`attach` зовёт каждый производитель `FileDiff`**
@@ -1140,6 +1151,13 @@ Git вызывается только как внешний процесс. `gix
   (`user:secret@host:path`) уходил в журнал дословно: argv, вывод `remote -v` в консоли,
   чтение конфига за списком remotes, сообщения git об ошибке в баннере. Список remotes
   маскировал его своей копией правила — вторая копия и прятала дыру в первой.
+- `%G?` отвечает `N` («подписи нет») и на подписанный коммит, который git не проверял: SSH
+  без `gpg.ssh.allowedSignersFile` (git пишет ошибку в stderr и выходит с 0), OpenPGP без
+  `gpg` (`cannot exec`, тоже 0). Отсюда наличие подписи — по заголовку объекта. А
+  указанный, но **несуществующий** файл допущенных подписантов (или пустое значение) даёт
+  уже `U`, как ключ не из списка. Тесты подписи идут на свежем ed25519-ключе через
+  `ssh-keygen` и слышат глобальный конфиг git: глобальный `gpg.ssh.allowedSignersFile`
+  превратил бы ожидаемое `unchecked` в `U`/`G`.
 - Хранилище LFS ищется от **общего** git-dir (`git_paths(["config"])` → родитель), а не
   `rev-parse --git-path lfs/objects`: `lfs` нет в списке общих каталогов git, и в linked
   worktree тот ответ — `.git/worktrees/<имя>/lfs/objects`, куда git-lfs не пишет; каждый

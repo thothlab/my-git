@@ -122,6 +122,7 @@ pub fn run() {
             commands::commit_details,
             commands::commit_files,
             commands::commit_file_diff,
+            commands::commit_signature,
             commands::file_history,
             commands::file_blame,
             commands::file_blame_before,

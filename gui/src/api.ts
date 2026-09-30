@@ -649,6 +649,32 @@ export const logCoAuthors = () => invoke<CoAuthor[]>("log_co_authors");
 // one commit (task 04)
 export const commitDetails = (hash: string) =>
   invoke<CommitDetails>("commit_details", { hash });
+/** A commit signature's kind, from its armour line — not from `gpg.format`. */
+export type SignatureFormat = "openpgp" | "ssh" | "x509" | "unknown";
+/** What checking it gave (`engine::signature`): `%G?` in words, plus `unsigned`
+ * (no `gpgsig` header) and `unchecked` (signed, but git checked nothing —
+ * no allowed signers file, no gpg — or the verifier failed). */
+export type SignatureStatus =
+  | "unsigned"
+  | "verified"
+  | "unknown-key"
+  | "missing-key"
+  | "expired"
+  | "expired-key"
+  | "revoked"
+  | "bad"
+  | "unchecked";
+export interface CommitSignature {
+  status: SignatureStatus;
+  /** `null` exactly when `unsigned`. */
+  format: SignatureFormat | null;
+  signer: string | null;
+  key: string | null;
+  fingerprint: string | null;
+}
+/** Runs gpg / ssh-keygen / gpgsm through git: for the open commit only. */
+export const commitSignature = (hash: string) =>
+  invoke<CommitSignature>("commit_signature", { hash });
 export const commitFiles = (hash: string) =>
   invoke<CommitFileEntry[]>("commit_files", { hash });
 /** `oldPath` — the rename source when the caller already knows it (the file

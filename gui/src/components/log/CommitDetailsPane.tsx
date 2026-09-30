@@ -11,12 +11,14 @@ import {
 import {
   commitDetails,
   commitFiles,
+  commitSignature,
   commitsCompare,
   errText,
   remoteList,
   WORKING_TREE,
   type CommitDetails,
   type CommitFileEntry,
+  type CommitSignature,
   type FileState,
 } from "../../api";
 import { focusPanel } from "../../hotkeys";
@@ -30,6 +32,7 @@ import { openBlame } from "../blame/BlamePanel";
 import ContextMenu, { anchorOfElement, type MenuAnchor } from "./actions/ContextMenu";
 import { setSelectedCommitFile, selectedCommitFile } from "./commitFileSelection";
 import { FORGE_NAME, forgeLinks, pickRemote } from "./forgeUrl";
+import { signatureHint, signatureTone } from "./signatureRules";
 import {
   baseName,
   buildFileTree,
@@ -542,6 +545,7 @@ function CommitCard(props: {
           {fmtTime(c().committerAt)}
         </div>
       </Show>
+      <SignatureLine hash={c().hash} />
 
       <div class="mt-2 text-fg-subtle">
         <Show when={branches().length > 0} fallback={<span>{d().noContainingBranches()}</span>}>
@@ -564,6 +568,105 @@ function CommitCard(props: {
           </Show>
         </Show>
       </div>
+    </div>
+  );
+}
+
+/**
+ * "Signature: verified / unknown key / bad / not signed …" for the open commit.
+ *
+ * Its own request, keyed on the hash, so the card never waits for gpg or
+ * ssh-keygen: the verdict fills in when it arrives. Only ever for the commit on
+ * screen — the log rows do not ask.
+ */
+function SignatureLine(props: { hash: string }) {
+  const [sig] = createResource(
+    () => props.hash,
+    async (h): Promise<CommitSignature | { error: string }> => {
+      try {
+        return await commitSignature(h);
+      } catch (e) {
+        return { error: errText(e) };
+      }
+    },
+  );
+  const ready = () => {
+    const v = sig.state === "ready" ? sig() : undefined;
+    return v && !("error" in v) ? v : null;
+  };
+  const failed = () => {
+    const v = sig.state === "ready" ? sig() : undefined;
+    return v && "error" in v ? v.error : null;
+  };
+  const verdict = (s: CommitSignature) => {
+    switch (s.status) {
+      case "unsigned":
+        return d().sigUnsigned();
+      case "verified":
+        return d().sigVerified();
+      case "unknown-key":
+        return d().sigUnknownKey();
+      case "missing-key":
+        return d().sigMissingKey();
+      case "expired":
+        return d().sigExpired();
+      case "expired-key":
+        return d().sigExpiredKey();
+      case "revoked":
+        return d().sigRevoked();
+      case "bad":
+        return d().sigBad();
+      default:
+        return d().sigUnchecked();
+    }
+  };
+  const hint = (s: CommitSignature) => {
+    switch (signatureHint(s.status, s.format)) {
+      case "ssh-not-listed":
+        return d().sigHintSshNotListed();
+      case "untrusted":
+        return d().sigHintUntrusted();
+      case "ssh-no-signers-file":
+        return d().sigHintSshNoSignersFile();
+      case "no-gpg":
+        return d().sigHintNoGpg();
+      case "no-gpgsm":
+        return d().sigHintNoGpgsm();
+      case "unknown-format":
+        return d().sigHintUnknownFormat();
+      case "missing-key":
+        return d().sigHintMissingKey();
+      default:
+        return "";
+    }
+  };
+  const toneClass = (s: CommitSignature) => {
+    const t = signatureTone(s.status);
+    return t === "good" ? "text-success" : t === "bad" ? "text-danger" : t === "warn" ? "text-warn" : "text-fg-muted";
+  };
+  const formatName = (s: CommitSignature) =>
+    s.format === "openpgp" ? "GPG" : s.format === "ssh" ? "SSH" : s.format === "x509" ? "X.509" : s.format ? d().sigFormatUnknown() : "";
+  return (
+    <div class="text-fg-muted">
+      {d().sigLabel()}:{" "}
+      <Show when={ready()} fallback={<span>{failed() ? d().sigFailed() : d().sigChecking()}</span>}>
+        {(s) => (
+          <span title={[hint(s()), s().fingerprint ?? s().key ?? ""].filter(Boolean).join("\n")}>
+            <span class={toneClass(s())}>{verdict(s())}</span>
+            <Show when={formatName(s())}>{(f) => <> · {f()}</>}</Show>
+            <Show when={s().signer}>{(who) => <> · {who()}</>}</Show>
+            <Show when={s().key}>
+              {(k) => <span class="font-mono text-[0.6875rem]"> · {k()}</span>}
+            </Show>
+            <Show when={hint(s())}>
+              <div class="text-fg-subtle">{hint(s())}</div>
+            </Show>
+          </span>
+        )}
+      </Show>
+      <Show when={failed()}>
+        <div class="text-fg-subtle">{failed()}</div>
+      </Show>
     </div>
   );
 }
