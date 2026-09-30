@@ -290,6 +290,12 @@ export const branchCheckout = (name: string, stash: boolean) =>
 export type PushMode = "normal" | "upstream" | "force" | "force-hard";
 export const push = (mode: PushMode) => invoke<RepoState>("push", { mode });
 export const fetchRemote = () => invoke<RepoState>("fetch");
+/** What the scheduled background fetch did (`repo_fetch_background`). A failure
+ * is a rejection as usual. */
+export type BackgroundFetch = "fetched" | "busy" | "operation" | "no-remotes";
+/** The scheduled fetch: **not** through `run()`, no `RepoState` — what it moved
+ * reaches the window through the git-dir watcher (`src/backgroundFetch.ts`). */
+export const repoFetchBackground = () => invoke<BackgroundFetch>("repo_fetch_background");
 /** `git lfs pull --include=<path>`: download the LFS content of one checked-out
  * file. Offered only when the card says `download: "available"`. */
 export const lfsPull = (path: string) => invoke<RepoState>("lfs_pull", { path });

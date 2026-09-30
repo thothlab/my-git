@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 
 use super::exec;
 use crate::error::{Error, Result};
-use crate::model::RemoteInfo;
+use crate::model::{BackgroundFetch, OperationKind, RemoteInfo};
 
 /// What a refused credential-bearing address is told.
 const CREDENTIALS: &str = "do not keep a password or token in the remote address: .git/config, \
@@ -687,6 +687,31 @@ fn clone_with(
     }
 }
 
+/// The scheduled background fetch (`repo_fetch_background`): nothing when the
+/// repository has no remote or an operation is unfinished, else
+/// [`CliEngine::fetch_background`](crate::engine::cli::CliEngine::fetch_background)
+/// recorded through [`Undo::perform_background`](crate::engine::undo::Undo::perform_background)
+/// — which gives way (`Busy`) when anything already runs on the repository.
+pub fn fetch_background(
+    undo: &crate::engine::undo::Undo,
+    data: Option<&Path>,
+    repo: &Path,
+) -> Result<BackgroundFetch> {
+    let names = exec::git(repo, &["remote"]).run()?.checked()?;
+    if String::from_utf8_lossy(&names).trim().is_empty() {
+        return Ok(BackgroundFetch::NoRemotes);
+    }
+    if crate::engine::ops::detect_state(repo)?.kind != OperationKind::None {
+        return Ok(BackgroundFetch::Operation);
+    }
+    match undo.perform_background(data, repo, "fetch_background", || {
+        crate::engine::cli::CliEngine::new(repo).fetch_background()
+    }) {
+        None => Ok(BackgroundFetch::Busy),
+        Some(r) => r.map(|()| BackgroundFetch::Fetched),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1166,6 +1191,219 @@ mod tests {
         assert_eq!(
             collapse_meters(raw),
             "Cloning into 'x'...\nReceiving objects: 100% (2/2), done.\nfatal: boom"
+        );
+    }
+
+    // ---- background fetch ----
+
+    /// `p` (scratch repo on `main`, tracking `origin/main` in a bare remote) and a
+    /// second clone `other` of the same remote to push from.
+    fn with_remote() -> (tempfile::TempDir, tempfile::TempDir, tempfile::TempDir) {
+        let local = scratch_repo();
+        let bare = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let p = local.path();
+        run(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+        run(
+            p,
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        run(p, &["push", "-q", "-u", "origin", "main"]);
+        run(
+            other.path(),
+            &["clone", "-q", bare.path().to_str().unwrap(), "."],
+        );
+        run(other.path(), &["config", "user.email", "o@example.com"]);
+        run(other.path(), &["config", "user.name", "Other"]);
+        (local, bare, other)
+    }
+
+    /// A second remote `up2` of `p`, a bare repository holding `main`.
+    fn second_remote(p: &Path) -> tempfile::TempDir {
+        let bare = tempfile::tempdir().unwrap();
+        run(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+        run(p, &["remote", "add", "up2", bare.path().to_str().unwrap()]);
+        run(p, &["push", "-q", "up2", "main"]);
+        run(p, &["fetch", "-q", "up2"]);
+        bare
+    }
+
+    fn rev(dir: &Path, r: &str) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "--verify", "-q", r])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn a_background_fetch_brings_commits_and_branches_and_keeps_the_undo_chain() {
+        use crate::engine::cli::CliEngine;
+        use crate::engine::undo::{Hint, Undo};
+        use crate::model::JournalOrigin;
+
+        let (local, _bare, other) = with_remote();
+        let p = local.path();
+        // Two remotes: git then runs a child fetch per remote, and the flags have
+        // to reach them.
+        let up2 = second_remote(p);
+        let data = tempfile::tempdir().unwrap();
+        let undo = Undo::default();
+        // A step the person can undo, recorded before the fetch.
+        undo.perform(
+            Some(data.path()),
+            p,
+            "branch_create",
+            Hint::args(["topic"]),
+            || CliEngine::new(p).create_branch("topic", None),
+        )
+        .unwrap();
+        let offered = undo.state(Some(data.path()), p).unwrap().undo.id;
+        assert!(offered.is_some());
+
+        // The upstream of the current branch moves on, and a new branch appears.
+        let o = other.path();
+        std::fs::write(o.join("new.txt"), "x\n").unwrap();
+        run(o, &["add", "new.txt"]);
+        run(o, &["commit", "-q", "-m", "upstream work"]);
+        run(o, &["push", "-q", "origin", "main"]);
+        run(o, &["push", "-q", "origin", "HEAD:refs/heads/feature"]);
+        let u = up2.path().to_str().unwrap();
+        run(o, &["push", "-q", u, "HEAD:refs/heads/second"]);
+        let tip = rev(o, "HEAD");
+        let _ = std::fs::remove_file(p.join(".git/FETCH_HEAD"));
+
+        let got = fetch_background(&undo, Some(data.path()), p).unwrap();
+        assert_eq!(got, BackgroundFetch::Fetched);
+        assert_eq!(rev(p, "refs/remotes/origin/main"), tip);
+        assert_eq!(rev(p, "refs/remotes/origin/feature"), tip);
+        assert_eq!(rev(p, "refs/remotes/up2/second"), tip, "every remote");
+        // Remote-tracking refs are not in the digest: the step is still offered.
+        let s = undo.state(Some(data.path()), p).unwrap();
+        assert_eq!(s.undo.id, offered, "{:?}", s.undo.reason);
+        // No FETCH_HEAD for a terminal's `git merge FETCH_HEAD` to trip over.
+        assert!(!p.join(".git/FETCH_HEAD").exists());
+
+        // Journaled as the application's own work, not the person's.
+        let repo = p.display().to_string();
+        let fetch = exec::journal_list(false, None)
+            .into_iter()
+            .filter(|e| e.repo == repo && e.argv.first().map(String::as_str) == Some("fetch"))
+            .last()
+            .expect("the fetch is journaled");
+        assert_eq!(fetch.origin, JournalOrigin::Background);
+        assert_eq!(fetch.action, None);
+
+        // A fetch that brings nothing changes nothing either.
+        assert_eq!(
+            fetch_background(&undo, Some(data.path()), p).unwrap(),
+            BackgroundFetch::Fetched
+        );
+        assert_eq!(undo.state(Some(data.path()), p).unwrap().undo.id, offered);
+    }
+
+    #[test]
+    fn a_background_fetch_does_not_prune() {
+        use crate::engine::undo::Undo;
+        let (local, _bare, other) = with_remote();
+        let p = local.path();
+        let up2 = second_remote(p);
+        let u = up2.path().to_str().unwrap();
+        let o = other.path();
+        run(o, &["push", "-q", "origin", "HEAD:refs/heads/gone"]);
+        run(o, &["push", "-q", u, "HEAD:refs/heads/gone2"]);
+        run(p, &["fetch", "-q", "--all"]);
+        run(o, &["push", "-q", "origin", "--delete", "gone"]);
+        run(o, &["push", "-q", u, "--delete", "gone2"]);
+        run(p, &["config", "fetch.prune", "true"]);
+        fetch_background(&Undo::default(), None, p).unwrap();
+        assert!(!rev(p, "refs/remotes/origin/gone").is_empty());
+        assert!(!rev(p, "refs/remotes/up2/gone2").is_empty());
+    }
+
+    #[test]
+    fn a_failed_background_fetch_says_why_first() {
+        use crate::engine::undo::Undo;
+        let (local, _bare, _other) = with_remote();
+        let p = local.path();
+        run(
+            p,
+            &["remote", "add", "broken", "/nonexistent/graft-test-remote"],
+        );
+        match fetch_background(&Undo::default(), None, p) {
+            Err(Error::Git { stderr, .. }) => {
+                assert!(!stderr.starts_with("Fetching"), "{stderr}");
+                assert!(
+                    stderr.contains("does not appear to be a git repository"),
+                    "{stderr}"
+                );
+            }
+            other => panic!("expected Error::Git, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_new_tag_from_a_background_fetch_ends_the_chain_as_fetched() {
+        use crate::engine::cli::CliEngine;
+        use crate::engine::undo::{Hint, Undo};
+        use crate::model::UndoReasonCode;
+
+        let (local, _bare, other) = with_remote();
+        let p = local.path();
+        let data = tempfile::tempdir().unwrap();
+        let undo = Undo::default();
+        undo.perform(
+            Some(data.path()),
+            p,
+            "branch_create",
+            Hint::args(["topic"]),
+            || CliEngine::new(p).create_branch("topic", None),
+        )
+        .unwrap();
+        let o = other.path();
+        run(o, &["commit", "-q", "--allow-empty", "-m", "tagged"]);
+        run(o, &["tag", "-a", "-m", "v1", "v1"]);
+        run(o, &["push", "-q", "origin", "main", "v1"]);
+
+        fetch_background(&undo, Some(data.path()), p).unwrap();
+        assert!(
+            !rev(p, "refs/tags/v1").is_empty(),
+            "git's default tag following"
+        );
+        let s = undo.state(Some(data.path()), p).unwrap();
+        assert_eq!(s.undo.id, None);
+        assert_eq!(s.undo.reason.map(|r| r.code), Some(UndoReasonCode::Fetched));
+    }
+
+    #[test]
+    fn a_background_fetch_skips_an_unfinished_operation_and_a_repo_without_remotes() {
+        use crate::engine::undo::Undo;
+        let bare_repo = scratch_repo();
+        assert_eq!(
+            fetch_background(&Undo::default(), None, bare_repo.path()).unwrap(),
+            BackgroundFetch::NoRemotes
+        );
+
+        let (local, _bare, _other) = with_remote();
+        let p = local.path();
+        run(p, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(p.join("a.txt"), "side\n").unwrap();
+        run(p, &["commit", "-q", "-am", "side"]);
+        run(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("a.txt"), "main\n").unwrap();
+        run(p, &["commit", "-q", "-am", "main"]);
+        let merge = Command::new("git")
+            .arg("-C")
+            .arg(p)
+            .args(["merge", "-q", "side"])
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the merge conflicts");
+        assert_eq!(
+            fetch_background(&Undo::default(), None, p).unwrap(),
+            BackgroundFetch::Operation
         );
     }
 }

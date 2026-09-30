@@ -35,6 +35,8 @@
  *     (https, ssh, scp syntax, credentials that must never reach a link);
  *   - `src/components/log/ageColor.ts` - the absolute age step of a commit for
  *     the "by age" graph colouring;
+ *   - `src/components/backgroundFetchRules.ts` - when the scheduled background
+ *     fetch is due and what holds a due one back;
  *   - `src/components/log/signatureRules.ts` - how alarming a signature verdict is
  *     and which explanation fits it (SSH and OpenPGP fail differently).
  *
@@ -80,6 +82,7 @@ await build({
     join(here, "..", "src", "components", "gitConsoleCommand.ts"),
     join(here, "..", "src", "components", "cloneRules.ts"),
     join(here, "..", "src", "components", "coAuthorRules.ts"),
+    join(here, "..", "src", "components", "backgroundFetchRules.ts"),
   ],
   outdir: out,
   format: "esm",
@@ -164,6 +167,7 @@ const rb = await load("rebaseRules.js");
 const bm = await load("bisectMarks.js");
 const clone = await load("cloneRules.js");
 const co = await load("coAuthorRules.js");
+const bf = await load("backgroundFetchRules.js");
 const fu = await load("forgeUrl.js");
 const ag = await load("ageColor.js");
 const sig = await load("signatureRules.js");
@@ -1211,6 +1215,72 @@ for (const argv of [
     ],
     ["ssh-not-listed", "untrusted", "ssh-no-signers-file", "no-gpg", "no-gpgsm", "unknown-format", "missing-key", "none", "none"],
     "SSH and OpenPGP get their own reason for the same verdict",
+  );
+}
+
+// -- Background fetch schedule --------------------------------------------------
+{
+  const MIN = 60_000;
+  const t0 = 1_000_000_000;
+  const clock = (o = {}) => ({ now: t0, interval: 15, lastAttempt: null, since: t0, ...o });
+  const ok = (o = {}) => ({ now: t0, repo: true, visible: true, busy: false, busyEndedAt: null, operation: false, inFlight: false, ...o });
+  eq(bf.dueAt(clock({ interval: 0 })), null, "off is never due");
+  eq(
+    [bf.shouldFetch(clock({ now: t0 + 1000 }), ok()), bf.shouldFetch(clock({ now: t0 + bf.FIRST_FETCH_DELAY_MS }), ok())],
+    [false, true],
+    "the first fetch comes shortly after opening or switching on, not at once",
+  );
+  eq(bf.dueAt(clock({ lastAttempt: t0 + MIN })), t0 + 16 * MIN, "then one interval after the last attempt");
+  eq(
+    bf.dueAt(clock({ lastAttempt: t0 + MIN, interval: 5 })),
+    t0 + 6 * MIN,
+    "a shorter interval chosen later applies to the pending wait",
+  );
+  eq(
+    bf.dueAt(clock({ lastAttempt: t0 - 60 * MIN, since: t0 })),
+    t0 + bf.FIRST_FETCH_DELAY_MS,
+    "switching on again waits the first delay even when the last attempt is long past",
+  );
+  eq(
+    ["fetched", "error", "no-remotes", "busy", "operation"].map(bf.countsAsAttempt),
+    [true, true, true, false, false],
+    "a failure uses up the interval (no retry loop); giving way does not",
+  );
+  const now = t0 + 20 * MIN;
+  const due = clock({ now });
+  eq(
+    [
+      bf.fetchHold(ok({ now })),
+      bf.fetchHold(ok({ now, repo: false })),
+      bf.fetchHold(ok({ now, inFlight: true })),
+      bf.fetchHold(ok({ now, visible: false })),
+      bf.fetchHold(ok({ now, busy: true })),
+      bf.fetchHold(ok({ now, busyEndedAt: now - 1000 })),
+      bf.fetchHold(ok({ now, busyEndedAt: now - bf.QUIET_AFTER_BUSY_MS })),
+      bf.fetchHold(ok({ now, operation: true })),
+    ],
+    [null, "no-repo", "in-flight", "hidden", "busy", "settling", null, "operation"],
+    "held back: no repository, one running, hidden window, a mutation or just after it, an operation",
+  );
+  eq(bf.shouldFetch(due, ok({ now, busy: true })), false, "a due fetch waits out a hold");
+  eq(
+    bf.QUIET_AFTER_BUSY_MS > 1000,
+    true,
+    "the quiet time outlasts the watcher's own-action grace (1 s), or the refresh would be lost",
+  );
+  eq(
+    [
+      bf.errorSummary("\nfatal: 'x' does not appear to be a git repository\nfatal: Could not read", "git fetch --all failed: fatal: ..."),
+      bf.errorSummary(null, "repository not open\nmore"),
+      bf.errorSummary("  \n", "io error: boom"),
+    ],
+    ["fatal: 'x' does not appear to be a git repository", "repository not open", "io error: boom"],
+    "the status bar line is git's first stderr line, not the command line the message opens with",
+  );
+  eq(
+    [bf.normalizeInterval("15"), bf.normalizeInterval("7"), bf.normalizeInterval(null), bf.normalizeInterval(60)],
+    [15, 0, 0, 60],
+    "a stored value that is not an interval reads as Off",
   );
 }
 

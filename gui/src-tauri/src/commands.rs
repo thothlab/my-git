@@ -15,7 +15,7 @@ use crate::engine::{
     undo::{self, Hint},
 };
 use crate::model::{
-    Blame, BlameBefore, BranchInfo, CloneProgress, CoAuthor, IgnoreChoice, IgnoreKind, RemoteInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, CommitSignature, ConflictFile, DiscardEntry,
+    BackgroundFetch, Blame, BlameBefore, BranchInfo, CloneProgress, CoAuthor, IgnoreChoice, IgnoreKind, RemoteInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, CommitSignature, ConflictFile, DiscardEntry,
     DiscardKind, DiscardOutcome, Eol, FileDiff, FileHistoryCursor, FileHistoryPage, HunkPick,
     LinePick,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
@@ -555,6 +555,22 @@ pub async fn push(state: State<'_, AppState>, mode: String) -> Result<RepoState>
 pub async fn fetch(state: State<'_, AppState>) -> Result<RepoState> {
     undoable(&state, "fetch", Hint::none(), || CliEngine::new(state.repo_path()?).fetch())?;
     build_state(&state)
+}
+
+/// The scheduled fetch (`gui/src/backgroundFetch.ts`): no person asked for it.
+///
+/// Journaled with origin `background` and recorded through
+/// `Undo::perform_background`, which gives way (`busy`) when anything runs on the
+/// repository and makes anything arriving meanwhile wait for it. Not during an
+/// unfinished operation. Returns no `RepoState` and the window does not refresh
+/// on its answer: what the fetch moved lands in `refs/remotes/`, the git-dir
+/// watcher reports it, and `repoWatch.ts` does the one refresh (↑/↓ and the branch
+/// tree). A fetch that brought nothing moves nothing the watcher looks at
+/// (`FETCH_HEAD` is not written, and is ignored anyway), so it costs no refresh.
+#[tauri::command]
+pub async fn repo_fetch_background(state: State<'_, AppState>) -> Result<BackgroundFetch> {
+    let repo = state.repo_path()?;
+    remotes::fetch_background(&state.undo, state.data_dir_opt().as_deref(), &repo)
 }
 
 /// Download the Git LFS content of one checked-out file (`git lfs pull --include`,

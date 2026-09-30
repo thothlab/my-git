@@ -1201,6 +1201,40 @@ impl CliEngine {
         Ok(())
     }
 
+    /// The fetch the application runs on its own schedule (`repo_fetch_background`),
+    /// never one a person asked for. Every flag is a difference from the manual
+    /// [`CliEngine::fetch`] that has a reason:
+    ///
+    /// - `--all`: every remote, so the ↑/↓ of a branch tracking a second remote is
+    ///   current too.
+    /// - `--no-prune`: the manual fetch prunes; a background one only adds and moves.
+    ///   A remote branch vanishing from the tree (and from under a selection in the
+    ///   log) is a change the person should cause, not watch happen. It also
+    ///   overrides a configured `fetch.prune = true`.
+    /// - `--no-write-fetch-head`: a terminal `git fetch origin x && git merge
+    ///   FETCH_HEAD` must not have its `FETCH_HEAD` replaced in between.
+    /// - `--no-auto-maintenance`: no `gc --auto` holding locks behind the person's
+    ///   back after a fetch they did not start.
+    /// - `--quiet`: with several remotes git prints `Fetching <name>` per remote to
+    ///   stderr, and a failure's text would open with that instead of the reason
+    ///   (the status bar shows one line of it). Errors are still printed.
+    /// - Tags: git's default (those pointing into fetched history). They are in the
+    ///   undo digest, so a fetch that brought one ends the chain as `Fetched`.
+    ///
+    /// With more than one remote git runs a child fetch per remote; `--no-prune` and
+    /// `--no-write-fetch-head` reach them (tested with two remotes).
+    pub fn fetch_background(&self) -> Result<()> {
+        self.git_net(&[
+            "fetch",
+            "--quiet",
+            "--all",
+            "--no-prune",
+            "--no-write-fetch-head",
+            "--no-auto-maintenance",
+        ])?;
+        Ok(())
+    }
+
     pub fn pull(&self) -> Result<()> {
         self.git_net(&["pull"])?;
         Ok(())

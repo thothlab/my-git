@@ -63,7 +63,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
@@ -985,6 +985,11 @@ fn classify(
         "file_ignore" => cx.ignore(),
         "push" => cx.brk(UndoReasonCode::Published),
         "fetch" => cx.brk(UndoReasonCode::Fetched),
+        // Only here when the digest moved: remote-tracking refs are not in it, so
+        // that is new tags (git's default tag following). Not `Nothing` — the
+        // chain would then fail its next check and end as "External", the wrong
+        // reason.
+        "fetch_background" => cx.brk(UndoReasonCode::Fetched),
         "pull" | "branch_update" => cx.brk(UndoReasonCode::Integrated),
         "branch_rebase_onto" | "op_rebase_start" | "commits_squash" => {
             cx.brk(UndoReasonCode::History)
@@ -1328,6 +1333,12 @@ struct Inner {
     active: HashSet<PathBuf>,
     /// Repositories where a second action started while one was running.
     tainted: HashSet<PathBuf>,
+    /// The subset of `active` whose action is the application's own background
+    /// work ([`Undo::perform_background`]). A user action, a step or a state read
+    /// arriving then **waits** for it on [`Undo::idle`] instead of tainting it or
+    /// being refused: the person did nothing concurrent, and a fetch nobody asked
+    /// for must not end their chain.
+    background: HashSet<PathBuf>,
 }
 
 impl Inner {
@@ -1342,6 +1353,8 @@ impl Inner {
 #[derive(Default)]
 pub struct Undo {
     inner: Mutex<Inner>,
+    /// Signalled when a background action ends.
+    idle: Condvar,
 }
 
 fn unavailable(why: UndoReason) -> UndoSide {
@@ -1398,6 +1411,20 @@ impl Undo {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The lock, once no background action runs on `key`.
+    ///
+    /// Waiting, not cancelling: the only way to stop a running git is a kill, and
+    /// a git killed while it updates refs leaves `*.lock` files behind that fail
+    /// the person's next pull ("cannot lock ref"). The wait is bounded by the
+    /// network run's own stall limits (`exec::network_env`).
+    fn lock_foreground(&self, key: &Path) -> MutexGuard<'_, Inner> {
+        let mut g = self.lock();
+        while g.background.contains(key) {
+            g = self.idle.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        g
+    }
+
     /// Run the user action `action` (journaled under that name, as `exec::as_user`
     /// does) and record what it did to `repo`'s chain. The action's own result is
     /// returned untouched: recording never fails an action.
@@ -1411,7 +1438,7 @@ impl Undo {
     ) -> Result<T> {
         let key = key_of(repo);
         let solo = {
-            let mut g = self.lock();
+            let mut g = self.lock_foreground(&key);
             if g.active.contains(&key) {
                 // Its effects would be read into the other action's "after": that one
                 // ends the chain when it finishes.
@@ -1425,14 +1452,74 @@ impl Undo {
         if !solo {
             return exec::as_user(action, f);
         }
+        self.record(data, repo, &key, action, hint, false, || {
+            exec::as_user(action, f)
+        })
+    }
 
+    /// Run the application's own background action `action` (`fetch_background`)
+    /// and record it like any other — journaled with origin `background`, since no
+    /// person asked for it (no `exec::as_user`, so not counted in
+    /// `exec::OWN_ACTIONS` either: the git-dir watcher reports what it moved, and
+    /// that is the one refresh the window does).
+    ///
+    /// `None`, without running `f`, when anything is already running on the
+    /// repository: background work gives way, it never taints a person's action.
+    /// Anyone arriving while it runs waits for it ([`Undo::lock_foreground`]).
+    pub fn perform_background<T>(
+        &self,
+        data: Option<&Path>,
+        repo: &Path,
+        action: &'static str,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Option<Result<T>> {
+        let key = key_of(repo);
+        {
+            let mut g = self.lock();
+            if g.active.contains(&key) {
+                return None;
+            }
+            g.active.insert(key.clone());
+            g.background.insert(key.clone());
+        }
+        // Released however `record` ends — a panic inside would otherwise leave
+        // every later action of this repository waiting forever.
+        struct Release<'a>(&'a Undo, PathBuf);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                let mut g = self.0.lock();
+                g.active.remove(&self.1);
+                g.background.remove(&self.1);
+                drop(g);
+                self.0.idle.notify_all();
+            }
+        }
+        let _release = Release(self, key.clone());
+        Some(self.record(data, repo, &key, action, Hint::none(), true, f))
+    }
+
+    /// Snapshot, run, snapshot, classify, and put the verdict on the chain. The
+    /// caller has marked `key` active; this unmarks it — except for a background
+    /// action, whose guard does that together with waking the waiters.
+    #[allow(clippy::too_many_arguments)]
+    fn record<T>(
+        &self,
+        data: Option<&Path>,
+        repo: &Path,
+        key: &Path,
+        action: &'static str,
+        hint: Hint,
+        background: bool,
+        f: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let key = key.to_path_buf();
         let upstream = if action == "branch_delete" && hint.arg(1) != Some("remote") {
             hint.arg(0).and_then(|n| upstream_of(repo, n))
         } else {
             None
         };
         let before = capture(repo, &[]);
-        let out = exec::as_user(action, f);
+        let out = f();
         let after = before.as_ref().ok().map(|b| capture(repo, &b.paths_vec()));
         let verdict = match (&before, &after) {
             (Ok(b), Some(Ok(a))) => classify(repo, action, &hint, out.is_ok(), b, a, upstream),
@@ -1440,7 +1527,9 @@ impl Undo {
         };
 
         let mut g = self.lock();
-        g.active.remove(&key);
+        if !background {
+            g.active.remove(&key);
+        }
         let tainted = g.tainted.remove(&key);
         let chain = g.chain(data, &key);
         if let (Some(e), Ok(b)) = (chain.expected(), &before) {
@@ -1479,7 +1568,7 @@ impl Undo {
     /// a change made elsewhere shows up as a reason instead of a surprise.
     pub fn state(&self, data: Option<&Path>, repo: &Path) -> Result<UndoState> {
         let key = key_of(repo);
-        let mut g = self.lock();
+        let mut g = self.lock_foreground(&key);
         if g.active.contains(&key) {
             return Ok(both(reason(UndoReasonCode::Busy, None)));
         }
@@ -1528,7 +1617,7 @@ impl Undo {
     ) -> Result<Vec<(String, String)>> {
         let key = key_of(repo);
         let (mut step, expected) = {
-            let mut g = self.lock();
+            let mut g = self.lock_foreground(&key);
             if g.active.contains(&key) {
                 return Err(Error::Rule(
                     "another action is running on this repository".into(),
@@ -2355,5 +2444,72 @@ mod tests {
             std::fs::write(p.join("a.txt"), "changed alongside\n").map_err(|e| Error::Io(e.to_string()))
         });
         assert_eq!(r.reason(), UndoReasonCode::Worktree);
+    }
+
+    // ---- background actions ----
+
+    #[test]
+    fn a_background_action_gives_way_to_a_running_one() {
+        let rig = Rig::new();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let r = &rig;
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                r.act("branch_create", Hint::args(["x"]), || {
+                    started_tx.send(()).unwrap();
+                    go_rx.recv().unwrap();
+                    CliEngine::new(r.p()).create_branch("x", None)
+                })
+            });
+            started_rx.recv().unwrap();
+            let bg = rig
+                .undo
+                .perform_background(rig.d(), rig.p(), "fetch_background", || Ok(()));
+            assert!(
+                bg.is_none(),
+                "background work never taints a person's action"
+            );
+            go_tx.send(()).unwrap();
+        });
+        assert!(rig.state().undo.id.is_some());
+    }
+
+    #[test]
+    fn a_person_arriving_during_a_background_action_waits_instead_of_ending_the_chain() {
+        let rig = Rig::new();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let r = &rig;
+        std::thread::scope(|s| {
+            let bg = s.spawn(move || {
+                r.undo
+                    .perform_background(r.d(), r.p(), "fetch_background", || {
+                        started_tx.send(()).unwrap();
+                        go_rx.recv().unwrap();
+                        Ok(())
+                    })
+            });
+            started_rx.recv().unwrap();
+            let person = s.spawn(|| {
+                rig.act("branch_create", Hint::args(["y"]), || {
+                    CliEngine::new(rig.p()).create_branch("y", None)
+                })
+            });
+            // Give the person's action time to reach the wait, then let the
+            // background one finish.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert!(!person.is_finished(), "it waits for the background action");
+            go_tx.send(()).unwrap();
+            assert!(matches!(bg.join().unwrap(), Some(Ok(()))));
+            person.join().unwrap();
+        });
+        let st = rig.state();
+        assert!(
+            st.undo.id.is_some(),
+            "recorded, not Concurrent: {:?}",
+            st.undo.reason
+        );
+        assert_eq!(st.undo.action.as_deref(), Some("branch_create"));
     }
 }

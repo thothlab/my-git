@@ -36,6 +36,7 @@ import ConflictPanel from "./components/conflicts/ConflictPanel";
 import RebasePanel from "./components/rebase/RebasePanel";
 import { DISABLED_CLASS } from "./components/IconButton";
 import { msSinceRefresh, nudgeRepoWatch, refreshOnFocus, startRepoWatch } from "./repoWatch";
+import { startBackgroundFetch } from "./backgroundFetch";
 
 const LEFT_WIDTH_KEY = "leftPanelWidth";
 const TREE_WIDTH_KEY = "logTreeWidth";
@@ -87,6 +88,8 @@ export default function App() {
     // External git activity while the window is open: the git-dir watcher.
     // Before the first `await`, for the same reason as the update timer below.
     onCleanup(startRepoWatch());
+    // The scheduled fetch, off unless switched on in Settings → Network.
+    onCleanup(startBackgroundFetch());
 
     // Automatic update checks, all silent: only the About button reports an
     // outcome. Once at boot is not enough — this window stays open for days, so

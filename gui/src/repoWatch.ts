@@ -67,7 +67,9 @@ export const msSinceRefresh = (): number => Date.now() - lastRefreshAt;
 
 const due = (): boolean => dirtyHistory || (dirtyState && !editorOpen());
 
-async function windowHidden(): Promise<boolean> {
+/** The window is hidden or minimized — nobody sees it. Shared with the
+ *  background fetch, which holds off for the same reason. */
+export async function windowHidden(): Promise<boolean> {
   if (document.visibilityState === "hidden") return true;
   try {
     return await getCurrentWindow().isMinimized();

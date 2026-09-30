@@ -191,6 +191,22 @@ pub struct RepoExternalChange {
     pub repo_path: String,
 }
 
+/// What a background fetch did (`repo_fetch_background`). A failure is an `Err` as
+/// usual; the window keeps it as a line in the status bar, not a banner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackgroundFetch {
+    /// It ran. Whatever it moved, the git-dir watcher reports — this answer is not
+    /// a reason to refresh.
+    Fetched,
+    /// Something else was running on the repository; it gave way.
+    Busy,
+    /// A merge / rebase / cherry-pick / revert / bisect is unfinished.
+    Operation,
+    /// The repository has no remotes: nothing to fetch.
+    NoRemotes,
+}
+
 /// One configured remote (`engine::remotes::list`). URLs come masked
 /// (`exec::mask_credentials`): a token stored in a URL before Graft refused them is
 /// not put on screen. `push_urls` empty means pushes go to `fetch_urls`.

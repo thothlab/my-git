@@ -333,6 +333,16 @@ const en = {
   // Log mode — commit details
   loadingCommitDetails: () => "Loading commit details…",
   authorLabel: () => "Author",
+  settingsNetwork: () => "Network",
+  bgFetchLabel: () => "Background fetch",
+  bgFetchDesc: () =>
+    "Fetch every remote of the open repository on a schedule, while the window is shown. Nothing is pruned; the manual Fetch still prunes.",
+  bgFetchOff: () => "Off",
+  bgFetchMinutes: (m: number) => `${m} min`,
+  bgFetchFailed: (first: string) => `Background fetch failed: ${first}`,
+  bgFetchRunning: () => "fetching in background…",
+  bgFetchRunningTip: () =>
+    "A scheduled fetch is running; an action you start now waits for it to finish.",
   sigLabel: () => "Signature",
   sigChecking: () => "checking…",
   sigFailed: () => "could not be read",
@@ -1358,6 +1368,16 @@ const ru: Dict = {
   selectCommitHint: () => "Выберите коммит, чтобы увидеть детали.",
   loadingCommitDetails: () => "Загружаем детали коммита…",
   authorLabel: () => "Автор",
+  settingsNetwork: () => "Сеть",
+  bgFetchLabel: () => "Фоновый fetch",
+  bgFetchDesc: () =>
+    "Забирать изменения со всех remotes открытого репозитория по расписанию, пока окно на экране. Ничего не удаляет (prune делает только ручной Fetch).",
+  bgFetchOff: () => "Выкл.",
+  bgFetchMinutes: (m) => `${m} мин`,
+  bgFetchFailed: (first) => `Фоновый fetch не удался: ${first}`,
+  bgFetchRunning: () => "фоновый fetch…",
+  bgFetchRunningTip: () =>
+    "Идёт fetch по расписанию; действие, начатое сейчас, дождётся его окончания.",
   sigLabel: () => "Подпись",
   sigChecking: () => "проверяется…",
   sigFailed: () => "не прочиталась",

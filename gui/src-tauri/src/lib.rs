@@ -106,6 +106,7 @@ pub fn run() {
             commands::branch_checkout,
             commands::push,
             commands::fetch,
+            commands::repo_fetch_background,
             commands::pull,
             commands::lfs_pull,
             commands::git_exec,

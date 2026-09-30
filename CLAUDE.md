@@ -26,9 +26,9 @@
 | `cd gui && npm run tauri dev` | Запустить Graft локально (нужен дисплей) |
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
-| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `ageColor`, `signatureRules`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; `lfsRules`; разбор и печать команды консоли), 374 утверждения |
-| `cargo test` | Оба крейта разом: 386 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 386 тестов |
+| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `ageColor`, `signatureRules`, `backgroundFetchRules`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; `lfsRules`; разбор и печать команды консоли), 385 утверждений |
+| `cargo test` | Оба крейта разом: 393 теста GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 393 теста |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -91,6 +91,8 @@ gui/src/            фронт
   store.ts          глобальное состояние окна, run(), модалки
   logStore.ts       состояние панели лога
   repoWatch.ts      когда отвечать на repo-external-change: refreshKeepingError() + дерево веток
+  backgroundFetch.ts фоновый fetch по расписанию (выкл. по умолчанию): таймер, последняя
+                    ошибка для статус-бара; правило «пора ли» — components/backgroundFetchRules.ts
   hotkeys.ts        клавиатурный слой
   i18n.ts           словари en/ru
   components/       Changes-режим (ChangesView, DiffView, CommitPanel, Toolbar, ...);
@@ -256,6 +258,14 @@ Git вызывается только как внешний процесс. `gix
   из истории показывает размеры и наличие, но кнопки не получает.
 - `engine::branches` — `tree`, `rename`, `delete`, `merge`, `rebase_onto`, `unmerged_count`,
   `update_from_upstream`, константа `DETACHED_REF = "HEAD"`.
+- `engine::remotes` — `fetch_background(undo, data, repo) -> BackgroundFetch`: нет remotes —
+  `no-remotes`, незавершённая операция — `operation`, иначе `CliEngine::fetch_background`
+  (`fetch --quiet --all --no-prune --no-write-fetch-head --no-auto-maintenance`, сетевой режим,
+  теги — по умолчанию git) через `Undo::perform_background` (`busy`, если уступил). Флаги
+  обоснованы в докблоке: prune остаётся за ручным Fetch, `FETCH_HEAD` терминала не
+  перетирается, `gc --auto` за спиной не держит блокировки. Новые теги сдвигают отпечаток
+  Undo и рвут цепочку с кодом `fetched` (явная ветка `"fetch_background"` в `classify`: без
+  неё следующая сверка назвала бы разрыв `external`); одни `refs/remotes/` цепочку не трогают.
 - `engine::remotes` — `check_url` (чистое правило адреса: https / http / ssh / git / file,
   scp-синтаксис `[user@]host:path`, локальный путь как `/abs`, `./rel`, `../rel`; **отказ**
   `Error::Rule` с отсылкой к credential helper на пароль в адресе, на имя пользователя,
@@ -352,7 +362,16 @@ Git вызывается только как внешний процесс. `gix
   отслеживаемый путь — `Error::Rule`, не молчаливый no-op; `.gitignore`-симлинк — тоже
   отказ (rename заменил бы ссылку файлом). Известное ограничение: вложенный `.gitignore`
   с `!` главнее корневого, и правило тогда пути не спрячет.
-- `engine::undo` — `Undo` (`perform`, `state`, `step`), `Hint { args, lists, ignore }`, `DEPTH = 100`.
+- `engine::undo` — `Undo` (`perform`, `perform_background`, `state`, `step`), `Hint { args, lists, ignore }`, `DEPTH = 100`.
+  **`perform_background` — единственная запись действия, которое никто не просил**
+  (`fetch_background`): без `exec::as_user`, поэтому журнал пишет его `background`, а
+  `OWN_ACTIONS` его не считает — наблюдатель сообщает о сдвинутых `refs/remotes/`, и
+  обновляет окно `repoWatch.ts`. Если на репозитории что-то уже идёт — `None`, ничего не
+  запускается (фон уступает, никогда не «заражает» чужое действие как `Concurrent`); всё,
+  что приходит во время фонового действия (`perform`, `step`, `state`), **ждёт** его на
+  `Condvar`, а не отказывает и не рвёт цепочку. Ждать, а не убивать: `Child::kill` — это
+  SIGKILL, и git, убитый посреди обновления ссылок, оставляет `*.lock`, на котором падает
+  следующий pull.
   **Каждая мутация команды Tauri идёт через `commands::undoable(&state, "<имя команды>",
   hint, || …)`, а не голый `exec::as_user`** — он внутри: действие, которого журнал не видел,
   для него «изменение вне Graft» и рвёт цепочку зря. `perform` снимает `Snapshot` до и после
@@ -519,8 +538,9 @@ Git вызывается только как внешний процесс. `gix
 
 - **Мутация возвращает целиком `RepoState`.** Отдельной команды опроса незавершённой
   операции нет: `RepoState.operation` — единственный источник правды о ней. Почта
-  пользователя — `RepoState.userEmail`. Исключений два — `file_write` (см. ниже) и
-  `repo_clone`: клон не меняет открытый репозиторий и не требует его, возвращает путь
+  пользователя — `RepoState.userEmail`. Исключений три — `file_write` (см. ниже),
+  `repo_fetch_background` (отдаёт `BackgroundFetch`, идёт мимо `run()`; обновление окна —
+  через наблюдатель, см. `engine::undo`) и `repo_clone`: клон не меняет открытый репозиторий и не требует его, возвращает путь
   нового (`null` — отменён), идёт мимо `undoable` и `run()`; фронт открывает результат
   через `openRepoAt`, как «Открыть…». Прогресс — событие `repo-clone-progress`
   (`CloneProgress { line }`, строки прорежены до одной в 80 мс, последняя доезжает всегда),
@@ -583,7 +603,7 @@ Git вызывается только как внешний процесс. `gix
   `ConflictEntry[]` (`{ path, kind }`), а не строки: вид конфликта (`UU`, `DU`, …) едет с
   тем же `ls-files -u`, и второй команды за ним нет. Конфликт без операции (`stash pop`)
   виден только в Changes — туда же пункт «Разрешить конфликт…».
-- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`, `op_bisect_start`, `op_bisect_mark`, `op_bisect_reset`), `ui_state_*`, `journal_*`, `undo_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_ignore_choices`, `file_ignore`, `file_history`, `file_blame`, `file_blame_before`), `lfs_pull`, `remote_*`, `repo_*` (`repo_open`, `repo_state`, `repo_local_changes`, `repo_clone`, `repo_clone_cancel`). Имя `commit_list`
+- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`, `op_bisect_start`, `op_bisect_mark`, `op_bisect_reset`), `ui_state_*`, `journal_*`, `undo_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_ignore_choices`, `file_ignore`, `file_history`, `file_blame`, `file_blame_before`), `lfs_pull`, `remote_*`, `repo_*` (`repo_open`, `repo_state`, `repo_local_changes`, `repo_clone`, `repo_clone_cancel`, `repo_fetch_background`). Имя `commit_list`
   занято операцией «закоммитить changelist» и переиспользовано быть не может.
 - Полный список зарегистрированных команд — `invoke_handler` в `gui/src-tauri/src/lib.rs`;
   он же роспись того, что вообще доступно фронту.
@@ -646,7 +666,13 @@ Git вызывается только как внешний процесс. `gix
   руки (диалог должен остаться открытым) — `runResult()` из `actions/repoRefresh.ts`.
   После изменения ссылок или истории — `afterRepoChange()`: `run()` сам по себе не обновляет
   ни дерево веток (его ресурс ключом на путь репозитория), ни страницы лога.
-  Единственный обход воронки — `fileWrite` из `editState.ts` (причина выше, в границе Tauri).
+  Обходов воронки два — `fileWrite` из `editState.ts` (причина выше, в границе Tauri) и
+  `repoFetchBackground` из `backgroundFetch.ts`: `run()` мигал бы busy каждые несколько
+  минут и клал бы в баннер отказ офлайн-ноутбука на каждом тике. Ошибка фонового fetch —
+  строка в `StatusBar` (первая строка stderr git — `errorSummary`, полный текст в подсказке;
+  пока fetch идёт — «фоновый fetch…»: начатое действие ждёт его), ловит её `backgroundFetch.ts`, не
+  компонент. После ответа окно само **не** обновляется: это делает `repoWatch.ts` по событию
+  наблюдателя — иначе всё читалось бы дважды, а пустой fetch не стоит ни одного перечитывания.
   `repoClone` из `CloneDialog.tsx` мимо `run()` тоже, но он не мутация открытого репозитория:
   ошибка остаётся в диалоге рядом с введённым, успех открывается через `openRepoAt`;
   правило «компонент не пишет своего `try/catch`» при этом держится: слой действий здесь —
@@ -744,7 +770,9 @@ Git вызывается только как внешний процесс. `gix
   `locale`, `lastRepo`, `recentRepos`, `showIgnored`, `groupByDir`, `leftPanelWidth`, `logTreeWidth`,
   `logSplitRatio`, `logDetailsWidth`, `diffSplitRatio`, `diffWhitespace`, `diffHighlight`,
   `logOrder`, `logDimNonMatching`, `logGraphColor` (раскраска графа: `branch` | `age`), `cloneParent` (последняя папка, куда клонировали), `branchMenuOptions` (как показывать выпадающий список
-  веток), `recentBranches` (недавние ветки по репозиториям).
+  веток), `recentBranches` (недавние ветки по репозиториям), `backgroundFetchMinutes` (интервал
+  фонового fetch: 0 | 5 | 15 | 30 | 60, по умолчанию 0 — сколько машина сама ходит в сеть,
+  это про машину и человека, а не про репозиторий).
 - Память процесса Rust: `AppState` — корень открытого репозитория, флаг «показывать
   игнорируемые» и наблюдатель за git-dir (`watcher`, пересоздаётся в `repo_open` при смене
   корня, старый останавливается drop'ом; не завёлся — открытие не падает, остаётся фокус).
@@ -1151,6 +1179,13 @@ Git вызывается только как внешний процесс. `gix
   (`user:secret@host:path`) уходил в журнал дословно: argv, вывод `remote -v` в консоли,
   чтение конфига за списком remotes, сообщения git об ошибке в баннере. Список remotes
   маскировал его своей копией правила — вторая копия и прятала дыру в первой.
+- Фоновый fetch полагается на наблюдатель, а тот 1 с после **своего** действия
+  (`watch::OWN_GRACE`) считает события своими и глотает. Поэтому планировщик ждёт
+  `QUIET_AFTER_BUSY_MS = 3 с` тишины после `busy()`, иначе fetch, закончившийся сразу после
+  действия, сдвинул бы `refs/remotes/` без перечитывания. Остаточная дыра: действие,
+  дождавшееся конца фонового fetch, стартует в пределах грейса — его собственный `run()`
+  приносит свежий `RepoState`, но дерево веток обновится только через `afterRepoChange()`
+  этого действия или фокус. Не завёлся наблюдатель — фоновый fetch виден по фокусу.
 - `%G?` отвечает `N` («подписи нет») и на подписанный коммит, который git не проверял: SSH
   без `gpg.ssh.allowedSignersFile` (git пишет ошибку в stderr и выходит с 0), OpenPGP без
   `gpg` (`cannot exec`, тоже 0). Отсюда наличие подписи — по заголовку объекта. А

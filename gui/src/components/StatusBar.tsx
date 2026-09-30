@@ -2,6 +2,7 @@ import { Show, createResource } from "solid-js";
 import { state } from "../store";
 import { getVersion } from "@tauri-apps/api/app";
 import { d } from "../i18n";
+import { backgroundFetchError, backgroundFetchRunning } from "../backgroundFetch";
 
 export default function StatusBar() {
   // Version from the bundle, never a literal: the hardcoded one here said
@@ -18,6 +19,20 @@ export default function StatusBar() {
             <span class="truncate font-mono" title={s().repoPath}>
               {s().repoPath}
             </span>
+            {/* The last background fetch failed: one quiet line, never a banner
+                per tick. The full message is in the tooltip. */}
+            <Show when={backgroundFetchError()}>
+              {(e) => (
+                <span class="min-w-0 truncate text-warn" title={e().text}>
+                  {d().bgFetchFailed(e().line)}
+                </span>
+              )}
+            </Show>
+            <Show when={backgroundFetchRunning()}>
+              <span class="shrink-0" title={d().bgFetchRunningTip()}>
+                {d().bgFetchRunning()}
+              </span>
+            </Show>
             <span class="ml-auto">{d().changesCount(total())}</span>
             <span class="text-fg-muted/70">Graft {version() ?? ""}</span>
           </>

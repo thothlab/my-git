@@ -23,6 +23,8 @@ import {
   updatesSupported,
 } from "../updater";
 import { DISABLED_CLASS } from "./IconButton";
+import { backgroundFetchMinutes, setBackgroundFetchMinutes } from "../backgroundFetch";
+import { FETCH_INTERVALS } from "./backgroundFetchRules";
 
 const REPO_URL = "https://github.com/thothlab/my-git";
 
@@ -163,7 +165,7 @@ function ModalShell(props: { title: string; onClose: () => void; children: any }
   );
 }
 
-type SettingsSection = "appearance" | "language";
+type SettingsSection = "appearance" | "language" | "network";
 
 // Its own shell rather than `ModalShell`: that one is a narrow box with a
 // bottom Close button, sized for About. Settings needs a header with an X,
@@ -202,6 +204,11 @@ function SettingsModal(props: { onClose: () => void }) {
                 label={d().languageLabel()}
                 active={section() === "language"}
                 onClick={() => setSection("language")}
+              />
+              <SettingsNavItem
+                label={d().settingsNetwork()}
+                active={section() === "network"}
+                onClick={() => setSection("network")}
               />
             </div>
             <div class="flex-1 overflow-auto p-4">
@@ -244,6 +251,24 @@ function SettingsModal(props: { onClose: () => void }) {
                           { v: "ru", label: "Русский" },
                         ]}
                         onPick={(v) => setLocale(v as Locale)}
+                      />
+                    }
+                  />
+                </div>
+              </Show>
+              <Show when={section() === "network"}>
+                <div class="divide-y divide-border">
+                  <SettingRow
+                    label={d().bgFetchLabel()}
+                    description={d().bgFetchDesc()}
+                    control={
+                      <Segmented
+                        value={String(backgroundFetchMinutes())}
+                        options={FETCH_INTERVALS.map((m) => ({
+                          v: String(m),
+                          label: m === 0 ? d().bgFetchOff() : d().bgFetchMinutes(m),
+                        }))}
+                        onPick={(v) => setBackgroundFetchMinutes(Number(v))}
                       />
                     }
                   />
