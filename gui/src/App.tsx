@@ -191,27 +191,6 @@ export default function App() {
             (`history/spec.md`, "State is announced on entry"). */}
         <OperationBar />
 
-        <Show when={error()}>
-          <div class="flex items-start gap-2 border-b border-border bg-danger/10 px-3 py-2">
-            <pre class="max-h-32 min-w-0 flex-1 overflow-auto whitespace-pre-wrap font-mono text-xs text-danger">
-              {error()}
-            </pre>
-            {/* A failed git run names its journal entry: the whole output (the
-                banner shows git's message, the entry also the command line, the
-                directory and both streams) is one click away. */}
-            <Show when={errorJournalId()}>
-              {(id) => (
-                <button
-                  class="shrink-0 rounded border border-border px-2 py-0.5 text-xs text-fg hover:bg-bg-muted"
-                  onClick={() => openGitConsole(id())}
-                >
-                  {d().showOutput()}
-                </button>
-              )}
-            </Show>
-          </div>
-        </Show>
-
         {/* Not an error: what an action did, and a way to take it back. */}
         <Show when={visibleNotice()}>
           {(n) => (
@@ -265,6 +244,29 @@ export default function App() {
           <footer class="border-t border-border bg-bg-muted">
             <CommitPanel />
           </footer>
+        </Show>
+
+        {/* The error banner sits right above the status bar, in both modes —
+            not under the toolbar, where it pushed both panels down. */}
+        <Show when={error()}>
+          <div class="flex items-start gap-2 border-t border-border bg-danger/10 px-3 py-2">
+            <pre class="max-h-32 min-w-0 flex-1 overflow-auto whitespace-pre-wrap font-mono text-xs text-danger">
+              {error()}
+            </pre>
+            {/* A failed git run names its journal entry: the whole output (the
+                banner shows git's message, the entry also the command line, the
+                directory and both streams) is one click away. */}
+            <Show when={errorJournalId()}>
+              {(id) => (
+                <button
+                  class="shrink-0 rounded border border-border px-2 py-0.5 text-xs text-fg hover:bg-bg-muted"
+                  onClick={() => openGitConsole(id())}
+                >
+                  {d().showOutput()}
+                </button>
+              )}
+            </Show>
+          </div>
         </Show>
         <StatusBar />
 
