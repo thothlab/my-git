@@ -381,9 +381,14 @@ impl GixEngine {
 
     /// Whether a local branch `refs/heads/<branch>` exists.
     fn local_branch_exists(&self, branch: &str) -> bool {
-        self.git(&["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")])
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        self.git(&[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .map(|o| o.status.success())
+        .unwrap_or(false)
     }
 
     fn detect_rebase(&self) -> Option<RebaseState> {
@@ -1584,7 +1589,9 @@ mod tests {
 
         // A base ref that can't be resolved is "couldn't check" — never Conflicts.
         assert!(matches!(
-            engine.rebase_preflight("no-such-ref-xyz", "feature").unwrap(),
+            engine
+                .rebase_preflight("no-such-ref-xyz", "feature")
+                .unwrap(),
             Preflight::Unknown(_)
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1606,7 +1613,9 @@ mod tests {
                 .success());
         };
         std::fs::write(dir.join("x.txt"), "A\n").unwrap();
-        engine.commit(&["x.txt".to_string()], "base", false).unwrap();
+        engine
+            .commit(&["x.txt".to_string()], "base", false)
+            .unwrap();
         let main = engine.branch_state().unwrap().current_branch.unwrap();
         // develop: A -> C
         run(&["checkout", "-q", "-b", "develop"]);
@@ -1619,9 +1628,13 @@ mod tests {
         run(&["checkout", "-q", &main]);
         run(&["checkout", "-q", "-b", "feature"]);
         std::fs::write(dir.join("x.txt"), "B\n").unwrap();
-        engine.commit(&["x.txt".to_string()], "feat1", false).unwrap();
+        engine
+            .commit(&["x.txt".to_string()], "feat1", false)
+            .unwrap();
         std::fs::write(dir.join("x.txt"), "C\n").unwrap();
-        engine.commit(&["x.txt".to_string()], "feat2", false).unwrap();
+        engine
+            .commit(&["x.txt".to_string()], "feat2", false)
+            .unwrap();
         match engine.rebase_preflight("develop", "feature").unwrap() {
             Preflight::Conflicts(files) => assert!(files.iter().any(|f| f == "x.txt")),
             other => panic!("per-commit replay should predict a conflict, got {other:?}"),

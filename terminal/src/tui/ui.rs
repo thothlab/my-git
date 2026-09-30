@@ -547,7 +547,7 @@ fn render_picker(f: &mut Frame, app: &App<'_>, area: Rect, p: &PickerState) {
     let filter_lines = if p.filter.is_some() { 1 } else { 0 };
     let head_lines = sub_lines + filter_lines;
     let foot_lines = 2; // blank + hint
-    // At least one list row so an empty filter still shows the "(no matches)" note.
+                        // At least one list row so an empty filter still shows the "(no matches)" note.
     let want_rows = vis.len().max(1) as u16;
 
     let w = 56.min(area.width.saturating_sub(4));

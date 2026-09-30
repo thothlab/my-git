@@ -258,7 +258,10 @@ pub enum PickerPurpose {
     /// Step 2: branch chosen (name carried) — pick the base ref to rebase onto.
     RapBase(String),
     /// Step 3: branch + base chosen — pick the force-push mode, then preflight.
-    RapForce { branch: String, base: String },
+    RapForce {
+        branch: String,
+        base: String,
+    },
 }
 
 /// A rendered row in the Changes panel: a changelist header or a file under it.
@@ -1230,43 +1233,47 @@ impl<'e> App<'e> {
     /// user whether to proceed anyway (the script never asked — this is the point
     /// of the feature).
     fn rebase_push_preflight(&mut self, branch: String, base: String, hard: bool) {
-        self.begin_busy("Проверка возможности ребейза…".into(), move |app| {
-            if let Err(e) = app.engine.fetch() {
-                app.message = format!("fetch не удался: {e}");
-                return;
-            }
-            match app.engine.rebase_preflight(&base, &branch) {
-                Ok(Preflight::Clean) => app.rebase_push_run(branch, base, hard),
-                Ok(Preflight::Conflicts(files)) => {
-                    let n = files.len();
-                    app.overlay = Overlay::Confirm(ConfirmState {
-                        title: "Ребейз с конфликтами".into(),
-                        body: format!(
+        self.begin_busy(
+            "Проверка возможности ребейза…".into(),
+            move |app| {
+                if let Err(e) = app.engine.fetch() {
+                    app.message = format!("fetch не удался: {e}");
+                    return;
+                }
+                match app.engine.rebase_preflight(&base, &branch) {
+                    Ok(Preflight::Clean) => app.rebase_push_run(branch, base, hard),
+                    Ok(Preflight::Conflicts(files)) => {
+                        let n = files.len();
+                        app.overlay = Overlay::Confirm(ConfirmState {
+                            title: "Ребейз с конфликтами".into(),
+                            body: format!(
                             "Ожидается {n} конфликтующих файл(ов) при ребейзе {branch} на {base}. \
                              Без ручного разрешения ребейз не пройдёт. Продолжить? (y — да)"
                         ),
-                        purpose: ConfirmPurpose::RebasePush { branch, base, hard },
-                    });
-                }
-                Ok(Preflight::Unknown(err)) => {
-                    app.overlay = Overlay::Confirm(ConfirmState {
-                        title: "Не удалось проверить ребейз".into(),
-                        body: format!(
+                            purpose: ConfirmPurpose::RebasePush { branch, base, hard },
+                        });
+                    }
+                    Ok(Preflight::Unknown(err)) => {
+                        app.overlay = Overlay::Confirm(ConfirmState {
+                            title: "Не удалось проверить ребейз".into(),
+                            body: format!(
                             "Проверка конфликтов не удалась: {err}. Продолжить всё равно? (y — да)"
                         ),
-                        purpose: ConfirmPurpose::RebasePush { branch, base, hard },
-                    });
+                            purpose: ConfirmPurpose::RebasePush { branch, base, hard },
+                        });
+                    }
+                    Err(e) => app.message = format!("проверка ребейза не удалась: {e}"),
                 }
-                Err(e) => app.message = format!("проверка ребейза не удалась: {e}"),
-            }
-        });
+            },
+        );
     }
 
     /// Run the whole rebase-and-push sequence behind a busy frame.
     fn rebase_push_run(&mut self, branch: String, base: String, hard: bool) {
-        self.begin_busy(format!("Ребейз {branch} на {base} и push…"), move |app| {
-            app.do_rebase_and_push(&branch, &base, hard)
-        });
+        self.begin_busy(
+            format!("Ребейз {branch} на {base} и push…"),
+            move |app| app.do_rebase_and_push(&branch, &base, hard),
+        );
     }
 
     /// The sequence itself (script `rebase_and_push.sh`): [stash] -> checkout
@@ -1308,7 +1315,8 @@ impl<'e> App<'e> {
             let msg = format!("mygit rebase-push: autostash before rebasing {branch} onto {base}");
             if let Err(e) = self.engine.stash_push(&msg) {
                 self.refresh();
-                self.message = format!("не удалось застешить изменения: {e} — прервано на {original}");
+                self.message =
+                    format!("не удалось застешить изменения: {e} — прервано на {original}");
                 return;
             }
             // Capture the created stash selector so we pop exactly this one later.
@@ -1326,7 +1334,8 @@ impl<'e> App<'e> {
                 let _ = self.engine.stash_pop(sel);
             }
             self.refresh();
-            self.message = format!("не удалось переключиться на {branch}: {e} — остались на {original}");
+            self.message =
+                format!("не удалось переключиться на {branch}: {e} — остались на {original}");
             return;
         }
 
@@ -1349,7 +1358,10 @@ impl<'e> App<'e> {
                     stash_note(&stash)
                 );
             } else {
-                self.message = format!("ребейз не удался: {e} — ты на {branch}{}", stash_note(&stash));
+                self.message = format!(
+                    "ребейз не удался: {e} — ты на {branch}{}",
+                    stash_note(&stash)
+                );
             }
             return;
         }
@@ -1365,8 +1377,13 @@ impl<'e> App<'e> {
             }
             self.refresh();
             self.message = match back {
-                Ok(()) => format!("{branch} поребейзена, но push не удался: {e} — вернулись на {original}"),
-                Err(_) => format!("{branch} поребейзена, push не удался: {e} — ты на {branch}{}", stash_note(&stash)),
+                Ok(()) => format!(
+                    "{branch} поребейзена, но push не удался: {e} — вернулись на {original}"
+                ),
+                Err(_) => format!(
+                    "{branch} поребейзена, push не удался: {e} — ты на {branch}{}",
+                    stash_note(&stash)
+                ),
             };
             return;
         }
@@ -1817,42 +1834,45 @@ impl<'e> App<'e> {
     /// frame): run it if conflicts aren't expected, else warn and ask the user to
     /// confirm before proceeding (GitLab-style — no silent conflicted rebase).
     fn rebase_onto_preflight(&mut self, base: String, prefix: String) {
-        self.begin_busy("Проверка возможности ребейза…".into(), move |app| {
-            // Read the branch fresh — the user may have just switched in the log.
-            let st = app.engine.branch_state().unwrap_or_default();
-            // A detached HEAD has no branch name to preflight; just rebase.
-            let current = match (st.detached, st.current_branch) {
-                (false, Some(b)) => b,
-                _ => {
-                    app.rebase_onto_run(base, prefix);
-                    return;
-                }
-            };
-            match app.engine.rebase_preflight(&base, &current) {
-                Ok(Preflight::Clean) => app.rebase_onto_run(base, prefix),
-                Ok(Preflight::Conflicts(files)) => {
-                    let n = files.len();
-                    app.overlay = Overlay::Confirm(ConfirmState {
-                        title: "Ребейз с конфликтами".into(),
-                        body: format!(
-                            "Ожидается {n} конфликтующих файл(ов) при ребейзе на {base}. \
+        self.begin_busy(
+            "Проверка возможности ребейза…".into(),
+            move |app| {
+                // Read the branch fresh — the user may have just switched in the log.
+                let st = app.engine.branch_state().unwrap_or_default();
+                // A detached HEAD has no branch name to preflight; just rebase.
+                let current = match (st.detached, st.current_branch) {
+                    (false, Some(b)) => b,
+                    _ => {
+                        app.rebase_onto_run(base, prefix);
+                        return;
+                    }
+                };
+                match app.engine.rebase_preflight(&base, &current) {
+                    Ok(Preflight::Clean) => app.rebase_onto_run(base, prefix),
+                    Ok(Preflight::Conflicts(files)) => {
+                        let n = files.len();
+                        app.overlay = Overlay::Confirm(ConfirmState {
+                            title: "Ребейз с конфликтами".into(),
+                            body: format!(
+                                "Ожидается {n} конфликтующих файл(ов) при ребейзе на {base}. \
                              Без ручного разрешения ребейз не пройдёт. Продолжить? (y - да)"
-                        ),
-                        purpose: ConfirmPurpose::RebaseOnto { base, prefix },
-                    });
-                }
-                Ok(Preflight::Unknown(err)) => {
-                    app.overlay = Overlay::Confirm(ConfirmState {
-                        title: "Не удалось проверить ребейз".into(),
-                        body: format!(
+                            ),
+                            purpose: ConfirmPurpose::RebaseOnto { base, prefix },
+                        });
+                    }
+                    Ok(Preflight::Unknown(err)) => {
+                        app.overlay = Overlay::Confirm(ConfirmState {
+                            title: "Не удалось проверить ребейз".into(),
+                            body: format!(
                             "Проверка конфликтов не удалась: {err}. Продолжить всё равно? (y - да)"
                         ),
-                        purpose: ConfirmPurpose::RebaseOnto { base, prefix },
-                    });
+                            purpose: ConfirmPurpose::RebaseOnto { base, prefix },
+                        });
+                    }
+                    Err(e) => app.message = format!("проверка ребейза не удалась: {e}"),
                 }
-                Err(e) => app.message = format!("проверка ребейза не удалась: {e}"),
-            }
-        });
+            },
+        );
     }
 
     /// Run the plain rebase behind a busy frame.
@@ -3399,7 +3419,10 @@ mod tests {
         // Fetch + preflight run behind a busy frame; the preflight predicts a
         // conflict, so the flow must ASK before touching anything.
         app.rebase_push_preflight("feature".into(), "origin/develop".into(), false);
-        assert!(app.pending.is_some(), "preflight queued behind a busy frame");
+        assert!(
+            app.pending.is_some(),
+            "preflight queued behind a busy frame"
+        );
         drain_pending(&mut app);
         // A conflict prediction opens a Confirm — it does NOT auto-run the rebase.
         match &app.overlay {
@@ -3409,7 +3432,10 @@ mod tests {
             }
             _ => panic!("expected a Confirm after a predicted conflict"),
         }
-        assert!(app.pending.is_none(), "nothing queued while awaiting confirm");
+        assert!(
+            app.pending.is_none(),
+            "nothing queued while awaiting confirm"
+        );
         assert!(app.busy.is_none());
         // 'y' proceeds: the full rebase+push sequence queues, then runs to done.
         app.handle_key(key_char('y'));
@@ -3483,7 +3509,10 @@ mod tests {
         // phase 1: fetch -> queues the preflight phase, busy switches label
         let op = app.pending.take().unwrap();
         op(&mut app);
-        assert!(app.pending.is_some(), "preflight phase queued after the fetch");
+        assert!(
+            app.pending.is_some(),
+            "preflight phase queued after the fetch"
+        );
         assert!(app.busy.as_deref().unwrap().contains("Проверка"));
         // phase 2: preflight (Mock predicts a conflict) -> Confirm, nothing queued
         let op2 = app.pending.take().unwrap();
@@ -3808,7 +3837,10 @@ mod tests {
             "filtered-out branches are hidden"
         );
         // The footer hint must fit the box - its last token proves it isn't clipped.
-        assert!(text.contains("cancel"), "footer hint renders without clipping");
+        assert!(
+            text.contains("cancel"),
+            "footer hint renders without clipping"
+        );
     }
 
     #[test]
@@ -4121,10 +4153,14 @@ mod tests {
         let base = engine.branch_state().unwrap().current_branch.unwrap();
         run(&["checkout", "-q", "-b", "feature"]);
         std::fs::write(dir.join("f.txt"), "feature\n").unwrap();
-        engine.commit(&["f.txt".to_string()], "feat", false).unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "feat", false)
+            .unwrap();
         run(&["checkout", "-q", &base]);
         std::fs::write(dir.join("f.txt"), "base2\n").unwrap();
-        engine.commit(&["f.txt".to_string()], "base2", false).unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "base2", false)
+            .unwrap();
         run(&["checkout", "-q", "feature"]);
 
         let mut app = App::new(&engine);
@@ -4138,7 +4174,10 @@ mod tests {
         // Cancel (any non-'y' key): no rebase starts, tree stays as it was.
         app.handle_key(key(event::KeyCode::Esc));
         assert!(matches!(app.overlay, Overlay::None));
-        assert!(app.branch.rebase.is_none(), "cancel must not start a rebase");
+        assert!(
+            app.branch.rebase.is_none(),
+            "cancel must not start a rebase"
+        );
         assert!(app.pending.is_none() && app.busy.is_none());
         assert_eq!(
             std::fs::read_to_string(dir.join("f.txt")).unwrap(),
@@ -4169,11 +4208,7 @@ mod tests {
         std::fs::write(dir.join("f.txt"), "base\n").unwrap();
         std::fs::write(dir.join("y.txt"), "y0\n").unwrap();
         engine
-            .commit(
-                &["f.txt".to_string(), "y.txt".to_string()],
-                "base",
-                false,
-            )
+            .commit(&["f.txt".to_string(), "y.txt".to_string()], "base", false)
             .unwrap();
         let main = engine.branch_state().unwrap().current_branch.unwrap();
         // develop and feature change f.txt divergently -> the rebase conflicts.
@@ -4183,7 +4218,9 @@ mod tests {
         run(&["checkout", "-q", &main]);
         run(&["checkout", "-q", "-b", "feature"]);
         std::fs::write(dir.join("f.txt"), "feature version\n").unwrap();
-        engine.commit(&["f.txt".to_string()], "feat", false).unwrap();
+        engine
+            .commit(&["f.txt".to_string()], "feat", false)
+            .unwrap();
         // Back on the original branch with a dirty tracked file, so the flow stashes.
         run(&["checkout", "-q", &main]);
         std::fs::write(dir.join("y.txt"), "y-DIRTY\n").unwrap();
