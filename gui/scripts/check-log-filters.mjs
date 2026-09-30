@@ -52,13 +52,14 @@ await build({
   logLevel: "warning",
 });
 
-// `pathTree.ts` and `gitConsoleCommand.ts` share this directory, so bundling
+// `pathTree.ts`, `gitConsoleCommand.ts` and `cloneRules.ts` share this directory, so bundling
 // them together keeps a flat common base and both outputs land as flat
 // basenames the loader below can find.
 await build({
   entryPoints: [
     join(here, "..", "src", "components", "pathTree.ts"),
     join(here, "..", "src", "components", "gitConsoleCommand.ts"),
+    join(here, "..", "src", "components", "cloneRules.ts"),
   ],
   outdir: out,
   format: "esm",
@@ -136,6 +137,7 @@ const blame = await load("blameRules.js");
 const cr = await load("conflictRules.js");
 const rb = await load("rebaseRules.js");
 const bm = await load("bisectMarks.js");
+const clone = await load("cloneRules.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -854,6 +856,54 @@ for (const argv of [
     "what the strip says the search waits for",
   );
   eq([bm.customTerm("bad", "bad"), bm.customTerm("broken", "bad")], [null, "broken"], "custom terms replace the UI's words");
+}
+
+// -- Clone: the folder name proposed for an address ----------------------------
+{
+  const f = clone.folderNameFromUrl;
+  eq(
+    [
+      f("https://h/a/b.git"),
+      f("https://h/a/b"),
+      f("https://h/a/b/"),
+      f("https://h/a/b.git/"),
+      f("git@github.com:org/repo.git"),
+      f("host:repo.git"),
+      f("ssh://git@h:2222/srv/r.git"),
+      f("file:///x/y"),
+      f("/x/y/.git"),
+      f("/x/y/.git/"),
+      f("../sibling/repo.git"),
+      f("https://h/a/b.git?x=1#top"),
+      f("  https://h/a/B.GIT  "),
+      f("C:\\work\\proj"),
+    ],
+    ["b", "b", "b", "b", "repo", "repo", "r", "y", "y", "y", "repo", "b", "B", "proj"],
+    "the folder name is the address's last component, without .git or a trailing slash",
+  );
+  eq([f(""), f("https://"), f("."), f("/"), f("x/..")], ["", "", "", "", ""], "nothing usable: no name");
+  eq(
+    [clone.isPlainHttp("http://h/r"), clone.isPlainHttp(" HTTP://h/r"), clone.isPlainHttp("https://h/r")],
+    [true, true, false],
+    "plain http is told apart",
+  );
+  eq(
+    [
+      clone.httpLogin("https://me@bitbucket.org/t/r.git"),
+      clone.httpLogin("HTTP://org@dev.azure.com/o/p/_git/r"),
+      clone.httpLogin("https://u:p@h/r"),
+      clone.httpLogin("https://h/r"),
+      clone.httpLogin("ssh://git@h/r"),
+      clone.httpLogin("https://h/@scope/pkg"),
+    ],
+    ["me", "org", null, null, null, null],
+    "a plain http(s) login is told apart; a password or no user is not one",
+  );
+  eq(
+    [clone.joinDest("/Users/me/src/", "r"), clone.joinDest("/", "r"), clone.joinDest("", "r")],
+    ["/Users/me/src/r", "/r", "r"],
+    "the destination shown",
+  );
 }
 
 await rm(out, { recursive: true, force: true });

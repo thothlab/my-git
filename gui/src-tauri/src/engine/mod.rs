@@ -14,6 +14,7 @@ pub mod log;
 pub mod ops;
 pub mod patch;
 pub mod rebase;
+pub mod remotes;
 pub mod undo;
 
 /// Abstraction over the git backend.

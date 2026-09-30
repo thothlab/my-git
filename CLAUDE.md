@@ -26,9 +26,9 @@
 | `cd gui && npm run tauri dev` | Запустить Graft локально (нужен дисплей) |
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
-| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, разбор и печать команды консоли), 309 утверждений |
-| `cargo test` | Оба крейта разом: 332 теста GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 332 теста |
+| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `cloneRules`, разбор и печать команды консоли), 314 утверждений |
+| `cargo test` | Оба крейта разом: 347 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 347 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -77,6 +77,8 @@ gui/src-tauri/src/  бэк GUI
   engine/patch.rs   патч по выбранным строкам диффа (чистый, без git) + единая нумерация строк хунков
   engine/rebase.rs  интерактивный rebase по утверждённому плану, reword, squash; файлы плана
                     в каталоге данных приложения
+  engine/remotes.rs remotes (список, add / rename / remove / set-url) и clone с потоковым
+                    прогрессом и отменой; правило допустимого адреса (`check_url`)
   engine/undo.rs    Undo / Redo своих действий: снимок + отпечаток до и после каждой мутации,
                     цепочка шагов на репозиторий (память + каталог данных приложения)
 gui/src/            фронт
@@ -89,7 +91,10 @@ gui/src/            фронт
   components/       Changes-режим (ChangesView, DiffView, CommitPanel, Toolbar, ...);
                     DiscardPanel — runDiscard, уведомление «Откатано N · Вернуть», диалог копий;
                     FileHistoryPanel — оверлей «История файла» (список коммитов + DiffView)
-                    UndoButtons — Undo/Redo в тулбаре и Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z
+                    UndoButtons — Undo/Redo в тулбаре и Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z;
+                    RemotesPanel — диалог «Remotes…» (список + форма add / rename / адрес);
+                    CloneDialog — «Клонировать…»; cloneRules.ts — имя папки из адреса и
+                    прочие чистые правила диалога, без единого импорта
   components/blame/ BlamePanel — оверлей blame (строки + коммит строки + DiffView, стек
                     «blame до изменения»); blameRules.ts — чистые правила, без единого импорта
   components/conflicts/ ConflictPanel — оверлей редактора конфликта (блоки ours · base ·
@@ -151,7 +156,13 @@ Git вызывается только как внешний процесс. `gix
   `QUIET_STREAM_CAP = 16 KiB` у успешных фоновых), `as_user(action, || …)` и
   `mask_credentials`. `as_user` ведёт ещё и `OWN_ACTIONS: Activity` — счётчик действий на
   весь процесс и время конца последнего (`within(grace)`): thread-local `ACTION` отвечает
-  только своему потоку, а наблюдатель за git-dir живёт на своём.
+  только своему потоку, а наблюдатель за git-dir живёт на своём. `as_user_elsewhere` —
+  действие пользователя **не над открытым репозиторием** (clone): в «Мои» журнала попадает,
+  в `OWN_ACTIONS` — нет. `Git::stream(cancel, on_segment) -> Streamed { output, cancelled }`
+  — долгий процесс с прогрессом: stdin `/dev/null`, stdout дренируется своим потоком, stderr
+  отдаётся сегментами по `\n` **и** `\r` (маскированными) на вызывающем потоке, `cancel`
+  опрашивается, процесс убивается; после отмены потоки-читатели не ждутся (stderr держат
+  унаследовавшие его помощники git). Запись в журнал — одна, в конце.
 - `engine::cli` — рабочее дерево, стейджинг, diff файла, коммит, базовые операции с ветками,
   push/fetch/pull. Плюс чтение и запись текстового файла рабочего дерева:
   `read_text_file(rel) -> TextFile`, `write_text_file(rel, text, eol, expect) -> новый
@@ -204,6 +215,25 @@ Git вызывается только как внешний процесс. `gix
   сравнивается с первым родителем; корневой коммит читается через `diff-tree --root`.
 - `engine::branches` — `tree`, `rename`, `delete`, `merge`, `rebase_onto`, `unmerged_count`,
   `update_from_upstream`, константа `DETACHED_REF = "HEAD"`.
+- `engine::remotes` — `check_url` (чистое правило адреса: https / http / ssh / git / file,
+  scp-синтаксис `[user@]host:path`, локальный путь как `/abs`, `./rel`, `../rel`; **отказ**
+  `Error::Rule` с отсылкой к credential helper на пароль в адресе, на имя пользователя,
+  похожее на токен (`exec::looks_like_token`), и на query/fragment у http(s); отказ на
+  `<transport>::` (`ext::`, `fd::`, remote helpers) и на прочее «угадай, что это путь».
+  Обычный логин (`https://me@bitbucket.org/…` — так его дают Bitbucket и Azure DevOps)
+  принимается, диалог предупреждает, что пароль спросит credential helper), `check_remote_name` (`check-ref-format
+  refs/remotes/<имя>/x`, трёхзначный код, плюс ведущий `-` — `git remote add -- -x` его
+  принимает), `list -> Vec<RemoteInfo>` (имена из `git remote`, адреса из `config --null
+  --get-regexp`; имя remote может содержать точку — ключ режется по префиксу и суффиксу;
+  адрес с секретом отдаётся маскированным и с `has_credentials`; `branches` — сколько
+  удалённых веток удалит `remove`), `add`, `rename`, `remove`, `set_url(name, url, push)`
+  (пустой push-адрес — `config --unset-all remote.<имя>.pushurl`), `check_folder_name`,
+  `clone(parent, name, url, cancel, on_line) -> Option<PathBuf>` (`None` — отменён).
+  Назначение `<канонизированный parent>/<name>` — отсутствует или пустой каталог (симлинк —
+  отказ); после отказа или отмены возвращается как было: созданный — удаляется, бывший
+  пустым — опустошается. Окружение клона: `GIT_TERMINAL_PROMPT=0`, без `GIT_ASKPASS` /
+  `SSH_ASKPASS`, `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` — только если нет своего
+  (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`). Обоснование — докблок модуля.
 - `engine::ops` — `detect_state`, `detect_kind`, `revert`, `reset`, `cherry_pick`, `checkout_rev`,
   `tag_create`, `op_continue`, `op_abort`, `op_skip`, `stash_list_app`, `stash_restore`,
   `stash_list`, `stash_apply`, `stash_pop`, `stash_drop`, `stash_files`, `stash_push`,
@@ -289,7 +319,10 @@ Git вызывается только как внешний процесс. `gix
   цепочки с `UndoReasonCode` (push, pull, fetch с новыми тегами, rebase/squash/reword старого,
   консоль, незавершённая операция, упавшее действие, bisect — свой код `bisect` для
   `op_bisect_*` и для любого действия, до или после которого шёл bisect; проверяется раньше
-  общего `operation`). Undo и Redo выполняются, только если
+  общего `operation`; `remote_rename` / `remote_remove` — код `remotes`, `remote_add` /
+  `remote_set_url` — «ничего», и обе ветки стоят **до** сравнения отпечатков: конфиг и
+  `refs/remotes/` отпечаток не читает, а заголовок `# branch.upstream` — читает, и без этого
+  вердикт зависел бы от того, отслеживает ли текущая ветка этот remote). Undo и Redo выполняются, только если
   текущий отпечаток равен ожидаемому, и только для шага с тем `id`, что показали клиенту.
   Два действия разом над одним репозиторием — второе не записывается, цепочка рвётся
   (`concurrent`). Своего «второго механизма» отката файлов нет: Undo отката — это копия
@@ -315,7 +348,8 @@ Git вызывается только как внешний процесс. `gix
 - **git запускается только через `engine::exec`.** `Command::new("git")` вне `exec.rs`
   допустим лишь в тестовом коде. Своя обёртка в модуле — тонкий вызов `exec::git(...)`,
   сохраняющий свою семантику ошибок; env (`GIT_EDITOR` и прочее) задаётся на месте вызова и
-  не унифицируется: `exec_raw` консоли убирает ASKPASS, а push/pull движка — нет.
+  не унифицируется: `exec_raw` консоли и `remotes::clone` убирают ASKPASS и ставят
+  `GIT_TERMINAL_PROMPT=0`, а push/fetch/pull движка — нет.
 - **Происхождение записи журнала объявляется, а не угадывается.** Команда Tauri, которая
   меняет репозиторий по воле пользователя, оборачивает вызов движка в
   `undoable(&state, "<имя команды>", hint, || …)` — тот зовёт `exec::as_user` с тем же
@@ -328,7 +362,12 @@ Git вызывается только как внешний процесс. `gix
   `check-ref-format`, `detect_state`) попадают в «Мои» вместе с ней — это сознательно.
 - **Учётные данные в URL маскируются на выходе, а не в движке**: `Display` / `Serialize`
   у `Error` и запись в журнал прогоняют текст через `mask_credentials`
-  (`https://user:token@host` → `https://***@host`). Поля `Error::Git` и возвращаемые движком
+  (`https://user:token@host` → `https://***@host`). Маскируется userinfo с паролем и имя,
+  похожее на токен (`looks_like_token`: префиксы `ghp_`, `gho_`, `ghu_`, `ghs_`,
+  `github_pat_`, `glpat-`, `x-access-token`, `oauth2`, `x-token-auth` или ≥ 32 символов
+  `[A-Za-z0-9_-]`); обычный логин (`ssh://git@host`, `https://me@bitbucket.org`) — не
+  секрет и остаётся. Эта же функция решает отказ в `remotes::check_url` — правила
+  маскировки и отказа не расходятся. Поля `Error::Git` и возвращаемые движком
   значения остаются дословными — разбор remote'ов и тем коммитов маскировка сломала бы.
 - `Error::Git` несёт `journal: Option<u64>` — id записи упавшего запуска; клиент получает его
   как `journalId` и даёт в баннере «Показать вывод».
@@ -414,7 +453,14 @@ Git вызывается только как внешний процесс. `gix
 
 - **Мутация возвращает целиком `RepoState`.** Отдельной команды опроса незавершённой
   операции нет: `RepoState.operation` — единственный источник правды о ней. Почта
-  пользователя — `RepoState.userEmail`. Единственное исключение — `file_write`: см. ниже.
+  пользователя — `RepoState.userEmail`. Исключений два — `file_write` (см. ниже) и
+  `repo_clone`: клон не меняет открытый репозиторий и не требует его, возвращает путь
+  нового (`null` — отменён), идёт мимо `undoable` и `run()`; фронт открывает результат
+  через `openRepoAt`, как «Открыть…». Прогресс — событие `repo-clone-progress`
+  (`CloneProgress { line }`, строки прорежены до одной в 80 мс, последняя доезжает всегда),
+  отмена — `repo_clone_cancel`; клон один на процесс, второй — `Error::Rule`. Remotes:
+  `remote_list -> RemoteInfo[]` (read-only), `remote_add`, `remote_rename`, `remote_remove`,
+  `remote_set_url(name, url, push)` — обычные мутации через `undoable` → `RepoState`.
   Мутация, которой есть что сказать сверх состояния, возвращает `{ state, … }` и идёт через
   `runWithOutput`: `git_exec` (`GitExecResult`) и откаты — `file_rollback`, `list_rollback`,
   `lines_revert`, `discard_restore` возвращают `DiscardOutcome { state, backup }`, где
@@ -444,8 +490,9 @@ Git вызывается только как внешний процесс. `gix
   `from..to` / `exact`: куда строка легла. `exact: false` — строку внёс коммит, подсвечено
   то, что она заменила, или строка, после которой её вставили.
 - `file_read(path) -> TextFile` — read-only, через `createResource` + `refetch`.
-  `file_write(path, text, eol, expect) -> FileWritten` — **единственная мутация проекта, не
-  возвращающая `RepoState` и не идущая через `run()`**: она срабатывает на каждой паузе в
+  `file_write(path, text, eol, expect) -> FileWritten` — **единственная мутация открытого
+  репозитория, не возвращающая `RepoState` и не идущая через `run()`** (`repo_clone` открытый
+  репозиторий не меняет вовсе, см. выше): она срабатывает на каждой паузе в
   наборе, а публикация глобального состояния так часто мигала бы busy в тулбаре и
   переразмечала панель под кареткой. Отказ всё равно доезжает в общий баннер через
   `setError`.
@@ -470,7 +517,7 @@ Git вызывается только как внешний процесс. `gix
   `ConflictEntry[]` (`{ path, kind }`), а не строки: вид конфликта (`UU`, `DU`, …) едет с
   тем же `ls-files -u`, и второй команды за ним нет. Конфликт без операции (`stash pop`)
   виден только в Changes — туда же пункт «Разрешить конфликт…».
-- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`, `op_bisect_start`, `op_bisect_mark`, `op_bisect_reset`), `ui_state_*`, `journal_*`, `undo_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_history`, `file_blame`, `file_blame_before`). Имя `commit_list`
+- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`, `op_bisect_start`, `op_bisect_mark`, `op_bisect_reset`), `ui_state_*`, `journal_*`, `undo_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_history`, `file_blame`, `file_blame_before`), `remote_*`, `repo_*` (`repo_open`, `repo_state`, `repo_local_changes`, `repo_clone`, `repo_clone_cancel`). Имя `commit_list`
   занято операцией «закоммитить changelist» и переиспользовано быть не может.
 - Полный список зарегистрированных команд — `invoke_handler` в `gui/src-tauri/src/lib.rs`;
   он же роспись того, что вообще доступно фронту.
@@ -533,7 +580,9 @@ Git вызывается только как внешний процесс. `gix
   руки (диалог должен остаться открытым) — `runResult()` из `actions/repoRefresh.ts`.
   После изменения ссылок или истории — `afterRepoChange()`: `run()` сам по себе не обновляет
   ни дерево веток (его ресурс ключом на путь репозитория), ни страницы лога.
-  Единственный обход воронки — `fileWrite` из `editState.ts` (причина выше, в границе Tauri);
+  Единственный обход воронки — `fileWrite` из `editState.ts` (причина выше, в границе Tauri).
+  `repoClone` из `CloneDialog.tsx` мимо `run()` тоже, но он не мутация открытого репозитория:
+  ошибка остаётся в диалоге рядом с введённым, успех открывается через `openRepoAt`;
   правило «компонент не пишет своего `try/catch`» при этом держится: слой действий здесь —
   сам `editState.ts`, и ловит он. Второй вызывающий того же `fileWrite` — «Сохранить» в
   редакторе конфликта (запись файла не трогает ни индекс, ни ссылки); «Отметить
@@ -550,7 +599,10 @@ Git вызывается только как внешний процесс. `gix
 - **Промис-модалки.** `confirmAction`, `promptText`, `chooseOption` из `store.ts` и
   `openDialog(spec)` из `actions/dialogs.tsx` (форма, которая остаётся открытой при ошибке
   валидации). Нативные `alert` / `confirm` / `prompt` в WebView Tauri не делают ничего и
-  вешают вызывающего навсегда.
+  вешают вызывающего навсегда. **`ActionDialogHost` смонтирован только в панелях режима Log**
+  (`BranchTree`, `LogTable`): `openDialog` из диалога, доступного и в Changes (меню
+  репозитория), не нарисуется нигде и оставит `modalOpen()` истинным — такие формы живут
+  внутри своего диалога (`RemotesPanel`).
 - **«Модалка открыта» — один флаг на приложение**: `store.modalOpen()`. Свой источник
   регистрируется через `registerModalSource(isOpen)`. Второй приватный флаг означает, что
   стрелки продолжают двигать список за невидимым диалогом.
@@ -603,7 +655,7 @@ Git вызывается только как внешний процесс. `gix
 - `localStorage` — всё, что про окно и не про репозиторий: `viewMode`, `theme`, `fontSize`,
   `locale`, `lastRepo`, `recentRepos`, `showIgnored`, `groupByDir`, `leftPanelWidth`, `logTreeWidth`,
   `logSplitRatio`, `logDetailsWidth`, `diffSplitRatio`, `diffWhitespace`, `diffHighlight`,
-  `logOrder`, `logDimNonMatching`, `branchMenuOptions` (как показывать выпадающий список
+  `logOrder`, `logDimNonMatching`, `cloneParent` (последняя папка, куда клонировали), `branchMenuOptions` (как показывать выпадающий список
   веток), `recentBranches` (недавние ветки по репозиториям).
 - Память процесса Rust: `AppState` — корень открытого репозитория, флаг «показывать
   игнорируемые» и наблюдатель за git-dir (`watcher`, пересоздаётся в `repo_open` при смене
@@ -979,6 +1031,17 @@ Git вызывается только как внешний процесс. `gix
   редактор файла (`UndoButtons.tsx`, `createEffect` вокруг `registerHotkey`): в поле ввода
   и в редакторе это undo текста. Редактор конфликта — модалка со своим `onKeyDown`, под ней
   `hotkeys.ts` молчит.
+- Клон идёт минутами, и обычный `as_user` на это время объявил бы «своими» все изменения
+  git-dir **открытого** репозитория: наблюдатель молчал бы о коммитах из терминала, пока
+  идёт клон. Отсюда `exec::as_user_elsewhere` — журнал «Мои» без `OWN_ACTIONS`.
+- `Child::kill` клона убивает только `git`: `index-pack`, `ssh`, `git-remote-https` живут, пока
+  не порвутся их трубы, и держат унаследованный stderr — ждать потоки-читатели после отмены
+  значит ждать помощника, висящего на сети. Своя уборка каталога git при SIGKILL не
+  срабатывает, её делает `remotes::cleanup` (с повтором: помощник может дописывать ещё
+  мгновение). Тест отмены — только через `file://` с `-u 'sleep …; git-upload-pack'`:
+  локальный путь клонируется в обход upload-pack, и `-u` там ничего не замедляет.
+- `git remote add` сам отказывает в имени, вложенном в существующее (`origin/sub` при
+  `origin`), и принимает имя с ведущим `-` после `--` — второе режет `check_remote_name`.
 
 ## Инициативы и PRD
 

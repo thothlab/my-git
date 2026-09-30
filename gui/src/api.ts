@@ -261,6 +261,44 @@ export interface GitExecResult {
 }
 export const gitExec = (args: string[]) => invoke<GitExecResult>("git_exec", { args });
 
+// ── Remotes and clone (engine/remotes.rs) ────────────────────────────────────
+
+/** One configured remote. URLs carrying a password or token come masked
+ *  (`https://***@host/…`) and set `hasCredentials`; `pushUrls` empty means pushes
+ *  go to `fetchUrls`. `branches` is how many remote-tracking branches removing it
+ *  deletes. */
+export interface RemoteInfo {
+  name: string;
+  fetchUrls: string[];
+  pushUrls: string[];
+  hasCredentials: boolean;
+  branches: number;
+}
+export const remoteList = () => invoke<RemoteInfo[]>("remote_list");
+export const remoteAdd = (name: string, url: string) =>
+  invoke<RepoState>("remote_add", { name, url });
+export const remoteRename = (from: string, to: string) =>
+  invoke<RepoState>("remote_rename", { from, to });
+export const remoteRemove = (name: string) => invoke<RepoState>("remote_remove", { name });
+/** `push` picks the push address; an empty push `url` removes the separate one. */
+export const remoteSetUrl = (name: string, url: string, push: boolean) =>
+  invoke<RepoState>("remote_set_url", { name, url, push });
+
+/** Clone into `<parent>/<name>`: the new repository's path, or null when it was
+ *  cancelled with `repoCloneCancel`. Not a mutation of the open repository — the
+ *  caller opens the result the way "Open" does. */
+export const repoClone = (url: string, parent: string, name: string) =>
+  invoke<string | null>("repo_clone", { url, parent, name });
+export const repoCloneCancel = () => invoke<void>("repo_clone_cancel");
+
+/** Payload of `repo-clone-progress`: one line of `git clone --progress`, masked. */
+export interface CloneProgress {
+  line: string;
+}
+/** Not a command: `repo_clone` pushes this while it runs. */
+export const onCloneProgress = (cb: (e: CloneProgress) => void): Promise<UnlistenFn> =>
+  listen<CloneProgress>("repo-clone-progress", (e) => cb(e.payload));
+
 // ── Command journal (engine/exec.rs) ─────────────────────────────────────────
 
 /** A person's action, or the application reading state for itself. */
@@ -328,7 +366,8 @@ export type UndoReasonCode =
   | "no-earlier"
   | "no-next"
   | "inverse-failed"
-  | "bisect";
+  | "bisect"
+  | "remotes";
 
 export interface UndoReason {
   code: UndoReasonCode;

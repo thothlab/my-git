@@ -31,7 +31,7 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -91,6 +91,24 @@ pub fn as_user<T>(action: &'static str, f: impl FnOnce() -> T) -> T {
         }
     }
     OWN_ACTIONS.enter();
+    let _restore = Restore(ACTION.with(|a| a.replace(Some(action))));
+    f()
+}
+
+/// Run `f` as a user action on a repository **other than the open one** — a clone:
+/// journaled with origin `user`, but not counted in [`OWN_ACTIONS`].
+///
+/// That counter answers one question, "is this git-dir change Graft's own doing",
+/// for the watcher of the open repository. A clone writes nowhere near it and may
+/// run for minutes; counted, it would silence every commit a terminal made in the
+/// open repository for as long as it ran.
+pub fn as_user_elsewhere<T>(action: &'static str, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<&'static str>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ACTION.with(|a| a.set(self.0));
+        }
+    }
     let _restore = Restore(ACTION.with(|a| a.replace(Some(action))));
     f()
 }
@@ -191,52 +209,16 @@ impl<'a> Git<'a> {
     /// error here — only a failure to spawn git (or to feed its stdin) is, as
     /// `Error::Io`, exactly as `?` on the `io::Error` made it before.
     pub(crate) fn run(self) -> Result<Output> {
-        let started_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let clock = Instant::now();
-        let action = ACTION.with(|a| a.get());
-
-        let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(self.dir).args(&self.args);
-        for (k, v) in self.env {
-            cmd.env(k, v);
-        }
-        for k in self.env_remove {
-            cmd.env_remove(k);
-        }
+        let started = Started::now();
+        let mut cmd = self.command();
         let result = match self.input {
             None => cmd.output(),
             Some(bytes) => feed(cmd, bytes),
         };
-
-        // Clipping and masking up to half a megabyte happens before the lock: the
-        // journal mutex is shared by every git run, reads running in parallel included.
-        let record = |stdout: &[u8], stderr: &[u8], code: Option<i32>| {
-            let cap = stream_cap(action.is_some(), code);
-            let rec = Recorded {
-                repo: self.dir.display().to_string(),
-                argv: self
-                    .args
-                    .iter()
-                    .map(|a| mask_credentials(a).into_owned())
-                    .collect(),
-                started_at,
-                duration_ms: clock.elapsed().as_millis() as u64,
-                exit_code: code,
-                action,
-                cap,
-                stdout: clip(stdout, cap),
-                stderr: clip(stderr, cap),
-            };
-            JOURNAL.lock().map_or(0, |mut j| j.push(rec))
-        };
-
         match result {
             Ok(out) => {
                 let code = out.status.code();
-                let journal = record(&out.stdout, &out.stderr, code);
+                let journal = self.record(&started, &out.stdout, &out.stderr, code);
                 Ok(Output {
                     command: self.args.join(" "),
                     stdout: out.stdout,
@@ -245,13 +227,226 @@ impl<'a> Git<'a> {
                     journal,
                 })
             }
-            Err(e) => {
-                let text = format!("could not run git: {e}");
-                record(b"", text.as_bytes(), None);
-                Err(Error::Io(e.to_string()))
-            }
+            Err(e) => Err(self.spawn_failed(&started, e)),
         }
     }
+
+    /// Start the process and hand its stderr to `on_segment` **while it runs**, one
+    /// segment at a time — split on `\n` and on `\r`, because git's progress meters
+    /// (`Receiving objects:  45% (…)\r`) redraw one line with carriage returns and
+    /// would otherwise arrive only when the phase is over. Segments are masked
+    /// ([`mask_credentials`]) and empty ones skipped. `on_segment` runs on the
+    /// calling thread.
+    ///
+    /// `cancel` is polled; once it is set the process is killed and waited for, and
+    /// the result says `cancelled`. The kill is git's pid only: helpers it started
+    /// (`index-pack`, `ssh`, `git-remote-https`) end on their own once the pipes to
+    /// it break, and they hold the inherited stderr until then — so on a
+    /// cancellation the reader threads are **not** joined: waiting for them would
+    /// wait for a helper blocked on the network. The output collected so far is
+    /// what the journal gets.
+    ///
+    /// stdin is `/dev/null`. The journal entry is written once, at the end, like
+    /// any other run's.
+    pub(crate) fn stream(
+        self,
+        cancel: &AtomicBool,
+        mut on_segment: impl FnMut(&str),
+    ) -> Result<Streamed> {
+        use std::io::Read;
+        use std::sync::mpsc;
+        use std::sync::Arc;
+
+        let started = Started::now();
+        let mut cmd = self.command();
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => return Err(self.spawn_failed(&started, e)),
+        };
+
+        let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+
+        // stdout is drained on its own thread so a full pipe can never stall git.
+        let out_reader = child.stdout.take().map(|mut out| {
+            let buf = Arc::clone(&stdout_buf);
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; 8192];
+                while let Ok(n) = out.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    if let Ok(mut b) = buf.lock() {
+                        b.extend_from_slice(&chunk[..n]);
+                    }
+                }
+            })
+        });
+        let err_reader = child.stderr.take().map(|mut err| {
+            let buf = Arc::clone(&stderr_buf);
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; 8192];
+                let mut line = Vec::new();
+                while let Ok(n) = err.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    if let Ok(mut b) = buf.lock() {
+                        b.extend_from_slice(&chunk[..n]);
+                    }
+                    for &c in &chunk[..n] {
+                        if c == b'\n' || c == b'\r' {
+                            if !line.is_empty() {
+                                let _ = tx.send(std::mem::take(&mut line));
+                            }
+                        } else {
+                            line.push(c);
+                        }
+                    }
+                }
+                if !line.is_empty() {
+                    let _ = tx.send(line);
+                }
+            })
+        });
+
+        let deliver = |seg: Vec<u8>, on_segment: &mut dyn FnMut(&str)| {
+            let text = String::from_utf8_lossy(&seg);
+            let text = text.trim();
+            if !text.is_empty() {
+                on_segment(&mask_credentials(text));
+            }
+        };
+
+        let poll = std::time::Duration::from_millis(50);
+        let mut cancelled = false;
+        let status = loop {
+            while let Ok(seg) = rx.try_recv() {
+                deliver(seg, &mut on_segment);
+            }
+            // Exit first: a process that finished before the flag was seen finished.
+            match child.try_wait() {
+                Ok(Some(s)) => break Ok(s),
+                Ok(None) => {}
+                Err(e) => break Err(e),
+            }
+            if cancel.load(Ordering::SeqCst) {
+                let _ = child.kill();
+                cancelled = true;
+                break child.wait();
+            }
+            if let Ok(seg) = rx.recv_timeout(poll) {
+                deliver(seg, &mut on_segment);
+            }
+        };
+        if !cancelled {
+            // The process is gone; its pipes close with it (and with any helper).
+            if let Some(h) = err_reader {
+                let _ = h.join();
+            }
+            if let Some(h) = out_reader {
+                let _ = h.join();
+            }
+            while let Ok(seg) = rx.try_recv() {
+                deliver(seg, &mut on_segment);
+            }
+        }
+        let code = match &status {
+            Ok(s) if !cancelled => s.code(),
+            _ => None,
+        };
+        let stdout = stdout_buf.lock().map(|b| b.clone()).unwrap_or_default();
+        let mut stderr = stderr_buf.lock().map(|b| b.clone()).unwrap_or_default();
+        if cancelled {
+            stderr.extend_from_slice(b"\n[cancelled: the process was killed]\n");
+        }
+        let journal = self.record(&started, &stdout, &stderr, code);
+        if let Err(e) = status {
+            return Err(Error::Io(e.to_string()));
+        }
+        Ok(Streamed {
+            output: Output {
+                command: self.args.join(" "),
+                stdout,
+                stderr,
+                code,
+                journal,
+            },
+            cancelled,
+        })
+    }
+
+    fn command(&self) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(self.dir).args(&self.args);
+        for (k, v) in self.env {
+            cmd.env(k, v);
+        }
+        for k in self.env_remove {
+            cmd.env_remove(k);
+        }
+        cmd
+    }
+
+    fn spawn_failed(&self, started: &Started, e: std::io::Error) -> Error {
+        let text = format!("could not run git: {e}");
+        self.record(started, b"", text.as_bytes(), None);
+        Error::Io(e.to_string())
+    }
+
+    /// Journal this run. Clipping and masking up to half a megabyte happens before
+    /// the lock: the journal mutex is shared by every git run, reads running in
+    /// parallel included.
+    fn record(&self, started: &Started, stdout: &[u8], stderr: &[u8], code: Option<i32>) -> u64 {
+        let cap = stream_cap(started.action.is_some(), code);
+        let rec = Recorded {
+            repo: self.dir.display().to_string(),
+            argv: self
+                .args
+                .iter()
+                .map(|a| mask_credentials(a).into_owned())
+                .collect(),
+            started_at: started.at,
+            duration_ms: started.clock.elapsed().as_millis() as u64,
+            exit_code: code,
+            action: started.action,
+            cap,
+            stdout: clip(stdout, cap),
+            stderr: clip(stderr, cap),
+        };
+        JOURNAL.lock().map_or(0, |mut j| j.push(rec))
+    }
+}
+
+/// When and as what a run started — read before the process is spawned.
+struct Started {
+    at: u64,
+    clock: Instant,
+    action: Option<&'static str>,
+}
+
+impl Started {
+    fn now() -> Self {
+        Started {
+            at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            clock: Instant::now(),
+            action: ACTION.with(|a| a.get()),
+        }
+    }
+}
+
+/// What [`Git::stream`] produced: the run's output, and whether it ended because it
+/// was cancelled (then `code` is `None` and the output is what arrived before).
+pub(crate) struct Streamed {
+    pub output: Output,
+    pub cancelled: bool,
 }
 
 /// Spawn with piped stdio, write `input`, close stdin, collect. Writes everything
@@ -354,12 +549,15 @@ pub(crate) fn both_streams(stdout: &[u8], stderr: &[u8]) -> String {
 
 // ── credentials ──────────────────────────────────────────────────────────────
 
-/// Replace the userinfo of every `scheme://user:secret@host` URL in `s` with `***`.
+/// Replace the secret userinfo of every `scheme://user:secret@host` URL in `s` with `***`.
 ///
 /// git echoes remote URLs verbatim — in `remote -v`, in `fatal: unable to access
 /// 'https://user:token@host/…'`, in the argv of a `push <url>` — and both the journal
-/// and the error banner would otherwise put a token on screen. A user-only userinfo
-/// is masked too: `https://ghp_xxx@github.com` is how a token is most often embedded.
+/// and the error banner would otherwise put a token on screen. Masked: a userinfo with
+/// a password (`user:secret`), and a user-only one that [`looks_like_token`]
+/// (`https://ghp_xxx@github.com` is how a token is most often embedded). A plain user
+/// name is not a secret and stays: `ssh://git@host`, the `https://me@bitbucket.org`
+/// Bitbucket and Azure DevOps hand out.
 ///
 /// The userinfo ends at the **last** `@` of the authority (a raw `@` inside a
 /// password is common and invalid-but-accepted), and the authority ends at the first
@@ -385,7 +583,7 @@ pub fn mask_credentials(s: &str) -> Cow<'_, str> {
             .unwrap_or(after.len());
         out.push_str(&rest[..auth_start]);
         match after[..end].rfind('@') {
-            Some(at) if scheme_ok && at > 0 => {
+            Some(at) if scheme_ok && at > 0 && secret_userinfo(&after[..at]) => {
                 out.push_str("***");
                 rest = &after[at..];
             }
@@ -394,6 +592,40 @@ pub fn mask_credentials(s: &str) -> Cow<'_, str> {
     }
     out.push_str(rest);
     Cow::Owned(out)
+}
+
+/// A userinfo worth hiding: it has a password, or its user name is a token.
+fn secret_userinfo(userinfo: &str) -> bool {
+    userinfo.contains(':') || looks_like_token(userinfo)
+}
+
+/// Prefixes of token-shaped user names: GitHub (`ghp_`, `gho_`, `ghu_`, `ghs_`,
+/// `github_pat_`), GitLab (`glpat-`), and the placeholder names services pair with a
+/// token (`x-access-token`, `oauth2`, `x-token-auth`).
+const TOKEN_PREFIXES: &[&str] = &[
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_",
+    "glpat-",
+    "x-access-token",
+    "oauth2",
+    "x-token-auth",
+];
+
+/// Is this user name (the part of a URL before `@`, without a password) a token
+/// rather than a login? A known token prefix (case-insensitive), or a run of at
+/// least 32 characters of `[A-Za-z0-9_-]` — no person's login looks like that.
+/// Heuristic by design: the rule `engine::remotes::check_url` refuses by and the
+/// rule the journal masks by are this one function, so they cannot disagree.
+pub fn looks_like_token(user: &str) -> bool {
+    let lower = user.to_ascii_lowercase();
+    TOKEN_PREFIXES.iter().any(|p| lower.starts_with(p))
+        || (user.len() >= 32
+            && user
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
 }
 
 // ── journal ──────────────────────────────────────────────────────────────────
@@ -742,7 +974,22 @@ mod tests {
                 "raw at https://user:p@ss@host/r",
                 "raw at https://***@host/r",
             ),
-            ("ssh://git@host:22/r.git", "ssh://***@host:22/r.git"),
+            (
+                "https://github_pat_11AB@github.com/o/r",
+                "https://***@github.com/o/r",
+            ),
+            (
+                "https://glpat-xyz@gitlab.com/o/r",
+                "https://***@gitlab.com/o/r",
+            ),
+            (
+                "https://x-access-token@github.com/o/r",
+                "https://***@github.com/o/r",
+            ),
+            (
+                "https://abcdefghijklmnopqrstuvwxyz012345@h/r",
+                "https://***@h/r",
+            ),
         ];
         for (input, want) in cases {
             assert_eq!(mask_credentials(input), want, "input: {input}");
@@ -756,6 +1003,10 @@ mod tests {
             "git@github.com:org/repo.git",
             "https://host/@scope/pkg",
             "https://host/path?x=a@b",
+            "ssh://git@host:22/r.git",
+            "https://me@bitbucket.org/team/r.git",
+            "https://org@dev.azure.com/org/p/_git/r",
+            "https://abcdefghijklmnopqrstuvwxyz01234@h/r",
             "see ://weird@thing",
             "plain text",
         ] {

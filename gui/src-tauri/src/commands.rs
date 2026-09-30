@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Emitter, State};
 
@@ -11,11 +11,11 @@ use crate::error::{Error, Result};
 use crate::engine::exec::{self, mask_credentials};
 use crate::engine::{
     bisect, blame as blame_engine, branches, commit as commit_engine, conflict as conflict_engine, discard, file_history as file_history_engine, log as log_engine, ops,
-    rebase,
+    rebase, remotes,
     undo::{self, Hint},
 };
 use crate::model::{
-    Blame, BlameBefore, BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, ConflictFile, DiscardEntry,
+    Blame, BlameBefore, BranchInfo, CloneProgress, RemoteInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, ConflictFile, DiscardEntry,
     DiscardKind, DiscardOutcome, Eol, FileDiff, FileHistoryCursor, FileHistoryPage, HunkPick,
     LinePick,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
@@ -43,6 +43,9 @@ pub struct AppState {
     /// The undo journal (`engine::undo`): every mutation below is recorded in it
     /// through [`undoable`].
     pub undo: undo::Undo,
+    /// The cancel flag of the clone running now, if one is (`repo_clone`). One clone
+    /// at a time: a second is refused rather than racing the first for the window.
+    pub clone_cancel: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl AppState {
@@ -548,6 +551,119 @@ pub async fn git_exec(state: State<'_, AppState>, args: Vec<String>) -> Result<G
 pub async fn pull(state: State<'_, AppState>) -> Result<RepoState> {
     undoable(&state, "pull", Hint::none(), || CliEngine::new(state.repo_path()?).pull())?;
     build_state(&state)
+}
+
+// ── remotes and clone (engine::remotes) ──────────────────────────────────────
+
+/// Every remote of the open repository with its addresses (masked where they carry
+/// credentials) and its number of remote-tracking branches. Read-only.
+#[tauri::command]
+pub async fn remote_list(state: State<'_, AppState>) -> Result<Vec<RemoteInfo>> {
+    remotes::list(&state.repo_path()?)
+}
+
+#[tauri::command]
+pub async fn remote_add(
+    state: State<'_, AppState>,
+    name: String,
+    url: String,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    undoable(&state, "remote_add", Hint::args([name.as_str()]), || {
+        remotes::add(&repo, &name, &url)
+    })?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn remote_rename(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    undoable(&state, "remote_rename", Hint::args([from.as_str(), to.as_str()]), || {
+        remotes::rename(&repo, &from, &to)
+    })?;
+    build_state(&state)
+}
+
+/// Remove a remote — its remote-tracking branches go with it.
+#[tauri::command]
+pub async fn remote_remove(state: State<'_, AppState>, name: String) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    undoable(&state, "remote_remove", Hint::args([name.as_str()]), || {
+        remotes::remove(&repo, &name)
+    })?;
+    build_state(&state)
+}
+
+/// Change the fetch address (`push` false) or the push address (`push` true) of a
+/// remote; an empty push address removes the separate one.
+#[tauri::command]
+pub async fn remote_set_url(
+    state: State<'_, AppState>,
+    name: String,
+    url: String,
+    push: bool,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    undoable(&state, "remote_set_url", Hint::args([name.as_str()]), || {
+        remotes::set_url(&repo, &name, &url, push)
+    })?;
+    build_state(&state)
+}
+
+/// Clone `url` into `<parent>/<name>`, streaming progress as `repo-clone-progress`
+/// events. Returns the new repository's path, or `null` when cancelled
+/// (`repo_clone_cancel`).
+///
+/// Not through `undoable`, and not returning `RepoState`: it needs no open
+/// repository and changes none — the client opens the result the way "Open" does.
+/// Journaled as a user action, but not counted as one of the open repository's own
+/// (`exec::as_user_elsewhere`). Runs on a blocking thread: a clone takes minutes.
+#[tauri::command]
+pub async fn repo_clone(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+    parent: String,
+    name: String,
+) -> Result<Option<String>> {
+    let flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut slot = state.clone_cancel.lock().unwrap();
+        if slot.is_some() {
+            return Err(Error::Rule("a clone is already running".into()));
+        }
+        *slot = Some(Arc::clone(&flag));
+    }
+    struct Clear<'a>(&'a Mutex<Option<Arc<AtomicBool>>>);
+    impl Drop for Clear<'_> {
+        fn drop(&mut self) {
+            *self.0.lock().unwrap() = None;
+        }
+    }
+    let _clear = Clear(&state.clone_cancel);
+    let done = tauri::async_runtime::spawn_blocking(move || {
+        exec::as_user_elsewhere("repo_clone", || {
+            remotes::clone(Path::new(&parent), &name, &url, &flag, |line| {
+                let _ = app.emit("repo-clone-progress", CloneProgress { line: line.to_string() });
+            })
+        })
+    })
+    .await
+    .map_err(|e| Error::Io(e.to_string()))??;
+    Ok(done.map(|p| p.display().to_string()))
+}
+
+/// Stop the running clone, if any; its half-made folder is removed by `repo_clone`.
+#[tauri::command]
+pub async fn repo_clone_cancel(state: State<'_, AppState>) -> Result<()> {
+    if let Some(f) = state.clone_cancel.lock().unwrap().as_ref() {
+        f.store(true, Ordering::SeqCst);
+    }
+    Ok(())
 }
 
 // ── history panel: log (prd_02, task 03) ─────────────────────────────────────

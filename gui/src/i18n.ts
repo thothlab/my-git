@@ -287,6 +287,8 @@ const en = {
         return "the last Undo / Redo stopped halfway — check the repository";
       case "bisect":
         return "a bisect (the search for the commit with the bug) was involved — its checkouts cannot be taken back step by step";
+      case "remotes":
+        return "a remote was renamed or removed — the branches tracking it changed with it";
       default:
         return `${name} cannot be undone`;
     }
@@ -727,6 +729,64 @@ const en = {
   phaseDiscardRestore: () => "restore",
   restoreDiscardedMenu: () => "Restore discarded…",
   restoreDiscardedNoRepo: () => "Open a repository first",
+  // Remotes (RemotesPanel) and clone (CloneDialog)
+  remotesMenu: () => "Remotes…",
+  cloneMenu: () => "Clone…",
+  remotesTitle: () => "Remotes",
+  remotesEmpty: () => "This repository has no remotes. Add one to push and fetch.",
+  remoteFetch: () => "fetch",
+  remotePush: () => "push",
+  remotePushSame: () => "same as fetch",
+  remoteNoUrl: () => "no address",
+  remoteBranches: (n: number) => `${n} remote ${n === 1 ? "branch" : "branches"}`,
+  remoteHasCredentials: () =>
+    "This address has a password or token in it (hidden here). Replace it with an address without one and let a credential helper keep the secret.",
+  remoteSelectOne: () => "Select a remote",
+  remoteAddBtn: () => "Add…",
+  remoteRenameBtn: () => "Rename…",
+  remoteUrlBtn: () => "Change address…",
+  remotePushUrlBtn: () => "Push address…",
+  remoteRemoveBtn: () => "Remove…",
+  remoteFormAdd: () => "Add a remote",
+  remoteFormRename: (name: string) => `Rename remote "${name}"`,
+  remoteFormUrl: (name: string) => `Address of "${name}"`,
+  remoteFormPushUrl: (name: string) => `Push address of "${name}"`,
+  remoteNameLabel: () => "Name",
+  remoteUrlLabel: () => "Address",
+  remoteUrlPlaceholder: () => "https://host/org/repo.git or git@host:org/repo.git",
+  remotePushUrlNote: () => "Leave empty to push to the fetch address.",
+  remoteUrlNote: () =>
+    "https, ssh, git, file or a local path. No password or token in the address — a credential helper keeps those.",
+  remoteSave: () => "Save",
+  remoteHttpWarn: () => "http:// is not encrypted: what is sent can be read on the way.",
+  remoteLoginNote: (user: string) =>
+    `Signs in as "${user}": git asks for the password through the credential helper. Keep the password out of the address.`,
+  remotesKeys: () => "↑↓ select · Enter change address · Delete remove · Esc close",
+  confirmRemoteRemove: (name: string, n: number) =>
+    `Remove remote "${name}"?\n\n` +
+    (n > 0
+      ? `Its ${n} remote-tracking ${n === 1 ? "branch is" : "branches are"} deleted with it, and branches tracking it lose their upstream.`
+      : "Branches tracking it lose their upstream.") +
+    " The branches on the server are not touched.",
+  phaseRemoteAdd: () => "remote add",
+  phaseRemoteRename: () => "remote rename",
+  phaseRemoteRemove: () => "remote remove",
+  phaseRemoteSetUrl: () => "remote set-url",
+  cloneTitle: () => "Clone a repository",
+  cloneUrlLabel: () => "Repository address",
+  cloneParentLabel: () => "Into folder",
+  cloneParentNone: () => "not chosen",
+  cloneChooseParent: () => "Choose…",
+  cloneParentDialog: () => "Folder to clone into",
+  cloneNameLabel: () => "New folder name",
+  cloneDest: (path: string) => `The repository goes to ${path}`,
+  cloneNeedParent: () => "Choose the folder to clone into",
+  cloneNeedName: () => "Enter a name for the new folder",
+  cloneStart: () => "Clone",
+  cloneStop: () => "Stop",
+  cloneRunning: () => "Cloning…",
+  cloneCancelled: () => "Stopped. The half-made folder was removed.",
+  cloneKeys: () => "Enter clone · Esc close (stops a running clone)",
   discardsTitle: () => "Discarded changes",
   discardsEmpty: () => "Nothing has been rolled back in this repository yet.",
   discardFilesTitle: () => "Files in the backup",
@@ -1188,6 +1248,8 @@ const ru: Dict = {
         return "последняя отмена / повтор остановилась на полпути — проверьте репозиторий";
       case "bisect":
         return "затронут bisect (поиск коммита с ошибкой) — его переключения не откатываются по шагам";
+      case "remotes":
+        return "remote переименован или удалён — вместе с ним поменялись ветки, которые его отслеживали";
       default:
         return `${name} нельзя отменить`;
     }
@@ -1628,6 +1690,64 @@ const ru: Dict = {
   phaseDiscardRestore: () => "восстановление",
   restoreDiscardedMenu: () => "Восстановить откаченное…",
   restoreDiscardedNoRepo: () => "Сначала откройте репозиторий",
+  remotesMenu: () => "Remotes…",
+  cloneMenu: () => "Клонировать…",
+  remotesTitle: () => "Remotes",
+  remotesEmpty: () => "У репозитория нет remote. Добавьте, чтобы делать push и fetch.",
+  remoteFetch: () => "fetch",
+  remotePush: () => "push",
+  remotePushSame: () => "как у fetch",
+  remoteNoUrl: () => "адреса нет",
+  remoteBranches: (n: number) =>
+    `${n} ${ruPlural(n, "удалённая ветка", "удалённые ветки", "удалённых веток")}`,
+  remoteHasCredentials: () =>
+    "В адресе пароль или токен (здесь скрыт). Замените адрес на такой, где его нет, а секрет пусть хранит credential helper.",
+  remoteSelectOne: () => "Выберите remote",
+  remoteAddBtn: () => "Добавить…",
+  remoteRenameBtn: () => "Переименовать…",
+  remoteUrlBtn: () => "Изменить адрес…",
+  remotePushUrlBtn: () => "Адрес для push…",
+  remoteRemoveBtn: () => "Удалить…",
+  remoteFormAdd: () => "Новый remote",
+  remoteFormRename: (name: string) => `Переименовать remote «${name}»`,
+  remoteFormUrl: (name: string) => `Адрес «${name}»`,
+  remoteFormPushUrl: (name: string) => `Адрес для push у «${name}»`,
+  remoteNameLabel: () => "Имя",
+  remoteUrlLabel: () => "Адрес",
+  remoteUrlPlaceholder: () => "https://host/org/repo.git или git@host:org/repo.git",
+  remotePushUrlNote: () => "Пусто — push идёт на адрес fetch.",
+  remoteUrlNote: () =>
+    "https, ssh, git, file или локальный путь. Без пароля и токена в адресе — их хранит credential helper.",
+  remoteSave: () => "Сохранить",
+  remoteHttpWarn: () => "http:// не шифруется: переданное можно прочитать по дороге.",
+  remoteLoginNote: (user: string) =>
+    `Вход как «${user}»: пароль git спросит через credential helper. В адрес пароль не пишите.`,
+  remotesKeys: () => "↑↓ выбор · Enter изменить адрес · Delete удалить · Esc закрыть",
+  confirmRemoteRemove: (name: string, n: number) =>
+    `Удалить remote «${name}»?\n\n` +
+    (n > 0
+      ? `Вместе с ним удаляются его удалённые ветки (${n}), а ветки, которые его отслеживали, потеряют upstream.`
+      : "Ветки, которые его отслеживали, потеряют upstream.") +
+    " Ветки на сервере не затрагиваются.",
+  phaseRemoteAdd: () => "remote add",
+  phaseRemoteRename: () => "remote rename",
+  phaseRemoteRemove: () => "remote remove",
+  phaseRemoteSetUrl: () => "remote set-url",
+  cloneTitle: () => "Клонировать репозиторий",
+  cloneUrlLabel: () => "Адрес репозитория",
+  cloneParentLabel: () => "В папку",
+  cloneParentNone: () => "не выбрана",
+  cloneChooseParent: () => "Выбрать…",
+  cloneParentDialog: () => "Папка, куда клонировать",
+  cloneNameLabel: () => "Имя новой папки",
+  cloneDest: (path: string) => `Репозиторий окажется в ${path}`,
+  cloneNeedParent: () => "Выберите папку, куда клонировать",
+  cloneNeedName: () => "Введите имя новой папки",
+  cloneStart: () => "Клонировать",
+  cloneStop: () => "Остановить",
+  cloneRunning: () => "Клонирование…",
+  cloneCancelled: () => "Остановлено. Недоделанная папка удалена.",
+  cloneKeys: () => "Enter клонировать · Esc закрыть (останавливает идущее клонирование)",
   discardsTitle: () => "Откаченные изменения",
   discardsEmpty: () => "В этом репозитории ещё ничего не откатывали.",
   discardFilesTitle: () => "Файлы в копии",

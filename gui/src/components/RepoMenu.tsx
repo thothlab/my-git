@@ -3,6 +3,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openRepoAt, recentRepos, state } from "../store";
 import { d } from "../i18n";
 import { openDiscardPanel } from "./DiscardPanel";
+import { openRemotesPanel } from "./RemotesPanel";
+import { openCloneDialog } from "./CloneDialog";
 import { DISABLED_CLASS } from "./IconButton";
 
 const baseName = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
@@ -71,6 +73,26 @@ export default function RepoMenu() {
               onClick={() => void pick()}
             >
               {d().openRepoBtn()}
+            </button>
+            <button
+              class="block w-full px-3 py-1.5 text-left hover:bg-bg-muted"
+              onClick={() => {
+                setMenuOpen(false);
+                openCloneDialog();
+              }}
+            >
+              {d().cloneMenu()}
+            </button>
+            <button
+              class={`block w-full px-3 py-1.5 text-left hover:bg-bg-muted ${DISABLED_CLASS}`}
+              disabled={!state()}
+              title={state() ? undefined : d().restoreDiscardedNoRepo()}
+              onClick={() => {
+                setMenuOpen(false);
+                openRemotesPanel();
+              }}
+            >
+              {d().remotesMenu()}
             </button>
             {/* Repository-scoped, so it lives with the repository, not in the
                 application menu: backups are read from this repository's refs. */}

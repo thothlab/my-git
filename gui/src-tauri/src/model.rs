@@ -147,6 +147,30 @@ pub struct RepoExternalChange {
     pub repo_path: String,
 }
 
+/// One configured remote (`engine::remotes::list`). URLs come masked
+/// (`exec::mask_credentials`): a token stored in a URL before Graft refused them is
+/// not put on screen. `push_urls` empty means pushes go to `fetch_urls`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteInfo {
+    pub name: String,
+    pub fetch_urls: Vec<String>,
+    pub push_urls: Vec<String>,
+    /// Some URL of this remote carries a password or token in it.
+    pub has_credentials: bool,
+    /// Remote-tracking branches under `refs/remotes/<name>/` — what removing the
+    /// remote deletes; the confirmation names the number first.
+    pub branches: u32,
+}
+
+/// Payload of the `repo-clone-progress` event: one line of `git clone --progress`
+/// (a `\r`-redrawn meter arrives as its successive states), masked.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneProgress {
+    pub line: String,
+}
+
 /// Full repository state pushed to the UI on every mutation / refresh.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -937,6 +961,10 @@ pub enum UndoReasonCode {
     /// A bisect was under way before or after the action: its checkouts move
     /// HEAD through history on git's schedule, not the user's.
     Bisect,
+    /// A remote was renamed or removed: its remote-tracking branches went with it
+    /// and the branches tracking it were re-pointed or unset, which an inverse that
+    /// puts an upstream back (a deleted branch's) relies on.
+    Remotes,
 }
 
 /// `action` names the command (`push`, `branch_rebase_onto`, …) where the reason is

@@ -859,6 +859,19 @@ fn classify(
         a,
     };
     let remote_delete = action == "branch_delete" && hint.arg(1) == Some("remote");
+    // Remotes live in `.git/config` and `refs/remotes/`, neither of which the digest
+    // reads, so their arms come before the "nothing changed" answer — otherwise the
+    // verdict would depend on whether HEAD's branch happened to track the remote (the
+    // `# branch.upstream` header is in the digest). Adding a remote and changing its
+    // address touch nothing an inverse relies on: the chain goes on. A rename or a
+    // removal re-points or unsets the upstream of every branch tracking it, and an
+    // inverse that puts an upstream back (a deleted branch's) would then name a remote
+    // that is gone — the chain ends, with that reason.
+    match action {
+        "remote_add" | "remote_set_url" => return Verdict::Nothing,
+        "remote_rename" | "remote_remove" if ok => return cx.brk(UndoReasonCode::Remotes),
+        _ => {}
+    }
     if b.digest == a.digest {
         // Publishing changes nothing here and everything for whoever pulls: the
         // commits Undo would take back are someone else's history now.
@@ -2175,5 +2188,64 @@ mod tests {
         }
         let g = r.undo.lock();
         assert_eq!(g.chains.values().next().unwrap().undo.len(), DEPTH);
+    }
+
+    /// Adding a remote or changing its address leaves the chain alone; renaming or
+    /// removing one ends it with `Remotes` — whether or not HEAD's branch tracked it
+    /// (with it, the `# branch.upstream` header changes the digest; without, nothing
+    /// the digest reads does, and the verdict must not differ).
+    #[test]
+    fn remotes_keep_or_end_the_chain_the_same_way_on_any_branch() {
+        use crate::engine::remotes;
+        for tracked in [false, true] {
+            let r = Rig::new();
+            let p = r.p();
+            g(p, &["branch", "side"]);
+            r.act("branch_checkout", Hint::args(["side"]), || {
+                CliEngine::new(p).checkout("side", false)
+            });
+            r.act("remote_add", Hint::args(["origin"]), || {
+                remotes::add(p, "origin", "https://h/a.git")
+            });
+            r.act("remote_set_url", Hint::args(["origin"]), || {
+                remotes::set_url(p, "origin", "https://h/b.git", true)
+            });
+            assert_eq!(
+                r.state().undo.action.as_deref(),
+                Some("branch_checkout"),
+                "add and set-url leave the chain alone"
+            );
+            if tracked {
+                g(p, &["update-ref", "refs/remotes/origin/side", "HEAD"]);
+                g(p, &["branch", "--set-upstream-to=origin/side"]);
+                // The upstream set from a terminal: re-read, so the chain ends here
+                // as External and starts over with the next recorded step.
+                r.state();
+                r.act("branch_create", Hint::args(["x"]), || {
+                    CliEngine::new(p).create_branch("x", None)
+                });
+                r.act("branch_checkout", Hint::args(["side"]), || {
+                    CliEngine::new(p).checkout("side", false)
+                });
+            }
+            let before = fp(p);
+            r.act("remote_rename", Hint::args(["origin", "up"]), || {
+                remotes::rename(p, "origin", "up")
+            });
+            assert_eq!(
+                fp(p) != before,
+                tracked,
+                "the digest moved only when tracked"
+            );
+            assert_eq!(r.reason(), UndoReasonCode::Remotes, "tracked: {tracked}");
+
+            r.act("branch_create", Hint::args(["y"]), || {
+                CliEngine::new(p).create_branch("y", None)
+            });
+            r.act("remote_remove", Hint::args(["up"]), || {
+                remotes::remove(p, "up")
+            });
+            assert_eq!(r.reason(), UndoReasonCode::Remotes, "tracked: {tracked}");
+        }
     }
 }
