@@ -245,6 +245,27 @@ fn read_paths(
     Ok(out)
 }
 
+/// How each of `paths` lies in the working tree right now, one comparable string per
+/// path: `-` absent, `dir` a folder, `<mode> <oid>` a file or link by its bytes.
+///
+/// The read [`with_backup`] takes, minus the writing: nothing goes into the object
+/// store. It serves the undo journal's fingerprint (`engine::undo`), which only asks
+/// "is this file still byte for byte what it was" — the very question this module's
+/// staleness check asks, so it is answered by the same code.
+pub(crate) fn describe(repo: &Path, paths: &[String]) -> Result<Vec<(String, String)>> {
+    Ok(read_paths(repo, paths, false, false)?
+        .into_iter()
+        .map(|(p, e)| {
+            let text = match e {
+                Entry::Absent => "-".to_string(),
+                Entry::Dir => "dir".to_string(),
+                Entry::Blob { mode, oid } => format!("{mode} {oid}"),
+            };
+            (p, text)
+        })
+        .collect())
+}
+
 // ── writing the chain ───────────────────────────────────────────────────────
 
 /// The tree of the present entries, built in a throwaway index.

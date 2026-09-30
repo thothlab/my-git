@@ -9,6 +9,7 @@ import RepoMenu from "./RepoMenu";
 import { openGitConsole } from "./GitConsolePanel";
 import { pushCurrent } from "./log/actions/branchActions";
 import { afterRepoChange } from "./log/actions/repoRefresh";
+import UndoButtons from "./UndoButtons";
 
 export default function Toolbar() {
   return (
@@ -36,6 +37,9 @@ export default function Toolbar() {
             from here. */}
         <TBtn label="Push" onClick={() => void pushCurrent()} accent />
       </div>
+
+      {/* Undo / Redo of Graft's own actions; Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z. */}
+      <UndoButtons />
 
       {/* Mode switch for the main area. Always visible, in both modes. */}
       <div class="ml-auto flex items-center rounded border border-border p-0.5 text-xs">

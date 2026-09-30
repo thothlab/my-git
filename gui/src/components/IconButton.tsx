@@ -227,3 +227,41 @@ export function IconStash() {
     </svg>
   );
 }
+
+/** Arrow curling back to the left — undo the last action. */
+export function IconUndo() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.6"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <path d="M5.5 3.5L2.5 6.5l3 3" />
+      <path d="M2.5 6.5h7a4 4 0 0 1 0 8H7" />
+    </svg>
+  );
+}
+
+/** The mirror of `IconUndo` — redo. */
+export function IconRedo() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.6"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <path d="M10.5 3.5l3 3-3 3" />
+      <path d="M13.5 6.5h-7a4 4 0 0 0 0 8H9" />
+    </svg>
+  );
+}

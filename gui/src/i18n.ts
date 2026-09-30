@@ -184,6 +184,117 @@ const en = {
   // Busy phases
   busyFetch: () => "Fetching…",
   busyPull: () => "Pulling…",
+  // Undo / Redo of Graft's own actions (src-tauri/src/engine/undo.rs)
+  busyUndo: () => "Undoing…",
+  busyRedo: () => "Redoing…",
+  undoTip: (what: string) => `Undo: ${what} (Cmd/Ctrl+Z)`,
+  redoTip: (what: string) => `Redo: ${what} (Cmd/Ctrl+Shift+Z)`,
+  undoUnavailable: (why: string) => `Nothing to undo: ${why}`,
+  redoUnavailable: (why: string) => `Nothing to redo: ${why}`,
+  /** A recorded step as the buttons name it. `action` is the Tauri command. */
+  undoWhat: (action: string, detail: string | null): string => {
+    const x = detail ?? "";
+    const q = detail ? ` "${detail}"` : "";
+    switch (action) {
+      case "commit_list":
+        return `commit${q}`;
+      case "commit_reword":
+        return `new message${q}`;
+      case "commit_reset":
+        return `reset to ${x}`;
+      case "lines_stage":
+        return `staging in ${x}`;
+      case "lines_unstage":
+        return `unstaging in ${x}`;
+      case "branch_checkout":
+      case "commit_checkout":
+        return `checkout of ${x}`;
+      case "branch_create":
+        return `new branch ${x}`;
+      case "branch_delete":
+        return `deleting branch ${x}`;
+      case "branch_rename":
+        return `renaming ${x}`;
+      case "tag_create":
+        return `new tag ${x}`;
+      case "branch_merge":
+        return `merge of ${x}`;
+      case "commit_cherry_pick":
+        return `cherry-pick${q}`;
+      case "commit_revert":
+        return `revert${q}`;
+      case "stash_push":
+        return `stash${q}`;
+      case "stash_pop":
+        return `stash pop${q}`;
+      case "stash_apply":
+      case "stash_restore":
+        return `stash apply${q}`;
+      case "stash_drop":
+        return `stash drop${q}`;
+      case "file_rollback":
+      case "list_rollback":
+        return `rollback of ${x}`;
+      case "lines_revert":
+        return `reverted lines in ${x}`;
+      case "discard_restore":
+        return `restore of ${x}`;
+      default:
+        return `${action}${q}`;
+    }
+  },
+  /** Why Undo / Redo is unavailable — `UndoReasonCode` of `api.ts`. */
+  undoReason: (code: string, action: string | null): string => {
+    const name = action ?? "the action";
+    switch (code) {
+      case "empty":
+        return "no recorded action yet";
+      case "busy":
+        return "an action is running";
+      case "external":
+        return "the repository changed outside a recorded action (a terminal, the file editor), so the history of actions ended";
+      case "operation":
+        return "an unfinished merge, rebase, cherry-pick or revert was involved";
+      case "failed":
+        return `${name} failed after changing the repository`;
+      case "unverifiable":
+        return "the repository could not be read to check it";
+      case "concurrent":
+        return "two actions ran at once";
+      case "published":
+        return `${name} published to the remote — that cannot be taken back`;
+      case "fetched":
+        return "the fetch brought new tags";
+      case "integrated":
+        return `${name} brought commits in from the remote`;
+      case "history":
+        return `${name} rewrote history (a rebase)`;
+      case "console":
+        return "a command in the git console changed the repository";
+      case "dirty":
+        return `${name} ran next to uncommitted changes — reversing it would lose them`;
+      case "worktree":
+        return `${name} changed files in the working tree (a hook?)`;
+      case "stash-position":
+        return "a stash below the newest one was popped or dropped";
+      case "stash-dirty":
+        return "the stash was restored onto local changes";
+      case "no-earlier":
+        return "nothing earlier";
+      case "no-next":
+        return "nothing was undone";
+      case "inverse-failed":
+        return "the last Undo / Redo stopped halfway — check the repository";
+      default:
+        return `${name} cannot be undone`;
+    }
+  },
+  undoConfirmHard: (redo: boolean, what: string, commits: number) =>
+    `${redo ? "Redo" : "Undo"}: ${what}.\n\nThis runs git reset --hard: tracked files are rewritten to the other commit` +
+    (commits > 0
+      ? `, and ${commits} commit${commits === 1 ? "" : "s"} leave the branch (${redo ? "Undo" : "Redo"} brings them back).`
+      : ".") +
+    " Untracked files stay as they are.",
   // Log mode — panels
   branchesTitle: () => "Branches",
   logTitle: () => "Log",
@@ -897,6 +1008,114 @@ const ru: Dict = {
   focusHint: () => "Tab / Shift+Tab переключают фокус между панелями",
   busyFetch: () => "Забираем изменения…",
   busyPull: () => "Подтягиваем изменения…",
+  busyUndo: () => "Отменяем…",
+  busyRedo: () => "Повторяем…",
+  undoTip: (what) => `Отменить: ${what} (Cmd/Ctrl+Z)`,
+  redoTip: (what) => `Повторить: ${what} (Cmd/Ctrl+Shift+Z)`,
+  undoUnavailable: (why) => `Отменять нечего: ${why}`,
+  redoUnavailable: (why) => `Повторять нечего: ${why}`,
+  undoWhat: (action, detail) => {
+    const x = detail ?? "";
+    const q = detail ? ` «${detail}»` : "";
+    switch (action) {
+      case "commit_list":
+        return `коммит${q}`;
+      case "commit_reword":
+        return `новое сообщение${q}`;
+      case "commit_reset":
+        return `reset на ${x}`;
+      case "lines_stage":
+        return `добавление в индекс: ${x}`;
+      case "lines_unstage":
+        return `исключение из индекса: ${x}`;
+      case "branch_checkout":
+      case "commit_checkout":
+        return `переключение на ${x}`;
+      case "branch_create":
+        return `создание ветки ${x}`;
+      case "branch_delete":
+        return `удаление ветки ${x}`;
+      case "branch_rename":
+        return `переименование ${x}`;
+      case "tag_create":
+        return `создание тега ${x}`;
+      case "branch_merge":
+        return `слияние ${x}`;
+      case "commit_cherry_pick":
+        return `cherry-pick${q}`;
+      case "commit_revert":
+        return `revert${q}`;
+      case "stash_push":
+        return `stash${q}`;
+      case "stash_pop":
+        return `stash pop${q}`;
+      case "stash_apply":
+      case "stash_restore":
+        return `stash apply${q}`;
+      case "stash_drop":
+        return `удаление stash${q}`;
+      case "file_rollback":
+      case "list_rollback":
+        return `откат ${x}`;
+      case "lines_revert":
+        return `откат строк в ${x}`;
+      case "discard_restore":
+        return `восстановление ${x}`;
+      default:
+        return `${action}${q}`;
+    }
+  },
+  undoReason: (code, action) => {
+    const name = action ?? "действие";
+    switch (code) {
+      case "empty":
+        return "записанных действий пока нет";
+      case "busy":
+        return "выполняется действие";
+      case "external":
+        return "репозиторий изменился вне записанного действия (терминал, редактор файла) — история действий закончилась";
+      case "operation":
+        return "затронута незавершённая операция (merge, rebase, cherry-pick или revert)";
+      case "failed":
+        return `${name} завершилось ошибкой, успев изменить репозиторий`;
+      case "unverifiable":
+        return "не удалось прочитать репозиторий для проверки";
+      case "concurrent":
+        return "два действия шли одновременно";
+      case "published":
+        return `${name} опубликовало изменения на сервере — это не отменить`;
+      case "fetched":
+        return "fetch принёс новые теги";
+      case "integrated":
+        return `${name} принесло коммиты с сервера`;
+      case "history":
+        return `${name} переписало историю (rebase)`;
+      case "console":
+        return "команда в git-консоли изменила репозиторий";
+      case "dirty":
+        return `${name} выполнялось при незакоммиченных изменениях — отмена их бы потеряла`;
+      case "worktree":
+        return `${name} изменило файлы рабочего дерева (хук?)`;
+      case "stash-position":
+        return "применён или удалён не самый новый stash";
+      case "stash-dirty":
+        return "stash восстановлен поверх локальных изменений";
+      case "no-earlier":
+        return "раньше ничего нет";
+      case "no-next":
+        return "ничего не отменялось";
+      case "inverse-failed":
+        return "последняя отмена / повтор остановилась на полпути — проверьте репозиторий";
+      default:
+        return `${name} нельзя отменить`;
+    }
+  },
+  undoConfirmHard: (redo, what, commits) =>
+    `${redo ? "Повторить" : "Отменить"}: ${what}.\n\nБудет выполнен git reset --hard: отслеживаемые файлы перезапишутся версией другого коммита` +
+    (commits > 0
+      ? `, и ${commits} ${ruPlural(commits, "коммит уйдёт", "коммита уйдут", "коммитов уйдут")} из ветки (${redo ? "отмена" : "повтор"} вернёт их).`
+      : ".") +
+    " Неотслеживаемые файлы останутся как есть.",
   branchesTitle: () => "Ветки",
   logTitle: () => "Лог",
   commitDetailsTitle: () => "Детали коммита",

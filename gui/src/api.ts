@@ -304,6 +304,68 @@ export const journalList = (mine: boolean, after: number | null) =>
 export const journalOutput = (id: number) =>
   invoke<JournalOutput | null>("journal_output", { id });
 
+// ── Undo / Redo of the application's own actions (engine/undo.rs) ────────────
+
+/** Why Undo or Redo is unavailable — a code; `i18n.ts` words it. */
+export type UndoReasonCode =
+  | "empty"
+  | "busy"
+  | "external"
+  | "operation"
+  | "failed"
+  | "unverifiable"
+  | "concurrent"
+  | "published"
+  | "fetched"
+  | "integrated"
+  | "history"
+  | "console"
+  | "unsupported"
+  | "dirty"
+  | "worktree"
+  | "stash-position"
+  | "stash-dirty"
+  | "no-earlier"
+  | "no-next"
+  | "inverse-failed";
+
+export interface UndoReason {
+  code: UndoReasonCode;
+  /** The command the reason is about (`push`, `branch_rebase_onto`, …). */
+  action?: string | null;
+}
+
+/**
+ * One direction. Available when `id` is set: `undoStep` takes that id back, so a
+ * confirmation shown for one step can never run another. `action` is the Tauri
+ * command that made the step, `detail` what it acted on.
+ */
+export interface UndoSide {
+  id: number | null;
+  action: string | null;
+  detail: string | null;
+  /** `reset --hard`: confirm first. */
+  destructive: boolean;
+  /** Commits that leave the branch when a destructive step runs. */
+  lostCommits: number;
+  reason: UndoReason | null;
+}
+
+export interface UndoState {
+  undo: UndoSide;
+  redo: UndoSide;
+}
+
+export type UndoDirection = "undo" | "redo";
+
+/** Read-only: what Undo and Redo would reverse now, or why not. Ends the chain on
+ *  a change made outside Graft — so it is re-read on every fresh `RepoState`. */
+export const undoState = () => invoke<UndoState>("undo_state");
+
+/** Undo or redo the step `id` offered by `undoState`. A mutation: through `run()`. */
+export const undoStep = (direction: UndoDirection, id: number) =>
+  invoke<RepoState>("undo_step", { direction, id });
+
 // ── Git panel: history (prd_02, task_01) ─────────────────────────────────────
 
 export type WhitespaceMode = "none" | "trailing" | "all";

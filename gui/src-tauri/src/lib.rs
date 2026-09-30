@@ -152,6 +152,8 @@ pub fn run() {
             commands::branch_update,
             commands::ui_state_get,
             commands::ui_state_set,
+            commands::undo_state,
+            commands::undo_step,
             commands::journal_list,
             commands::journal_output,
         ])

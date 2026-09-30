@@ -27,8 +27,8 @@
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
 | `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, разбор и печать команды консоли), 299 утверждений |
-| `cargo test` | Оба крейта разом: 302 теста GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 302 теста |
+| `cargo test` | Оба крейта разом: 321 тест GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 321 тест |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -75,6 +75,8 @@ gui/src-tauri/src/  бэк GUI
   engine/patch.rs   патч по выбранным строкам диффа (чистый, без git) + единая нумерация строк хунков
   engine/rebase.rs  интерактивный rebase по утверждённому плану, reword, squash; файлы плана
                     в каталоге данных приложения
+  engine/undo.rs    Undo / Redo своих действий: снимок + отпечаток до и после каждой мутации,
+                    цепочка шагов на репозиторий (память + каталог данных приложения)
 gui/src/            фронт
   api.ts            зеркала всех команд в camelCase + типы
   store.ts          глобальное состояние окна, run(), модалки
@@ -85,6 +87,7 @@ gui/src/            фронт
   components/       Changes-режим (ChangesView, DiffView, CommitPanel, Toolbar, ...);
                     DiscardPanel — runDiscard, уведомление «Откатано N · Вернуть», диалог копий;
                     FileHistoryPanel — оверлей «История файла» (список коммитов + DiffView)
+                    UndoButtons — Undo/Redo в тулбаре и Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z
   components/blame/ BlamePanel — оверлей blame (строки + коммит строки + DiffView, стек
                     «blame до изменения»); blameRules.ts — чистые правила, без единого импорта
   components/conflicts/ ConflictPanel — оверлей редактора конфликта (блоки ours · base ·
@@ -251,6 +254,26 @@ Git вызывается только как внешний процесс. `gix
   первого вызова быть не должно — нулевой файл git считает битым индексом). Восстановление трогает только
   рабочее дерево; изменённые после отката пути — `Error::Stale`, с `force` — сначала копия
   текущего (каждое восстановление само записывается как `kind: restore`).
+- `engine::undo` — `Undo` (`perform`, `state`, `step`), `Hint { args, lists }`, `DEPTH = 100`.
+  **Каждая мутация команды Tauri идёт через `commands::undoable(&state, "<имя команды>",
+  hint, || …)`, а не голый `exec::as_user`** — он внутри: действие, которого журнал не видел,
+  для него «изменение вне Graft» и рвёт цепочку зря. `perform` снимает `Snapshot` до и после
+  (`status --porcelain=v2 -uall`, свои ссылки без `refs/remotes/`, `refs/graft/`, `refs/stash`,
+  `ls-files --stage`, список стешей, вид операции, байты перечисленных статусом файлов через
+  `discard::describe`; отпечаток — `fnv1a`) и классифицирует по имени команды: шаг с обратной
+  (`Soft` — ссылки + записи индекса, дерево не тронуто: коммит в т.ч. changelist'а, amend и
+  первый, reword HEAD, reset soft/mixed, stage/unstage строк; `Hard` — `reset --hard`, только
+  без отслеживаемых изменений до и после: merge, cherry-pick, revert, reset hard; `Refs` —
+  checkout + ссылки: переключение, создание/удаление ветки (с upstream), тег, переключение со
+  стешем; `Rename`; `StashPush` / `StashRestore` / `StashDrop` — только верхний стеш и
+  восстановление только на чистое дерево; `Discard` — `discard::restore` копии отката и
+  копии самого restore, плюс записи индекса), «ничего» (отпечаток не изменился) или разрыв
+  цепочки с `UndoReasonCode` (push, pull, fetch с новыми тегами, rebase/squash/reword старого,
+  консоль, незавершённая операция, упавшее действие). Undo и Redo выполняются, только если
+  текущий отпечаток равен ожидаемому, и только для шага с тем `id`, что показали клиенту.
+  Два действия разом над одним репозиторием — второе не записывается, цепочка рвётся
+  (`concurrent`). Своего «второго механизма» отката файлов нет: Undo отката — это копия
+  `refs/graft/discard`.
 - `uistate` — `get`, `set`, `state_path`. Атомарная запись через уникальный tmp + rename.
 - `watch` — `start(repo, own, report) -> RepoWatcher` (drop — остановка), `GitDirs::resolve`
   (git-dir и common-dir через `git_paths`, канонизированные), чистые `relevant` /
@@ -274,7 +297,10 @@ Git вызывается только как внешний процесс. `gix
   не унифицируется: `exec_raw` консоли убирает ASKPASS, а push/pull движка — нет.
 - **Происхождение записи журнала объявляется, а не угадывается.** Команда Tauri, которая
   меняет репозиторий по воле пользователя, оборачивает вызов движка в
-  `exec::as_user("<имя команды>", || …)`; всё прочее — `background` по умолчанию.
+  `undoable(&state, "<имя команды>", hint, || …)` — тот зовёт `exec::as_user` с тем же
+  именем и пишет шаг Undo; всё прочее — `background` по умолчанию. Имя команды — ещё и ключ
+  классификации в `engine::undo::classify`: новая мутация без своей ветки там рвёт цепочку
+  как `unsupported`, а не молча записывается.
   `build_state` стоит **снаружи** замыкания, так что снимок после мутации — фоновый.
   Замыкание, а не guard: `.await` внутри области не скомпилируется, и thread-local не утечёт
   в чужую задачу на том же воркере. Предварительные чтения мутации (`show-ref`,
@@ -423,7 +449,7 @@ Git вызывается только как внешний процесс. `gix
   `ConflictEntry[]` (`{ path, kind }`), а не строки: вид конфликта (`UU`, `DU`, …) едет с
   тем же `ls-files -u`, и второй команды за ним нет. Конфликт без операции (`stash pop`)
   виден только в Changes — туда же пункт «Разрешить конфликт…».
-- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`), `ui_state_*`, `journal_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_history`, `file_blame`, `file_blame_before`). Имя `commit_list`
+- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`), `ui_state_*`, `journal_*`, `undo_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_history`, `file_blame`, `file_blame_before`). Имя `commit_list`
   занято операцией «закоммитить changelist» и переиспользовано быть не может.
 - Полный список зарегистрированных команд — `invoke_handler` в `gui/src-tauri/src/lib.rs`;
   он же роспись того, что вообще доступно фронту.
@@ -433,6 +459,13 @@ Git вызывается только как внешний процесс. `gix
   и `commits_compare_diff`. Пустая строка означает именно это, а не отсутствие значения.
 - Признак «коммит недостижим от HEAD» — не поле строки лога, а отдельная команда
   `commits_unreachable(hashes)`, которую клиент зовёт раз на страницу.
+- Undo / Redo: `undo_state() -> UndoState { undo, redo }` (read-only для репозитория, но
+  разрывает цепочку, увидев внешнее изменение — поэтому клиент перечитывает его на каждом
+  свежем `RepoState`) и `undo_step(direction, id) -> RepoState` через `run()` + `afterRepoChange()`.
+  `UndoSide.reason` — код (`UndoReasonCode`, kebab-case), слова — в `i18n.ts`
+  (`undoReason`, `undoWhat`). `destructive` (reset --hard) — сначала `confirmAction` с
+  `lostCommits`. Отменённый коммит changelist'а возвращает файлы в их списки
+  (`Step.lists`, `move_files` в `undo_step`), удалённый с тех пор список — в Default.
 
 ## Конвенции фронта
 
@@ -538,6 +571,10 @@ Git вызывается только как внешний процесс. `gix
   терминале) — но не пока идёт действие пользователя (`OWN_ACTIONS`): между записью плана и
   появлением `rebase-merge/` параллельное чтение состояния удалило бы план из-под старта.
   Путь каталога данных — `AppState.data_dir`, резолвится один раз в `.setup()`.
+- `<app_data_dir>/undo/<fnv1a канонического корня>.json` — цепочка Undo / Redo
+  репозитория (`engine::undo`, `version: 1`, поле `repo` отличает коллизию хэша), атомарная
+  запись, права 0600: там пути, ветки и темы коммитов, содержимого файлов нет — только id
+  объектов. Переживает перезапуск; без каталога данных цепочка живёт только в памяти.
 - `<repo>/.git/graft-ui.json` — настройки панели: избранные ветки, схлопнутые папки, ширины
   колонок, подсветка. Версионирован (`version: 1`), camelCase, атомарная запись. Отсутствующий
   файл — это состояние по умолчанию, битый файл — тоже: настройки не стоят неработающего
@@ -883,6 +920,19 @@ Git вызывается только как внешний процесс. `gix
 - Грязное (отслеживаемое) дерево для rebase — отказ, не autostash: спрятанные изменения
   исчезли бы на всё время rebase, включая остановку `edit`, а changelist'ы, синхронизированные
   с чистым снимком, забыли бы, в каком списке лежали эти файлы.
+- **`update-index --index-info`: удаление и добавление одного пути в одной пачке оставляют
+  старую запись.** Строка `0 <нулевой oid>\t<путь>` и следом `<mode> <oid> 0\t<путь>` —
+  и индекс не изменился вовсе. Поэтому `undo::set_index` шлёт две пачки: сначала удаления
+  всех затронутых путей, потом нужные записи.
+- **«Дерево не тронуто» по одним путям из `git status` — пустая истина для `reset --hard`
+  на чистом дереве**: ни до, ни после статус не перечисляет ни одного файла, а файлы
+  переписаны. `undo::untouched` смотрит ещё и на каждый путь, чья запись индекса сдвинулась
+  (не перечисленный статусом путь побайтно равен своей записи индекса). Без этого hard reset
+  записывался как `Soft`, и Undo двигал ветку, оставляя дерево новым.
+- Cmd/Ctrl+Z приложения зарегистрирован с `typing: false` и снимается, пока открыт
+  редактор файла (`UndoButtons.tsx`, `createEffect` вокруг `registerHotkey`): в поле ввода
+  и в редакторе это undo текста. Редактор конфликта — модалка со своим `onKeyDown`, под ней
+  `hotkeys.ts` молчит.
 
 ## Инициативы и PRD
 

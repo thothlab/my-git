@@ -827,6 +827,99 @@ pub struct DiscardOutcome {
     pub backup: Option<DiscardEntry>,
 }
 
+// ── Undo / Redo of the application's own actions (`engine::undo`) ────────────
+
+/// Which way `undo_step` moves along the journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UndoDirection {
+    Undo,
+    Redo,
+}
+
+/// Why Undo (or Redo) is not available. A code, never prose: every visible string
+/// lives in `src/i18n.ts`, and the client words each code in both locales.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UndoReasonCode {
+    /// Nothing recorded yet in this repository.
+    Empty,
+    /// An action (or an Undo / Redo) is running on the repository right now.
+    Busy,
+    /// The repository changed outside a recorded action (terminal, editor, another
+    /// tool) — the chain ended.
+    External,
+    /// A merge / rebase / cherry-pick / revert was unfinished before or after.
+    Operation,
+    /// The action failed after changing the repository.
+    Failed,
+    /// The repository could not be read to check it.
+    Unverifiable,
+    /// Two actions ran at once, so neither can be told from the other.
+    Concurrent,
+    /// A push published commits or deleted a remote branch.
+    Published,
+    /// A fetch changed more than remote-tracking refs (new tags).
+    Fetched,
+    /// A pull or an update from upstream brought commits in.
+    Integrated,
+    /// A rebase (or anything else rewriting history) ran.
+    History,
+    /// A command typed in the git console changed the repository.
+    Console,
+    /// The action has no safe inverse.
+    Unsupported,
+    /// A hard reset or a merge with uncommitted changes around it: reversing it
+    /// by `reset --hard` would lose them.
+    Dirty,
+    /// The action changed files in the working tree it should not have (a hook).
+    Worktree,
+    /// A stash other than the newest was popped or dropped; Undo cannot put it
+    /// back at its place.
+    StashPosition,
+    /// A stash was restored onto local changes; the two cannot be told apart.
+    StashDirty,
+    /// Only for one side: the other side has a step, this one does not.
+    NoEarlier,
+    NoNext,
+    /// An Undo / Redo stopped halfway; the repository needs a look.
+    InverseFailed,
+}
+
+/// `action` names the command (`push`, `branch_rebase_onto`, …) where the reason is
+/// about one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoReason {
+    pub code: UndoReasonCode,
+    #[serde(default)]
+    pub action: Option<String>,
+}
+
+/// One direction of the journal as the toolbar shows it. `id` is set when the
+/// direction is available and names the step `undo_step` must be given back, so a
+/// confirmation shown for one step can never run another. `action` is the Tauri
+/// command that made the step, `detail` what it acted on (a commit subject, a branch,
+/// a path). `destructive` asks for a confirmation (`reset --hard`), and
+/// `lost_commits` says how many commits leave the branch then.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoSide {
+    pub id: Option<u64>,
+    pub action: Option<String>,
+    pub detail: Option<String>,
+    pub destructive: bool,
+    pub lost_commits: u32,
+    pub reason: Option<UndoReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoState {
+    pub undo: UndoSide,
+    pub redo: UndoSide,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

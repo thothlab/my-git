@@ -12,6 +12,7 @@ use crate::engine::exec::{self, mask_credentials};
 use crate::engine::{
     blame as blame_engine, branches, commit as commit_engine, conflict as conflict_engine, discard, file_history as file_history_engine, log as log_engine, ops,
     rebase,
+    undo::{self, Hint},
 };
 use crate::model::{
     Blame, BlameBefore, BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, ConflictFile, DiscardEntry,
@@ -19,7 +20,7 @@ use crate::model::{
     LinePick,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
     LogFilter, LogPage, OperationKind, RebaseRange, RebaseStep, RepoExternalChange, RepoState,
-    StashEntry, TextFile, UiState,
+    StashEntry, TextFile, UiState, UndoDirection, UndoState,
 };
 use crate::uistate;
 use crate::watch::{self, RepoWatcher};
@@ -39,6 +40,9 @@ pub struct AppState {
     /// repository (`engine::rebase`). `None` if the platform could not name one;
     /// rewriting history is then refused, everything else works.
     pub data_dir: Mutex<Option<PathBuf>>,
+    /// The undo journal (`engine::undo`): every mutation below is recorded in it
+    /// through [`undoable`].
+    pub undo: undo::Undo,
 }
 
 impl AppState {
@@ -152,6 +156,25 @@ where
     build_state(state)
 }
 
+/// Run the engine call of a mutating command as the user action `action` and record
+/// what it did in the open repository's undo chain (`engine::undo`).
+///
+/// The one door every mutation goes through — never a bare `exec::as_user`, which
+/// this wraps: an action the journal does not see is, to it, a change made outside
+/// Graft, and it would end the chain for nothing. `hint` carries what the snapshots
+/// around the action cannot tell (a stash name, the lists of a commit). The result is
+/// the engine call's own: recording never fails a command.
+fn undoable<T>(
+    state: &State<AppState>,
+    action: &'static str,
+    hint: Hint,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let repo = state.repo_path()?;
+    let data = state.data_dir_opt();
+    state.undo.perform(data.as_deref(), &repo, action, hint, f)
+}
+
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -253,7 +276,7 @@ pub async fn file_rollback(
     paths: Vec<String>,
 ) -> Result<DiscardOutcome> {
     let repo = state.repo_path()?;
-    let backup = exec::as_user("file_rollback", || {
+    let backup = undoable(&state, "file_rollback", Hint::none(), || {
         discard::with_backup(&repo, DiscardKind::Files, &paths, || {
             CliEngine::new(&repo).rollback(&paths)
         })
@@ -270,7 +293,7 @@ pub async fn list_rollback(state: State<'_, AppState>, id: String) -> Result<Dis
     let repo = state.repo_path()?;
     let store = changelists::load(&repo)?;
     let paths = changelists::list_paths(&store, &id);
-    let backup = exec::as_user("list_rollback", || {
+    let backup = undoable(&state, "list_rollback", Hint::none(), || {
         discard::with_backup(&repo, DiscardKind::List, &paths, || {
             CliEngine::new(&repo).rollback(&paths)
         })
@@ -303,7 +326,7 @@ pub async fn discard_restore(
     force: bool,
 ) -> Result<DiscardOutcome> {
     let repo = state.repo_path()?;
-    let backup = exec::as_user("discard_restore", || discard::restore(&repo, &id, force))?;
+    let backup = undoable(&state, "discard_restore", Hint::args([id.as_str()]), || discard::restore(&repo, &id, force))?;
     Ok(DiscardOutcome {
         state: build_state(&state)?,
         backup,
@@ -367,7 +390,7 @@ pub async fn lines_stage(
     digest: String,
     context: Option<u32>,
 ) -> Result<RepoState> {
-    exec::as_user("lines_stage", || {
+    undoable(&state, "lines_stage", Hint::args([path.as_str()]), || {
         let eng = CliEngine::new(state.repo_path()?);
         let patch = eng.selection_patch(&path, "worktree", &picks, &digest, context, false)?;
         eng.apply_patch(&patch, true, false)
@@ -384,7 +407,7 @@ pub async fn lines_unstage(
     digest: String,
     context: Option<u32>,
 ) -> Result<RepoState> {
-    exec::as_user("lines_unstage", || {
+    undoable(&state, "lines_unstage", Hint::args([path.as_str()]), || {
         let eng = CliEngine::new(state.repo_path()?);
         let patch = eng.selection_patch(&path, "index", &picks, &digest, context, true)?;
         eng.apply_patch(&patch, true, true)
@@ -410,7 +433,7 @@ pub async fn lines_revert(
     } else {
         DiscardKind::Lines
     };
-    let backup = exec::as_user("lines_revert", || {
+    let backup = undoable(&state, "lines_revert", Hint::args([path.as_str()]), || {
         let eng = CliEngine::new(&repo);
         let patch = eng.selection_patch(&path, "worktree", &picks, &digest, context, true)?;
         let paths = discard::patch_paths(&repo, &patch)?;
@@ -446,7 +469,21 @@ pub async fn commit_list(
     if paths.is_empty() {
         return Err(Error::Rule("no files to commit".into()));
     }
-    exec::as_user("commit_list", || CliEngine::new(&repo).commit_paths(&paths, &message, amend))?;
+    // Where each committed file sits now: an Undo puts it back there, not in Default.
+    let hint = Hint {
+        args: Vec::new(),
+        lists: paths
+            .iter()
+            .filter_map(|p| {
+                store
+                    .changelists
+                    .iter()
+                    .find(|c| c.files.contains(p))
+                    .map(|c| (p.clone(), c.id.clone()))
+            })
+            .collect(),
+    };
+    undoable(&state, "commit_list", hint, || CliEngine::new(&repo).commit_paths(&paths, &message, amend))?;
     build_state(&state)
 }
 
@@ -463,7 +500,7 @@ pub async fn branch_create(
     name: String,
     from: Option<String>,
 ) -> Result<RepoState> {
-    exec::as_user("branch_create", || {
+    undoable(&state, "branch_create", Hint::args([name.as_str()]), || {
         CliEngine::new(state.repo_path()?).create_branch(&name, from.as_deref())
     })?;
     build_state(&state)
@@ -475,19 +512,19 @@ pub async fn branch_checkout(
     name: String,
     stash: bool,
 ) -> Result<RepoState> {
-    exec::as_user("branch_checkout", || CliEngine::new(state.repo_path()?).checkout(&name, stash))?;
+    undoable(&state, "branch_checkout", Hint::args([name.as_str()]), || CliEngine::new(state.repo_path()?).checkout(&name, stash))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn push(state: State<'_, AppState>, mode: String) -> Result<RepoState> {
-    exec::as_user("push", || CliEngine::new(state.repo_path()?).push(&mode))?;
+    undoable(&state, "push", Hint::args([mode.as_str()]), || CliEngine::new(state.repo_path()?).push(&mode))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn fetch(state: State<'_, AppState>) -> Result<RepoState> {
-    exec::as_user("fetch", || CliEngine::new(state.repo_path()?).fetch())?;
+    undoable(&state, "fetch", Hint::none(), || CliEngine::new(state.repo_path()?).fetch())?;
     build_state(&state)
 }
 
@@ -497,7 +534,7 @@ pub async fn fetch(state: State<'_, AppState>) -> Result<RepoState> {
 #[tauri::command]
 pub async fn git_exec(state: State<'_, AppState>, args: Vec<String>) -> Result<GitExecResult> {
     let repo = state.repo_path()?;
-    let out = exec::as_user("git_exec", || CliEngine::new(&repo).exec_raw(&args))?;
+    let out = undoable(&state, "git_exec", Hint::none(), || CliEngine::new(&repo).exec_raw(&args))?;
     Ok(GitExecResult {
         stdout: mask_credentials(&out.stdout).into_owned(),
         stderr: mask_credentials(&out.stderr).into_owned(),
@@ -509,7 +546,7 @@ pub async fn git_exec(state: State<'_, AppState>, args: Vec<String>) -> Result<G
 
 #[tauri::command]
 pub async fn pull(state: State<'_, AppState>) -> Result<RepoState> {
-    exec::as_user("pull", || CliEngine::new(state.repo_path()?).pull())?;
+    undoable(&state, "pull", Hint::none(), || CliEngine::new(state.repo_path()?).pull())?;
     build_state(&state)
 }
 
@@ -649,7 +686,7 @@ pub async fn branch_rename(
     from: String,
     to: String,
 ) -> Result<RepoState> {
-    exec::as_user("branch_rename", || branches::rename(&state.repo_path()?, &from, &to))?;
+    undoable(&state, "branch_rename", Hint::args([from.as_str(), to.as_str()]), || branches::rename(&state.repo_path()?, &from, &to))?;
     build_state(&state)
 }
 
@@ -660,7 +697,7 @@ pub async fn branch_delete(
     remote: bool,
     force: bool,
 ) -> Result<RepoState> {
-    exec::as_user("branch_delete", || branches::delete(&state.repo_path()?, &name, remote, force))?;
+    undoable(&state, "branch_delete", Hint::args([name.as_str(), if remote { "remote" } else { "local" }]), || branches::delete(&state.repo_path()?, &name, remote, force))?;
     build_state(&state)
 }
 
@@ -674,13 +711,13 @@ pub async fn branch_unmerged_count(state: State<'_, AppState>, name: String) -> 
 
 #[tauri::command]
 pub async fn branch_merge(state: State<'_, AppState>, name: String) -> Result<RepoState> {
-    exec::as_user("branch_merge", || branches::merge(&state.repo_path()?, &name))?;
+    undoable(&state, "branch_merge", Hint::args([name.as_str()]), || branches::merge(&state.repo_path()?, &name))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn branch_rebase_onto(state: State<'_, AppState>, name: String) -> Result<RepoState> {
-    exec::as_user("branch_rebase_onto", || branches::rebase_onto(&state.repo_path()?, &name))?;
+    undoable(&state, "branch_rebase_onto", Hint::args([name.as_str()]), || branches::rebase_onto(&state.repo_path()?, &name))?;
     build_state(&state)
 }
 
@@ -688,7 +725,7 @@ pub async fn branch_rebase_onto(state: State<'_, AppState>, name: String) -> Res
 
 #[tauri::command]
 pub async fn commit_revert(state: State<'_, AppState>, hash: String) -> Result<RepoState> {
-    exec::as_user("commit_revert", || ops::revert(&state.repo_path()?, &hash))?;
+    undoable(&state, "commit_revert", Hint::args([hash.as_str()]), || ops::revert(&state.repo_path()?, &hash))?;
     build_state(&state)
 }
 
@@ -698,13 +735,13 @@ pub async fn commit_reset(
     hash: String,
     mode: String,
 ) -> Result<RepoState> {
-    exec::as_user("commit_reset", || ops::reset(&state.repo_path()?, &hash, &mode))?;
+    undoable(&state, "commit_reset", Hint::args([hash.as_str(), mode.as_str()]), || ops::reset(&state.repo_path()?, &hash, &mode))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn commit_cherry_pick(state: State<'_, AppState>, hash: String) -> Result<RepoState> {
-    exec::as_user("commit_cherry_pick", || ops::cherry_pick(&state.repo_path()?, &hash))?;
+    undoable(&state, "commit_cherry_pick", Hint::args([hash.as_str()]), || ops::cherry_pick(&state.repo_path()?, &hash))?;
     build_state(&state)
 }
 
@@ -732,7 +769,7 @@ pub async fn repo_local_changes(state: State<'_, AppState>) -> Result<bool> {
 
 #[tauri::command]
 pub async fn commit_checkout(state: State<'_, AppState>, hash: String) -> Result<RepoState> {
-    exec::as_user("commit_checkout", || ops::checkout_rev(&state.repo_path()?, &hash))?;
+    undoable(&state, "commit_checkout", Hint::args([hash.as_str()]), || ops::checkout_rev(&state.repo_path()?, &hash))?;
     build_state(&state)
 }
 
@@ -743,7 +780,7 @@ pub async fn tag_create(
     name: String,
     message: Option<String>,
 ) -> Result<RepoState> {
-    exec::as_user("tag_create", || {
+    undoable(&state, "tag_create", Hint::args([name.as_str()]), || {
         ops::tag_create(&state.repo_path()?, &hash, &name, message.as_deref())
     })?;
     build_state(&state)
@@ -772,7 +809,7 @@ pub async fn conflict_resolve(
     expect: Option<String>,
 ) -> Result<RepoState> {
     let repo = state.repo_path()?;
-    exec::as_user("conflict_resolve", || {
+    undoable(&state, "conflict_resolve", Hint::args([path.as_str()]), || {
         conflict_engine::resolve(&repo, &path, text.as_deref(), eol, expect.as_deref())
     })?;
     build_state(&state)
@@ -787,28 +824,28 @@ pub async fn conflict_take(
     side: String,
 ) -> Result<RepoState> {
     let repo = state.repo_path()?;
-    exec::as_user("conflict_take", || conflict_engine::take(&repo, &path, &side))?;
+    undoable(&state, "conflict_take", Hint::args([path.as_str()]), || conflict_engine::take(&repo, &path, &side))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn op_continue(state: State<'_, AppState>) -> Result<RepoState> {
     let data = state.data_dir_opt();
-    exec::as_user("op_continue", || ops::op_continue(&state.repo_path()?, data.as_deref()))?;
+    undoable(&state, "op_continue", Hint::none(), || ops::op_continue(&state.repo_path()?, data.as_deref()))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn op_abort(state: State<'_, AppState>) -> Result<RepoState> {
     let data = state.data_dir_opt();
-    exec::as_user("op_abort", || ops::op_abort(&state.repo_path()?, data.as_deref()))?;
+    undoable(&state, "op_abort", Hint::none(), || ops::op_abort(&state.repo_path()?, data.as_deref()))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn op_skip(state: State<'_, AppState>) -> Result<RepoState> {
     let data = state.data_dir_opt();
-    exec::as_user("op_skip", || ops::op_skip(&state.repo_path()?, data.as_deref()))?;
+    undoable(&state, "op_skip", Hint::none(), || ops::op_skip(&state.repo_path()?, data.as_deref()))?;
     build_state(&state)
 }
 
@@ -828,7 +865,7 @@ pub async fn op_rebase_start(
 ) -> Result<RepoState> {
     let repo = state.repo_path()?;
     let data = state.data_dir()?;
-    exec::as_user("op_rebase_start", || rebase::start(&repo, &data, &hash, &steps))?;
+    undoable(&state, "op_rebase_start", Hint::args([hash.as_str()]), || rebase::start(&repo, &data, &hash, &steps))?;
     build_state(&state)
 }
 
@@ -842,7 +879,7 @@ pub async fn commit_reword(
 ) -> Result<RepoState> {
     let repo = state.repo_path()?;
     let data = state.data_dir()?;
-    exec::as_user("commit_reword", || rebase::reword(&repo, &data, &hash, &message))?;
+    undoable(&state, "commit_reword", Hint::args([hash.as_str()]), || rebase::reword(&repo, &data, &hash, &message))?;
     build_state(&state)
 }
 
@@ -855,7 +892,7 @@ pub async fn commits_squash(
 ) -> Result<RepoState> {
     let repo = state.repo_path()?;
     let data = state.data_dir()?;
-    exec::as_user("commits_squash", || rebase::squash(&repo, &data, &hashes, &message))?;
+    undoable(&state, "commits_squash", Hint::none(), || rebase::squash(&repo, &data, &hashes, &message))?;
     build_state(&state)
 }
 
@@ -866,7 +903,7 @@ pub async fn stash_list_app(state: State<'_, AppState>) -> Result<Vec<String>> {
 
 #[tauri::command]
 pub async fn stash_restore(state: State<'_, AppState>, name: String) -> Result<RepoState> {
-    exec::as_user("stash_restore", || ops::stash_restore(&state.repo_path()?, &name))?;
+    undoable(&state, "stash_restore", Hint::args([name.as_str()]), || ops::stash_restore(&state.repo_path()?, &name))?;
     build_state(&state)
 }
 
@@ -886,7 +923,7 @@ pub async fn stash_apply(
     name: String,
     hash: Option<String>,
 ) -> Result<RepoState> {
-    exec::as_user("stash_apply", || ops::stash_apply(&state.repo_path()?, &name, hash.as_deref()))?;
+    undoable(&state, "stash_apply", Hint::args([name.as_str()]), || ops::stash_apply(&state.repo_path()?, &name, hash.as_deref()))?;
     build_state(&state)
 }
 
@@ -897,7 +934,7 @@ pub async fn stash_pop(
     name: String,
     hash: Option<String>,
 ) -> Result<RepoState> {
-    exec::as_user("stash_pop", || ops::stash_pop(&state.repo_path()?, &name, hash.as_deref()))?;
+    undoable(&state, "stash_pop", Hint::args([name.as_str()]), || ops::stash_pop(&state.repo_path()?, &name, hash.as_deref()))?;
     build_state(&state)
 }
 
@@ -908,7 +945,7 @@ pub async fn stash_drop(
     name: String,
     hash: Option<String>,
 ) -> Result<RepoState> {
-    exec::as_user("stash_drop", || ops::stash_drop(&state.repo_path()?, &name, hash.as_deref()))?;
+    undoable(&state, "stash_drop", Hint::args([name.as_str()]), || ops::stash_drop(&state.repo_path()?, &name, hash.as_deref()))?;
     build_state(&state)
 }
 
@@ -927,7 +964,7 @@ pub async fn stash_push(
     state: State<'_, AppState>,
     message: Option<String>,
 ) -> Result<RepoState> {
-    exec::as_user("stash_push", || ops::stash_push(&state.repo_path()?, message.as_deref()))?;
+    undoable(&state, "stash_push", Hint::args([message.as_deref().unwrap_or("")]), || ops::stash_push(&state.repo_path()?, message.as_deref()))?;
     build_state(&state)
 }
 
@@ -936,7 +973,7 @@ pub async fn stash_push(
 /// domain refusals stating the reason.
 #[tauri::command]
 pub async fn branch_update(state: State<'_, AppState>, name: String) -> Result<RepoState> {
-    exec::as_user("branch_update", || branches::update_from_upstream(&state.repo_path()?, &name))?;
+    undoable(&state, "branch_update", Hint::args([name.as_str()]), || branches::update_from_upstream(&state.repo_path()?, &name))?;
     build_state(&state)
 }
 
@@ -952,6 +989,46 @@ pub async fn ui_state_set(state: State<'_, AppState>, ui: UiState) -> Result<UiS
     let repo = state.repo_path()?;
     uistate::set(&repo, &ui)?;
     uistate::get(&repo)
+}
+
+// ── Undo / Redo (engine::undo) ─────────────────────────────────────────────────
+
+/// What Undo and Redo would reverse now, or why they cannot. Read-only for the
+/// repository; it ends the chain when the repository changed outside a recorded
+/// action, which is how that becomes a reason on the button.
+#[tauri::command]
+pub async fn undo_state(state: State<'_, AppState>) -> Result<UndoState> {
+    let repo = state.repo_path()?;
+    state.undo.state(state.data_dir_opt().as_deref(), &repo)
+}
+
+/// Undo or redo step `id` — the one `undo_state` offered; anything else moved in
+/// between is refused. An undone changelist commit returns its files to the lists
+/// they were committed from.
+#[tauri::command]
+pub async fn undo_step(
+    state: State<'_, AppState>,
+    direction: UndoDirection,
+    id: u64,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    let lists = state
+        .undo
+        .step(state.data_dir_opt().as_deref(), &repo, direction, id)?;
+    if lists.is_empty() {
+        return build_state(&state);
+    }
+    // Synced first, so the returned files are in the store, then moved back. A list
+    // deleted since keeps its files in Default.
+    build_state(&state)?;
+    mutate(&state, |s| {
+        for (path, list) in &lists {
+            if s.changelists.iter().any(|c| &c.id == list) {
+                changelists::move_files(s, std::slice::from_ref(path), list)?;
+            }
+        }
+        Ok(())
+    })
 }
 
 // ── command journal ──────────────────────────────────────────────────────────
