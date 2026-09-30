@@ -1,9 +1,12 @@
 import { For, Show } from "solid-js";
-import { opAbort, opContinue, opSkip, type OperationState } from "../../../api";
+import { opAbort, opSkip, type OperationState } from "../../../api";
 import { d } from "../../../i18n";
 import { busy, confirmAction, run, state } from "../../../store";
 import { afterRepoChange } from "./repoRefresh";
+import { continueOperation, operationWord } from "./operation";
 import { DISABLED_CLASS } from "../../IconButton";
+import { openConflict } from "../../conflicts/ConflictPanel";
+import { CONFLICT_CODES } from "../../conflicts/conflictRules";
 
 /**
  * The strip that shows an unfinished merge, rebase, cherry-pick or revert and
@@ -20,6 +23,10 @@ import { DISABLED_CLASS } from "../../IconButton";
  *
  * "Abort" is destructive, so it goes through the shared confirmation — the one
  * whose focus sits on Cancel and which Enter therefore does not accept.
+ *
+ * Each conflicted path carries git's two letters for its kind (`UU`, `DU`, …)
+ * and opens the conflict editor (R05e); the editor itself offers "Continue"
+ * once the last one is resolved, through the same `continueOperation`.
  */
 export default function OperationBar() {
   const op = (): OperationState | null => {
@@ -44,19 +51,9 @@ export default function OperationBar() {
     }
   };
 
-  const kindWord = (o: OperationState) =>
-    o.kind === "merge"
-      ? d().phaseMerge()
-      : o.kind === "rebase"
-        ? d().phaseRebase()
-        : o.kind === "cherryPick"
-          ? d().phaseCherryPick()
-          : d().phaseRevert();
+  const kindWord = (o: OperationState) => operationWord(o.kind);
 
-  const doContinue = async () => {
-    await run(opContinue(), d().phaseOpContinue());
-    afterRepoChange();
-  };
+  const doContinue = () => continueOperation();
   const doSkip = async () => {
     await run(opSkip(), d().phaseOpSkip());
     afterRepoChange();
@@ -96,9 +93,21 @@ export default function OperationBar() {
             <div class="mt-0.5 text-fg-muted">{d().opConflicts(o().conflicted.length)}</div>
             <ul class="mt-0.5 max-h-24 overflow-auto">
               <For each={o().conflicted}>
-                {(p) => (
-                  <li class="truncate font-mono text-[0.6875rem] text-danger" title={p}>
-                    {p}
+                {(c) => (
+                  <li class="flex items-center gap-2 font-mono text-[0.6875rem]">
+                    <span class="shrink-0 font-bold text-danger" title={d().conflictKind(c.kind)}>
+                      {CONFLICT_CODES[c.kind]}
+                    </span>
+                    <span class="min-w-0 flex-1 truncate text-danger" title={c.path}>
+                      {c.path}
+                    </span>
+                    <button
+                      class="shrink-0 rounded border border-border px-1.5 font-sans text-fg hover:bg-bg-muted"
+                      title={d().conflictResolveTip(c.path)}
+                      onClick={() => openConflict(c.path)}
+                    >
+                      {d().conflictResolveBtn()}
+                    </button>
                   </li>
                 )}
               </For>

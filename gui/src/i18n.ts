@@ -11,6 +11,16 @@ import { createSignal } from "solid-js";
 
 export type Locale = "en" | "ru";
 
+/** `ConflictKind` of `api.ts`, spelled out here: this module imports no API types. */
+type ConflictKindKey =
+  | "bothModified"
+  | "bothAdded"
+  | "deletedByUs"
+  | "deletedByThem"
+  | "addedByUs"
+  | "addedByThem"
+  | "bothDeleted";
+
 const stored = localStorage.getItem("locale");
 const [locale, setLocaleSignal] = createSignal<Locale>(stored === "ru" ? "ru" : "en");
 export { locale };
@@ -580,6 +590,102 @@ const en = {
     `The line was introduced by the change. Highlighted: what it replaced, or the line it was inserted after (${from === to ? from : `${from}–${to}`}).`,
   blameKeys: () =>
     "↑ ↓ PgUp PgDn Home End: move · Enter: open in log · ⌘/Ctrl+B: blame before · ⌘/Ctrl+↑↓: next/prev difference · Esc: back / close",
+  conflictResolveItem: () => "Resolve conflict…",
+  conflictResolveBtn: () => "Resolve…",
+  conflictResolveTip: (path: string) => `Resolve the conflict in ${path}`,
+  conflictTitle: (path: string) => `Resolve conflict: ${path}`,
+  conflictKind: (k: ConflictKindKey) =>
+    ({
+      bothModified: "both sides changed the file",
+      bothAdded: "both sides added the file",
+      deletedByUs: "deleted on our side, changed on theirs",
+      deletedByThem: "changed on our side, deleted on theirs",
+      addedByUs: "added on our side only",
+      addedByThem: "added on their side only",
+      bothDeleted: "deleted on both sides",
+    })[k],
+  conflictLoading: () => "Reading the conflict…",
+  conflictOurs: () => "Ours",
+  conflictBase: () => "Base",
+  conflictTheirs: () => "Theirs",
+  conflictResult: () => "Result — what Save writes to the file",
+  conflictLeft: (n: number) =>
+    n === 0 ? "no conflicts left" : `${n} ${n === 1 ? "conflict" : "conflicts"} left`,
+  conflictBlock: (i: number, n: number) => `Conflict ${i} of ${n}`,
+  conflictBlockOpen: () => "unresolved",
+  conflictBlockTaken: (how: string) => `resolved: ${how}`,
+  conflictHowOurs: () => "ours",
+  conflictHowTheirs: () => "theirs",
+  conflictHowBothOT: () => "ours → theirs",
+  conflictHowBothTO: () => "theirs → ours",
+  conflictHowLines: (n: number) => `${n} ${n === 1 ? "line" : "lines"} picked`,
+  conflictHowManual: () => "edited by hand",
+  conflictTakeOurs: () => "Take ours",
+  conflictTakeTheirs: () => "Take theirs",
+  conflictBothOT: () => "Both: ours → theirs",
+  conflictBothTO: () => "Both: theirs → ours",
+  conflictResetBlock: () => "Reset",
+  conflictResetBlockTip: () => "Put the markers of this block back",
+  conflictPickTip: () => "Click: add this line to the result (again: remove it)",
+  conflictEmptySide: () => "(empty)",
+  conflictPrev: () => "Previous",
+  conflictNext: () => "Next",
+  conflictNavTip: () => "Previous / next unresolved conflict (⇧F7 / F7)",
+  conflictUndo: () => "Undo",
+  conflictRedo: () => "Redo",
+  conflictNothingToUndo: () => "Nothing to undo in this editor",
+  conflictNothingToRedo: () => "Nothing to redo in this editor",
+  conflictSave: () => "Save",
+  conflictSaved: () => "Saved",
+  conflictUnsaved: () => "Unsaved changes",
+  conflictMarkResolved: () => "Mark resolved",
+  conflictMarkResolvedTip: () => "Save the result and stage it (git add): the conflict is resolved",
+  conflictMarkAsIs: () => "Mark resolved as it is on disk",
+  conflictMarkAsIsTip: () => "Stage the file exactly as it lies in the working tree (git add)",
+  conflictWholeOurs: () => "Whole file: ours",
+  conflictWholeTheirs: () => "Whole file: theirs",
+  conflictWholeTip: (side: string) => `Resolve the whole file with the ${side} version (git checkout --${side} + git add)`,
+  conflictWholeDeletes: (side: string) => `Whole file: ${side} (delete it)`,
+  conflictWholeDeletesTip: (side: string) =>
+    `The file does not exist on the ${side} side: resolving with it deletes the file (git rm)`,
+  conflictWholeDiscards: () => "The result has unsaved edits. Resolve the whole file with one side and lose them?",
+  conflictDiscardEdits: () => "The result has unsaved edits. Close the editor and lose them?",
+  conflictMarkersLeft: (lines: string) =>
+    `Conflict markers are still in the result (line ${lines}). Mark the file resolved with them in it?`,
+  conflictMarkAnyway: () => "Mark resolved anyway",
+  conflictRebaseNote: () =>
+    "During a rebase “ours” is the branch being rebased onto, and “theirs” is your commit being replayed.",
+  conflictNoBase: () =>
+    "The markers carry no base (merge.conflictStyle is merge). Set it to diff3 or zdiff3 to see the base here, or look at the whole files.",
+  conflictViewBlocks: () => "Blocks",
+  conflictViewFiles: () => "Whole files",
+  conflictSideAbsent: () => "Not on this side: the file is deleted here.",
+  conflictSymlink: () => "A symbolic link: resolved whole only.",
+  conflictSubmodule: () => "A submodule: resolved whole only.",
+  conflictWhyDeleted: () =>
+    "One side deleted the file, so there are no markers to work through: keep the deletion or keep the file.",
+  conflictWhyWhole: (why: string) => `Only whole-file resolution is possible here. ${why}`,
+  conflictParse: (reason: string, line: number, size: number | undefined, expected: number) =>
+    reason === "marker-size"
+      ? `Line ${line}: conflict markers ${size} characters long, while this file expects ${expected}. The conflict-marker-size attribute was probably changed after the merge; edit the result by hand.`
+      : `Line ${line}: ${
+          {
+            nested: "a conflict opens inside another one",
+            unterminated: "this conflict is never closed",
+            "no-separator": "the conflict closes before its ======= separator",
+            "stray-base": "a base marker (|||||||) out of place",
+            "stray-separator": "a second ======= separator in one conflict",
+            "stray-closing": "a closing marker with no conflict open",
+          }[reason] ?? reason
+        }. The block tools are off until the markers read again; edit the result by hand.`,
+  conflictResolvedNext: (path: string) => `Resolved. Next conflicted file: ${path}`,
+  conflictOpenNext: () => "Open next",
+  conflictAllResolved: (op: string) => `All conflicts are resolved. Continue the ${op}?`,
+  conflictNoneLeft: () => "Resolved. No conflicted files are left.",
+  conflictKeys: () =>
+    "Click a line: add it to the result · F7 / ⇧F7: next / previous conflict · ⌘/Ctrl+Z, ⌘/Ctrl+⇧Z: undo / redo · ⌘/Ctrl+S: save · Esc: close",
+  phaseConflictResolve: () => "mark resolved",
+  phaseConflictTake: () => "resolve with one side",
 };
 
 type Dict = typeof en;
@@ -1119,6 +1225,102 @@ const ru: Dict = {
     `Строка появилась в этом изменении. Подсвечено то, что она заменила, или строка, после которой вставлена (${from === to ? from : `${from}–${to}`}).`,
   blameKeys: () =>
     "↑ ↓ PgUp PgDn Home End: переход · Enter: открыть в логе · ⌘/Ctrl+B: blame до изменения · ⌘/Ctrl+↑↓: следующее/предыдущее различие · Esc: назад / закрыть",
+  conflictResolveItem: () => "Разрешить конфликт…",
+  conflictResolveBtn: () => "Разрешить…",
+  conflictResolveTip: (path) => `Разрешить конфликт в ${path}`,
+  conflictTitle: (path) => `Разрешение конфликта: ${path}`,
+  conflictKind: (k) =>
+    ({
+      bothModified: "файл изменён с обеих сторон",
+      bothAdded: "файл добавлен с обеих сторон",
+      deletedByUs: "удалён у нас, изменён у них",
+      deletedByThem: "изменён у нас, удалён у них",
+      addedByUs: "добавлен только у нас",
+      addedByThem: "добавлен только у них",
+      bothDeleted: "удалён с обеих сторон",
+    })[k],
+  conflictLoading: () => "Читаю конфликт…",
+  conflictOurs: () => "Наши (ours)",
+  conflictBase: () => "База (base)",
+  conflictTheirs: () => "Их (theirs)",
+  conflictResult: () => "Результат — это Сохранить запишет в файл",
+  conflictLeft: (n) =>
+    n === 0 ? "конфликтов не осталось" : `осталось ${n} ${ruPlural(n, "конфликт", "конфликта", "конфликтов")}`,
+  conflictBlock: (i, n) => `Конфликт ${i} из ${n}`,
+  conflictBlockOpen: () => "не разрешён",
+  conflictBlockTaken: (how) => `разрешён: ${how}`,
+  conflictHowOurs: () => "наши",
+  conflictHowTheirs: () => "их",
+  conflictHowBothOT: () => "наши → их",
+  conflictHowBothTO: () => "их → наши",
+  conflictHowLines: (n) => `${ruPlural(n, "выбрана", "выбраны", "выбрано")} ${n} ${ruPlural(n, "строка", "строки", "строк")}`,
+  conflictHowManual: () => "правлен вручную",
+  conflictTakeOurs: () => "Взять наши",
+  conflictTakeTheirs: () => "Взять их",
+  conflictBothOT: () => "Оба: наши → их",
+  conflictBothTO: () => "Оба: их → наши",
+  conflictResetBlock: () => "Сбросить",
+  conflictResetBlockTip: () => "Вернуть маркеры этого блока",
+  conflictPickTip: () => "Клик: добавить строку в результат (повторный — убрать)",
+  conflictEmptySide: () => "(пусто)",
+  conflictPrev: () => "Предыдущий",
+  conflictNext: () => "Следующий",
+  conflictNavTip: () => "Предыдущий / следующий неразрешённый конфликт (⇧F7 / F7)",
+  conflictUndo: () => "Отменить",
+  conflictRedo: () => "Повторить",
+  conflictNothingToUndo: () => "В этом редакторе нечего отменять",
+  conflictNothingToRedo: () => "В этом редакторе нечего повторять",
+  conflictSave: () => "Сохранить",
+  conflictSaved: () => "Сохранено",
+  conflictUnsaved: () => "Есть несохранённые правки",
+  conflictMarkResolved: () => "Отметить разрешённым",
+  conflictMarkResolvedTip: () => "Сохранить результат и добавить в индекс (git add): конфликт разрешён",
+  conflictMarkAsIs: () => "Отметить разрешённым как есть на диске",
+  conflictMarkAsIsTip: () => "Добавить файл в индекс ровно таким, как он лежит в рабочем дереве (git add)",
+  conflictWholeOurs: () => "Весь файл: наши",
+  conflictWholeTheirs: () => "Весь файл: их",
+  conflictWholeTip: (side) => `Разрешить весь файл версией ${side} (git checkout --${side} + git add)`,
+  conflictWholeDeletes: (side) => `Весь файл: ${side} (удалить)`,
+  conflictWholeDeletesTip: (side) =>
+    `На стороне ${side} файла нет: разрешение этой стороной удаляет файл (git rm)`,
+  conflictWholeDiscards: () => "В результате есть несохранённые правки. Разрешить весь файл одной стороной и потерять их?",
+  conflictDiscardEdits: () => "В результате есть несохранённые правки. Закрыть редактор и потерять их?",
+  conflictMarkersLeft: (lines) =>
+    `В результате остались маркеры конфликта (строка ${lines}). Всё равно отметить файл разрешённым?`,
+  conflictMarkAnyway: () => "Всё равно отметить",
+  conflictRebaseNote: () =>
+    "Во время rebase «наши» (ours) — ветка, на которую идёт rebase, а «их» (theirs) — ваш переносимый коммит.",
+  conflictNoBase: () =>
+    "В маркерах нет базы (merge.conflictStyle = merge). Поставьте diff3 или zdiff3, чтобы видеть её здесь, или смотрите файлы целиком.",
+  conflictViewBlocks: () => "Блоки",
+  conflictViewFiles: () => "Файлы целиком",
+  conflictSideAbsent: () => "На этой стороне файла нет: он удалён.",
+  conflictSymlink: () => "Символическая ссылка: разрешается только целиком.",
+  conflictSubmodule: () => "Подмодуль: разрешается только целиком.",
+  conflictWhyDeleted: () =>
+    "Одна из сторон удалила файл, маркеров нет: оставьте удаление или оставьте файл.",
+  conflictWhyWhole: (why) => `Здесь возможно только разрешение файла целиком. ${why}`,
+  conflictParse: (reason, line, size, expected) =>
+    reason === "marker-size"
+      ? `Строка ${line}: маркеры конфликта длиной ${size} символов, а для этого файла ожидается ${expected}. Вероятно, атрибут conflict-marker-size поменяли после слияния; правьте результат вручную.`
+      : `Строка ${line}: ${
+          {
+            nested: "конфликт открывается внутри другого",
+            unterminated: "конфликт не закрыт",
+            "no-separator": "конфликт закрывается раньше разделителя =======",
+            "stray-base": "маркер базы (|||||||) не на своём месте",
+            "stray-separator": "второй разделитель ======= в одном конфликте",
+            "stray-closing": "закрывающий маркер без открытого конфликта",
+          }[reason] ?? reason
+        }. Инструменты блоков выключены, пока маркеры не читаются; правьте результат вручную.`,
+  conflictResolvedNext: (path) => `Разрешено. Следующий конфликтный файл: ${path}`,
+  conflictOpenNext: () => "Открыть следующий",
+  conflictAllResolved: (op) => `Все конфликты разрешены. Продолжить ${op}?`,
+  conflictNoneLeft: () => "Разрешено. Конфликтных файлов не осталось.",
+  conflictKeys: () =>
+    "Клик по строке: добавить в результат · F7 / ⇧F7: следующий / предыдущий конфликт · ⌘/Ctrl+Z, ⌘/Ctrl+⇧Z: отменить / повторить · ⌘/Ctrl+S: сохранить · Esc: закрыть",
+  phaseConflictResolve: () => "отметить разрешённым",
+  phaseConflictTake: () => "разрешить одной стороной",
 };
 
 /** Current locale's dictionary. Reactive: reads the `locale` signal. */

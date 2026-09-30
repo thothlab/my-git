@@ -50,6 +50,7 @@ import { d } from "../i18n";
 import { openStashPanel, reloadStashes, stashCount } from "./StashPanel";
 import { changeOf, historyPathOf, openFileHistory } from "./FileHistoryPanel";
 import { openBlame } from "./blame/BlamePanel";
+import { openConflict } from "./conflicts/ConflictPanel";
 
 // Which paths a drag carries: the checked set if the dragged row is part of it,
 // otherwise just that one file.
@@ -456,6 +457,18 @@ function ContextMenu() {
                       }}
                     />
                   </Show>
+                </Show>
+                {/* R05e: a conflict is resolved here too — with no operation running
+                    (a `stash pop` that collided) the operation strip is not there. */}
+                <Show when={changeOf(path())?.status === "conflicted"}>
+                  <Divider />
+                  <MenuItem
+                    label={d().conflictResolveItem()}
+                    onClick={() => {
+                      setMenu(null);
+                      openConflict(path());
+                    }}
+                  />
                 </Show>
                 <Divider />
                 <MenuItem

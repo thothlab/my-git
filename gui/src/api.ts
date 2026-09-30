@@ -414,7 +414,24 @@ export interface OperationState {
   kind: OperationKind;
   current: number | null;
   total: number | null;
-  conflicted: string[];
+  /** Every unmerged path with the kind of its conflict (`engine::conflict::list`). */
+  conflicted: ConflictEntry[];
+}
+
+/** git's seven kinds of conflict, named after the letters `git status` prints
+ *  (`UU`, `AA`, `DU`, `UD`, `AU`, `UA`, `DD`) — see `CONFLICT_CODES`. */
+export type ConflictKind =
+  | "bothModified"
+  | "bothAdded"
+  | "deletedByUs"
+  | "deletedByThem"
+  | "addedByUs"
+  | "addedByThem"
+  | "bothDeleted";
+
+export interface ConflictEntry {
+  path: string;
+  kind: ConflictKind;
 }
 
 /** Panel UI state, persisted in `.git/graft-ui.json` (never in changelists.json). */
@@ -612,6 +629,48 @@ export const tagCreate = (hash: string, name: string, message?: string) =>
   invoke<RepoState>("tag_create", { hash, name, message: message ?? null });
 
 export const opContinue = () => invoke<RepoState>("op_continue");
+
+// conflict resolution (R05e)
+
+/** One side of a conflict as the index holds it. `text` in `\n`, or `null` —
+ *  then `blocked` says why, or `mode` does (`120000` symlink, `160000` submodule). */
+export interface ConflictSide {
+  text: string | null;
+  blocked: EditBlock | null;
+  mode: string;
+}
+
+/** A conflicted path for the conflict editor. A `null` side does not exist in
+ *  the index — the file was deleted there, or never had a base. `worktree` is the
+ *  file with git's markers, read as `file_read` reads it: its `digest` is what a
+ *  save must hand back. `wholeOnly`: no line-level resolution is possible. */
+export interface ConflictFile {
+  path: string;
+  kind: ConflictKind;
+  base: ConflictSide | null;
+  ours: ConflictSide | null;
+  theirs: ConflictSide | null;
+  worktree: TextFile;
+  markerSize: number;
+  wholeOnly: boolean;
+}
+
+export const conflictRead = (path: string) => invoke<ConflictFile>("conflict_read", { path });
+
+/** Mark `path` resolved (`git add`), writing `text` first when given. `expect` is
+ *  the digest the editor last saw — a file changed underneath is `kind: "stale"`
+ *  and nothing is staged; `null` takes the file as it lies. */
+export const conflictResolve = (
+  path: string,
+  text: string | null,
+  eol: Eol,
+  expect: string | null,
+) => invoke<RepoState>("conflict_resolve", { path, text, eol, expect });
+
+/** Resolve `path` by one whole side; the side that deleted the file resolves to
+ *  the deletion. */
+export const conflictTake = (path: string, side: "ours" | "theirs") =>
+  invoke<RepoState>("conflict_take", { path, side });
 export const opAbort = () => invoke<RepoState>("op_abort");
 export const opSkip = () => invoke<RepoState>("op_skip");
 

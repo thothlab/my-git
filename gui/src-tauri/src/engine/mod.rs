@@ -5,6 +5,7 @@ pub mod blame;
 pub mod branches;
 pub mod cli;
 pub mod commit;
+pub mod conflict;
 pub mod discard;
 pub mod exec;
 pub mod file_history;

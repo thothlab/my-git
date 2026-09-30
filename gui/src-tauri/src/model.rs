@@ -456,13 +456,83 @@ pub enum OperationKind {
 }
 
 /// State of an unfinished operation. `kind: None` means the repository is calm.
+///
+/// `conflicted` names every unmerged path with what kind of conflict it is — the
+/// same list, from the same `ls-files -u`, whether an operation is running or not;
+/// with `kind: None` it is left empty (a conflict with no operation — a `stash pop`
+/// that collided — is visible in the Changes panel instead).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationState {
     pub kind: OperationKind,
     pub current: Option<u32>,
     pub total: Option<u32>,
-    pub conflicted: Vec<String>,
+    pub conflicted: Vec<ConflictEntry>,
+}
+
+/// What kind of conflict an unmerged path is in — git's own seven, named after the
+/// two letters `git status` prints for them. Derived from which index stages exist
+/// (1 base, 2 ours, 3 theirs), the same rule git uses for those letters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConflictKind {
+    /// `UU` — stages 1, 2, 3: both sides changed the file.
+    BothModified,
+    /// `AA` — stages 2, 3: both sides added it, there is no base.
+    BothAdded,
+    /// `DU` — stages 1, 3: we deleted it, they changed it.
+    DeletedByUs,
+    /// `UD` — stages 1, 2: we changed it, they deleted it.
+    DeletedByThem,
+    /// `AU` — stage 2 only: we added it (the other side renamed onto it, typically).
+    AddedByUs,
+    /// `UA` — stage 3 only: they added it.
+    AddedByThem,
+    /// `DD` — stage 1 only: both deleted it (typically a rename on both sides).
+    BothDeleted,
+}
+
+/// One unmerged path and the kind of its conflict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictEntry {
+    pub path: String,
+    pub kind: ConflictKind,
+}
+
+/// One side of a conflict as the index holds it (stage 1, 2 or 3).
+///
+/// `text` is the blob normalised to `\n`, or `None` when it is not text: `blocked`
+/// then says why (`binary`, `too-large`), or `mode` does — a symlink (`120000`) or a
+/// submodule (`160000`) is resolved whole, never line by line.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictSide {
+    pub text: Option<String>,
+    pub blocked: Option<EditBlock>,
+    pub mode: String,
+}
+
+/// Everything the conflict editor needs about one unmerged path.
+///
+/// A side that is `None` does not exist in the index — the file was deleted on that
+/// side (`DeletedByUs` has no `ours`), or never existed there (`BothAdded` has no
+/// `base`). `worktree` is the file with git's markers in it, read exactly as the
+/// in-place editor reads a file, so its `digest` is what a save must hand back.
+/// `markerSize` is the `conflict-marker-size` attribute of the path (7 unless set).
+/// `wholeOnly` is the single answer to "can this be resolved line by line": false
+/// only when every present side and the working file are text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictFile {
+    pub path: String,
+    pub kind: ConflictKind,
+    pub base: Option<ConflictSide>,
+    pub ours: Option<ConflictSide>,
+    pub theirs: Option<ConflictSide>,
+    pub worktree: TextFile,
+    pub marker_size: u32,
+    pub whole_only: bool,
 }
 
 /// UI state of the Git panel, persisted in `.git/graft-ui.json`.

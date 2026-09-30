@@ -26,9 +26,9 @@
 | `cd gui && npm run tauri dev` | Запустить Graft локально (нужен дисплей) |
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
-| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, разбор и печать команды консоли), 199 утверждений |
-| `cargo test` | Оба крейта разом: 268 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 268 тестов |
+| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, разбор и печать команды консоли), 269 утверждений |
+| `cargo test` | Оба крейта разом: 279 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 279 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -69,6 +69,8 @@ gui/src-tauri/src/  бэк GUI
   engine/commit.rs  один коммит и сравнение двух ревизий
   engine/branches.rs дерево веток и операции над ветками
   engine/ops.rs     операции, переписывающие историю, и распознавание незавершённой
+  engine/conflict.rs конфликтные файлы: стороны из индекса (стадии 1/2/3), вид конфликта,
+                    запись разрешения + `git add`, сторона целиком / удаление (`git rm`)
   engine/discard.rs резервная копия перед откатом (refs/graft/discard) и её восстановление
   engine/patch.rs   патч по выбранным строкам диффа (чистый, без git) + единая нумерация строк хунков
 gui/src/            фронт
@@ -83,8 +85,13 @@ gui/src/            фронт
                     FileHistoryPanel — оверлей «История файла» (список коммитов + DiffView)
   components/blame/ BlamePanel — оверлей blame (строки + коммит строки + DiffView, стек
                     «blame до изменения»); blameRules.ts — чистые правила, без единого импорта
+  components/conflicts/ ConflictPanel — оверлей редактора конфликта (блоки ours · base ·
+                    theirs + редактируемый результат, свой undo); conflictRules.ts — разбор
+                    маркеров, сборка результата из решений, история undo, без единого импорта
   components/log/   панель Git: BranchTree, LogTable, LogGraph, CommitDetailsPane, FilterBar, LogView, PanelChrome + чистые модули
-  components/log/actions/  действия над коммитами и ветками, контекстное меню, диалоги
+  components/log/actions/  действия над коммитами и ветками, контекстное меню, диалоги;
+                    operation.ts — `continueOperation`, `operationWord` (полоса операции и
+                    редактор конфликта зовут одно и то же)
   components/diff/  DiffPanel — обёртка DiffView под панель лога; model.ts — раскладка diff;
                     editRules.ts — чистые правила правки (доступность, редьюсер черновика,
                     замеры текста), без единого импорта; editState.ts — черновик, отложенная
@@ -150,7 +157,8 @@ Git вызывается только как внешний процесс. `gix
   `git_paths`, `user_email`, `fnv1a`, `literal`, `check_branch_name`, `check_tag_name`
   (новое имя ветки или тега проверяется ими **до** мутации и отвергается `Error::Rule`:
   `check-ref-format --branch` / `refs/tags/<имя>`, ведущий `-`, голый `@`, раскрытие
-  `@{-1}`). **Своих копий не писать:** разбор diff, словарь режимов
+  `@{-1}`) и метод `CliEngine::worktree_path` (резолв пути клиента с проверкой симлинков —
+  им же `engine::conflict` читает файл для сверки отпечатка). **Своих копий не писать:** разбор diff, словарь режимов
   пробелов, разбор меток `%D`, резолв путей внутри git-dir и отпечаток FNV-1a живут здесь по
   одному разу — тем же `fnv1a` `engine::log` отпечатывает аргументы фильтра, и вторая копия
   цикла была бы вторым шансом перепутать константы.
@@ -188,7 +196,17 @@ Git вызывается только как внешний процесс. `gix
   `tag_create`, `op_continue`, `op_abort`, `op_skip`, `stash_list_app`, `stash_restore`,
   `stash_list`, `stash_apply`, `stash_pop`, `stash_drop`, `stash_files`, `stash_push`,
   `contains_commit`, `commits_after`, `has_local_changes`, `reset_mode_flag`, константа
-  `APP_STASH_TAG`.
+  `APP_STASH_TAG`. Список конфликтов `detect_state` берёт у `engine::conflict::list`.
+- `engine::conflict` — `list(&Path) -> Vec<ConflictEntry>` (все unmerged-пути с видом),
+  `read(&Path, path) -> ConflictFile` (стороны из индекса, рабочий файл через
+  `read_text_file`, `conflict-marker-size`, `wholeOnly`), `resolve(&Path, path, text, eol,
+  expect)` (текст — через `write_text_file` со `Stale`, потом `add -A -- :(literal)`),
+  `take(&Path, path, "ours"|"theirs")` (`checkout --ours|--theirs` + `add`; стороны нет —
+  `git rm`), `pub(crate) kind_of` — вид по набору стадий, таблица самого git (1 DD, 2 AU,
+  3 UD, 4 UA, 5 DU, 6 AA, 7 UU). Маркеры **не** разбирает: парсер живёт на клиенте
+  (`conflictRules.ts`), потому что редактор перечитывает результат на каждое нажатие.
+  Стороны читаются по object id (`cat-file blob <oid>`), не как `:N:path`: это синтаксис
+  ревизии, `literal()` там не место, а `git show` запустил бы textconv.
 - `engine::patch` — чистый (без git, по байтам) `hunks(raw)` и `build(raw, picks, reverse)`.
   `hunks` — **единственная нумерация строк хунков**: `parse_diff` строит `Hunk.lines` из неё
   же, иначе индекс выбора указал бы на соседнюю строку. Правило зеркальное: stage (дифф
@@ -277,8 +295,10 @@ Git вызывается только как внешний процесс. `gix
   путь после `--` для git всё ещё шаблон: `x[ab].txt` совпадает и с `xa.txt`, откат одного
   откатывал другой, `rm -f` нового файла удалял с диска чужой отслеживаемый, а `add` при
   коммите тащил файл из чужого changelist'а. Роуты Next.js (`app/[id]/…`) — обычный случай,
-  не экзотика. Исключения: `diff --no-index` (там пути файловой системы, не pathspec) и
-  `git blame` (путь читается буквально, префикс он искал бы как часть имени). Фильтр
+  не экзотика. Исключения: `diff --no-index` (там пути файловой системы, не pathspec),
+  `git blame` (путь читается буквально, префикс он искал бы как часть имени) и
+  `git check-attr` (принимает pathnames, а не pathspec: с префиксом искал бы атрибуты файла
+  с именем `:(literal)…`). Фильтр
   `Paths` в `engine::log` тоже идёт через `literal()` (каталог в нём по-прежнему покрывает
   файлы под ним), и `--follow` истории файла — тоже: `:(literal)` он принимает и держит
   буквальным и после переключения на старое имя.
@@ -377,7 +397,14 @@ Git вызывается только как внешний процесс. `gix
   `journal_list` раз в секунду, **только пока открыта** — событие на каждый процесс git стоило
   бы сериализации ради почти всегда закрытой панели. `git_exec` возвращает `journalId`
   своей записи.
-- Имена команд: `log_*`, `commit_*`, `branch_*`, `op_*`, `ui_state_*`, `journal_*`, `discard_*`, `lines_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_history`, `file_blame`, `file_blame_before`). Имя `commit_list`
+- Конфликты (R05e): `conflict_read(path) -> ConflictFile` (read-only),
+  `conflict_resolve(path, text, eol, expect) -> RepoState` (`text` — записать и `git add`;
+  `null` — взять файл как лежит; `expect` — отпечаток, `null` — без проверки, для бинарного)
+  и `conflict_take(path, "ours"|"theirs") -> RepoState`. `RepoState.operation.conflicted` —
+  `ConflictEntry[]` (`{ path, kind }`), а не строки: вид конфликта (`UU`, `DU`, …) едет с
+  тем же `ls-files -u`, и второй команды за ним нет. Конфликт без операции (`stash pop`)
+  виден только в Changes — туда же пункт «Разрешить конфликт…».
+- Имена команд: `log_*`, `commit_*`, `branch_*`, `op_*`, `ui_state_*`, `journal_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_history`, `file_blame`, `file_blame_before`). Имя `commit_list`
   занято операцией «закоммитить changelist» и переиспользовано быть не может.
 - Полный список зарегистрированных команд — `invoke_handler` в `gui/src-tauri/src/lib.rs`;
   он же роспись того, что вообще доступно фронту.
@@ -435,7 +462,9 @@ Git вызывается только как внешний процесс. `gix
   ни дерево веток (его ресурс ключом на путь репозитория), ни страницы лога.
   Единственный обход воронки — `fileWrite` из `editState.ts` (причина выше, в границе Tauri);
   правило «компонент не пишет своего `try/catch`» при этом держится: слой действий здесь —
-  сам `editState.ts`, и ловит он.
+  сам `editState.ts`, и ловит он. Второй вызывающий того же `fileWrite` — «Сохранить» в
+  редакторе конфликта (запись файла не трогает ни индекс, ни ссылки); «Отметить
+  разрешённым» и «весь файл: ours/theirs» там уже мутации и идут через `runResult()`.
 - **Неошибочное уведомление — `setNotice` / `visibleNotice` из `store.ts`** (полоса под
   баннером ошибки, текст и одно действие). `run()` его **не** сбрасывает: `refresh()` на
   каждом фокусе окна — тоже `run()`, и предложение «Вернуть» исчезало бы, едва читатель
@@ -591,7 +620,7 @@ Git вызывается только как внешний процесс. `gix
   изменение сам забирает фокус и возвращает) и не при `!document.hasFocus()` (Cmd+Tab — не
   уход пользователя из редактора). Пробовать `relatedTarget` бесполезно: он `null` и для
   клика по любой нефокусируемой части приложения, а это как раз уход.
-- **`editRules.ts`, `lineSelection.ts` и `blame/blameRules.ts` не импортируют ничего и не должны начать** (у
+- **`editRules.ts`, `lineSelection.ts`, `blame/blameRules.ts` и `conflicts/conflictRules.ts` не импортируют ничего и не должны начать** (у
   каждого свой вызов `build()` в харнессе — по той же причине): `check-log-filters.mjs`
   *транспилирует* точки входа, а не бандлит, и один `import` из `../../api` превращается в
   падение резолва модулей, читающееся как посторонняя поломка. Свой вызов `build()` ему тоже
@@ -774,6 +803,34 @@ Git вызывается только как внешний процесс. `gix
   (`no such path in HEAD`) — поэтому `untracked` распознаётся заранее через `ls-files`, а не
   по тексту ошибки. `cat-file -s` отвечает и за каталог (размером дерева) — тип
   проверяется первым.
+- **Во время rebase «ours» — не пользователь.** `--ours` / стадия 2 — ветка, на которую идёт
+  rebase, `--theirs` / стадия 3 — переносимый коммит пользователя. Редактор конфликта
+  показывает метки маркеров под заголовками колонок и строку пояснения при
+  `operation.kind === "rebase"`; без неё берут не ту сторону.
+- **Голый `=======` вне блока — это содержимое**, подчёркивание Markdown/reST, а не
+  забытый маркер. Предупреждение «остались маркеры» (`leftoverMarkers`) считает только
+  блоки, которые ещё читаются как конфликт, и место, где разбор сломался; одиночные
+  `<<<<<<<` / `|||||||` / `>>>>>>>` вне блока — ошибка разбора с номером строки.
+- **Маркеры другой длины не читаются как текст.** `conflict-marker-size` отдаёт бэк
+  (`ConflictFile.markerSize`, `check-attr`), парсер берёт его параметром; если блоков нет,
+  а в тексте есть тройка `<`×n / `=`×n / `>`×n другой длины — отказ `marker-size` с этой
+  длиной (атрибут поменяли после слияния). Молчаливое «0 конфликтов» записало бы маркеры в
+  файл и назвало его разрешённым.
+- **Undo редактора конфликта — свой, не textarea.** Значение textarea переписывается на
+  каждое действие с блоком, и родной undo WebKit откатывал бы в тексты, которых модель не
+  знала. `Cmd+Z` / `Cmd+Shift+Z` (и `Cmd+Y`) берутся в `onKeyDown` оверлея **до** любых
+  проверок «пользователь печатает», а родной undo, пришедший иначе (пункт Edit → Undo
+  стандартного меню macOS), перехватывается как `beforeinput` с `historyUndo` /
+  `historyRedo`. В живом приложении это не прокликано (агент без дисплея) — проверить руками.
+- **Сторона, которой нет, берётся через `git rm`, не `checkout`.** `checkout --ours` у
+  «удалено у нас» падает с «does not have our version»; `take` смотрит на набор стадий и
+  для отсутствующей стороны делает `rm` (на unmerged-пути он работает без `-f`, даже с
+  изменённым файлом). «Разрешено как есть» — `add -A`: у отсутствующего файла он ставит
+  удаление, простой `add` падал бы на pathspec без совпадений.
+- Вид конфликта берётся из набора стадий `ls-files -u` по таблице git (`kind_of`), а не из
+  второго вызова `status`; тест сверяет его с буквами `status --porcelain=v2` на живом
+  слиянии. Литеральный pathspec каталога совпадает со всем под ним, поэтому записи
+  `ls-files -u -- :(literal)path` дополнительно фильтруются по равенству пути.
 
 ## Инициативы и PRD
 

@@ -14,7 +14,11 @@
  *     stage / unstage / revert, and that a choice belongs to one diff;
  *   - `src/components/blame/blameRules.ts` - runs of one commit in the blame
  *     gutter, age shades, whether a line can be blamed further back, the width
- *     of the text column and where "blame before" lands.
+ *     of the text column and where "blame before" lands;
+ *   - `src/components/conflicts/conflictRules.ts` - git's conflict markers
+ *     (merge / diff3 / zdiff3, CRLF, broken and nested blocks, other marker
+ *     sizes), the result assembled from per-block decisions, the editor's own
+ *     undo and the navigation between blocks.
  *
  * Run it:  node scripts/check-log-filters.mjs      (from `gui/`)
  * Another time zone:  TZ=America/Los_Angeles node scripts/check-log-filters.mjs
@@ -83,6 +87,14 @@ await build({
   logLevel: "warning",
 });
 
+// Its own call, like the three above: `conflicts/` shares its base with nothing here.
+await build({
+  entryPoints: [join(here, "..", "src", "components", "conflicts", "conflictRules.ts")],
+  outdir: out,
+  format: "esm",
+  logLevel: "warning",
+});
+
 const load = (name) => import(pathToFileURL(join(out, name)).href);
 const { compilePattern, spansIn, matchesCommit } = await load("searchPattern.js");
 const { asInputDate, dayStart, dayEnd, startOfToday, relativeToRepo, toSlash } =
@@ -107,6 +119,7 @@ const {
 const { splitShellArgs, formatArgv } = await load("gitConsoleCommand.js");
 const sel = await load("lineSelection.js");
 const blame = await load("blameRules.js");
+const cr = await load("conflictRules.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -615,6 +628,125 @@ for (const argv of [
   eq(blame.landingLine({ from: 12, to: 12 }, 10), 10, "clamped to the last line there is");
   eq(blame.landingLine({ from: 0, to: 0 }, 10), 1, "never above the first line");
   eq(blame.landingLine({ from: 1, to: 1 }, 0), null, "an empty file has nowhere to land");
+}
+
+// -- Conflict markers (R05e) --------------------------------------------------
+{
+  const M = "<<<<<<< HEAD\nours 1\nours 2\n=======\ntheirs 1\n>>>>>>> feat\n";
+  const merge = cr.parseConflicts(`top\n${M}bottom\n`);
+  eq(merge.ok, true, "merge style: parses");
+  eq(merge.conflicts.length, 1, "merge style: one block");
+  const b0 = merge.conflicts[0];
+  eq([b0.ours, b0.base, b0.theirs], [["ours 1", "ours 2"], null, ["theirs 1"]], "merge style: no base");
+  eq([b0.oursLabel, b0.theirsLabel], ["HEAD", "feat"], "labels after the markers");
+  eq([b0.start, b0.end], [1, 6], "0-based lines of the opening and closing markers");
+  eq(merge.regions.map((r) => r.kind), ["common", "conflict", "common"], "common, block, common");
+  eq(merge.regions[2].start, 7, "the common text after the block starts after its closing marker");
+
+  const D3 = "a\n<<<<<<< HEAD\nO\n||||||| merged common ancestors\nB\n=======\nT\n>>>>>>> feat\nz\n";
+  const diff3 = cr.parseConflicts(D3);
+  eq([diff3.conflicts[0].base, diff3.conflicts[0].baseLabel], [["B"], "merged common ancestors"], "diff3: the base and its label");
+  const Z = "<<<<<<< ours\nx\n||||||| 1234abc\n=======\ny\n>>>>>>> theirs\n";
+  const z = cr.parseConflicts(Z);
+  eq(z.conflicts[0].base, [], "zdiff3: an empty base is an empty list, not a missing one");
+
+  const crlf = cr.parseConflicts(D3.replace(/\n/g, "\r\n"));
+  eq(crlf.ok && crlf.conflicts[0].theirs, ["T"], "CRLF: the same block, no \\r in the lines");
+  eq(cr.buildResult(crlf, [{ kind: "ours" }]).text, "a\nO\nz\n", "CRLF: the result comes out in \\n");
+
+  const empty = cr.parseConflicts("<<<<<<< HEAD\n=======\nt\n>>>>>>> x\n");
+  eq([empty.conflicts[0].ours, empty.conflicts[0].theirs], [[], ["t"]], "an empty side is an empty list");
+
+  const two = cr.parseConflicts(`${M}mid\n${M}`);
+  eq(two.conflicts.map((c) => c.index), [0, 1], "several blocks are numbered in order");
+
+  eq(cr.parseConflicts("x\n<<<<<<< a\n1\n<<<<<<< b\n").error, { reason: "nested", line: 4 }, "nested opening marker: error at its line");
+  eq(cr.parseConflicts("x\n<<<<<<< a\n1\n=======\n2\n").error, { reason: "unterminated", line: 2 }, "unterminated: error at the opening line");
+  eq(cr.parseConflicts("<<<<<<< a\n1\n>>>>>>> b\n").error, { reason: "no-separator", line: 3 }, "closing before the separator");
+  eq(cr.parseConflicts("<<<<<<< a\n1\n=======\n2\n=======\n3\n>>>>>>> b\n").error, { reason: "stray-separator", line: 5 }, "a second separator");
+  eq(cr.parseConflicts("<<<<<<< a\n=======\n||||||| b\n>>>>>>> c\n").error, { reason: "stray-base", line: 3 }, "a base after the separator");
+  eq(cr.parseConflicts("fine\n>>>>>>> b\n").error, { reason: "stray-closing", line: 2 }, "a closing marker with no block");
+  eq(cr.parseConflicts("||||||| b\n").error, { reason: "stray-base", line: 1 }, "a base marker with no block");
+  eq(cr.parseConflicts("Title\n=======\ntext\n").ok, true, "a bare ======= outside a block is a Markdown underline");
+  eq(cr.parseConflicts("<<<<<<<< eight\n>>>>>>>> eight\n").ok, true, "eight characters are content, as for git");
+  eq(cr.parseConflicts("<<<<<<<x\n").ok, true, "a marker needs a space before its label");
+
+  const twelve = "<".repeat(12) + " HEAD\no\n" + "=".repeat(12) + "\nt\n" + ">".repeat(12) + " f\n";
+  eq(cr.parseConflicts(twelve).error, { reason: "marker-size", line: 1, size: 12 }, "markers of another size: refused, with the size");
+  eq(cr.parseConflicts(twelve, 12).conflicts.length, 1, "the same text with conflict-marker-size=12: one block");
+  eq(cr.parseConflicts(M, 12).error, { reason: "marker-size", line: 1, size: 7 }, "7-long markers under a 12 attribute: refused too");
+
+  // Assembly.
+  const text = `top\n${M}mid\n${M}bottom\n`;
+  const p = cr.parseConflicts(text);
+  eq(cr.buildResult(p, []).text, text, "no decisions: the text comes back byte for byte");
+  eq(cr.buildResult(cr.parseConflicts("a\nb"), []).text, "a\nb", "no final newline stays absent");
+  eq(cr.buildResult(cr.parseConflicts(""), []).text, "", "an empty text stays empty");
+  eq(cr.buildResult(p, [{ kind: "ours" }]).text, `top\nours 1\nours 2\nmid\n${M}bottom\n`, "take ours in the first block only");
+  eq(cr.buildResult(p, [null, { kind: "theirs" }]).text, `top\n${M}mid\ntheirs 1\nbottom\n`, "take theirs in the second only");
+  eq(cr.decisionLines(p.conflicts[0], { kind: "both", first: "ours" }), ["ours 1", "ours 2", "theirs 1"], "both, ours first");
+  eq(cr.decisionLines(p.conflicts[0], { kind: "both", first: "theirs" }), ["theirs 1", "ours 1", "ours 2"], "both, theirs first");
+  eq(cr.decisionLines(p.conflicts[0], { kind: "manual", lines: ["x"] }), ["x"], "manual: the typed lines");
+  eq(cr.buildResult(p, [{ kind: "manual", lines: [] }, { kind: "manual", lines: [] }]).text, "top\nmid\nbottom\n", "a block resolved to nothing");
+  const built = cr.buildResult(p, [{ kind: "ours" }]);
+  eq(built.spans, [{ index: 0, from: 1, to: 3, decided: true }, { index: 1, from: 4, to: 10, decided: false }], "spans: where each block landed");
+
+  // Line picks, in click order.
+  const b = diff3.conflicts[0];
+  let d = null;
+  d = cr.togglePick(b, d, { side: "theirs", index: 0 });
+  d = cr.togglePick(b, d, { side: "base", index: 0 });
+  d = cr.togglePick(b, d, { side: "ours", index: 0 });
+  eq(cr.decisionLines(b, d), ["T", "B", "O"], "lines land in the order they were clicked");
+  eq(cr.buildResult(diff3, [d]).text, "a\nT\nB\nO\nz\n", "and the result shows them at once");
+  d = cr.togglePick(b, d, { side: "base", index: 0 });
+  eq(cr.decisionLines(b, d), ["T", "O"], "a second click drops the line");
+  d = cr.togglePick(b, d, { side: "theirs", index: 0 });
+  d = cr.togglePick(b, d, { side: "ours", index: 0 });
+  eq(d, null, "the last line dropped: the block is undecided again");
+  eq(cr.decisionLines(b, cr.togglePick(b, { kind: "ours" }, { side: "theirs", index: 0 })), ["O", "T"], "a click after take-ours adds to ours");
+  eq(cr.togglePick(b, { kind: "ours" }, { side: "ours", index: 0 }), null, "and dropping ours' only line leaves nothing");
+  eq(cr.asPicks(p.conflicts[0], { kind: "both", first: "theirs" }), [{ side: "theirs", index: 0 }, { side: "ours", index: 0 }, { side: "ours", index: 1 }], "a both-decision as picks keeps its order");
+  eq(cr.togglePick(b, { kind: "manual", lines: ["m"] }, { side: "ours", index: 0 }), { kind: "manual", lines: ["m", "O"] }, "a click on a hand-edited block appends");
+  eq(cr.togglePick(b, null, { side: "ours", index: 9 }), null, "a line that is not there changes nothing");
+
+  // Typing in the result.
+  const dd = [{ kind: "ours" }, null];
+  const typed = built.text.replace("ours 2\n", "ours 2 edited\n");
+  eq(cr.absorbEdit(p, dd, built, typed), [{ kind: "manual", lines: ["ours 1", "ours 2 edited"] }, null], "an edit inside a decided block becomes its manual decision");
+  eq(cr.absorbEdit(p, dd, built, built.text.replace("mid\n", "MID\n")), null, "an edit of common text is baked");
+  eq(cr.absorbEdit(p, dd, built, built.text.replace("theirs 1\n", "x\n")), null, "an edit inside an undecided block is baked");
+  eq(cr.absorbEdit(p, dd, built, built.text.replace("ours 1\nours 2\n", "")), [{ kind: "manual", lines: [] }, null], "deleting a whole decided block's lines");
+  eq(cr.absorbEdit(p, dd, built, built.text.slice(0, -1)), null, "removing the final newline is baked");
+
+  eq(cr.unresolved(p, [{ kind: "ours" }]), [1], "one block left");
+  eq(cr.leftoverMarkers(`ok\n${M}`), [2], "leftover markers: the line of each block still marked");
+  eq(cr.leftoverMarkers("Title\n=======\n"), [], "an underline is not a leftover");
+  eq(cr.leftoverMarkers("a\n<<<<<<< x\n"), [2], "a broken block is a leftover");
+
+  eq(cr.stepConflict([0, 2, 5], 2, 1), 5, "next");
+  eq(cr.stepConflict([0, 2, 5], 5, 1), 0, "next wraps");
+  eq(cr.stepConflict([0, 2, 5], 0, -1), 5, "previous wraps");
+  eq(cr.stepConflict([0, 2, 5], 3, -1), 2, "previous from a resolved block");
+  eq(cr.stepConflict([], 0, 1), null, "nothing left, nowhere to go");
+  eq(cr.lineOffset("ab\ncd\nef", 2), 6, "offset of a line");
+  eq(cr.lineOffset("ab", 5), 2, "past the end: the end");
+
+  // Undo.
+  let h = cr.emptyHistory();
+  h = cr.historyRecord(h, "v0");
+  h = cr.historyRecord(h, "v1");
+  const u = cr.historyUndo(h, "v2");
+  eq([u.value, u.history], ["v1", { past: ["v0"], future: ["v2"] }], "undo steps back and keeps redo");
+  const r = cr.historyRedo(u.history, "v1");
+  eq([r.value, r.history], ["v2", { past: ["v0", "v1"], future: [] }], "redo steps forward");
+  eq(cr.historyRecord(u.history, "v1b").future, [], "a new change forgets redo");
+  eq(cr.historyUndo(cr.emptyHistory(), "x"), null, "nothing to undo");
+  eq(cr.historyRecord({ past: ["a", "b"], future: [] }, "c", 2).past, ["b", "c"], "the oldest step falls off");
+  eq(cr.coalesces({ kind: "type", at: 0 }, "type", 500), true, "a typing burst is one step");
+  eq(cr.coalesces({ kind: "type", at: 0 }, "type", 1500), false, "a pause starts a new step");
+  eq(cr.coalesces({ kind: "pick", at: 0 }, "type", 10), false, "typing after a click is its own step");
+  eq(cr.CONFLICT_CODES.deletedByUs, "DU", "deleted by us is DU");
 }
 
 await rm(out, { recursive: true, force: true });

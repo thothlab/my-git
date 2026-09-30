@@ -391,7 +391,7 @@ impl CliEngine {
     /// makes a write go *through* a symlink rather than over it: `rename` does not
     /// follow one, so renaming onto the link's own path would replace the link with a
     /// plain file — the very change of type the outward-pointing link is refused for.
-    fn worktree_path(&self, rel: &str) -> Result<PathBuf> {
+    pub(crate) fn worktree_path(&self, rel: &str) -> Result<PathBuf> {
         use std::path::Component;
         let outside = || Error::Rule(format!("{rel} is not a path inside the repository"));
         if rel.is_empty() {

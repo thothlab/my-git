@@ -30,6 +30,7 @@ import GitConsolePanel, { openGitConsole } from "./components/GitConsolePanel";
 import DiscardPanel from "./components/DiscardPanel";
 import FileHistoryPanel from "./components/FileHistoryPanel";
 import BlamePanel from "./components/blame/BlamePanel";
+import ConflictPanel from "./components/conflicts/ConflictPanel";
 import { DISABLED_CLASS } from "./components/IconButton";
 import { msSinceRefresh, nudgeRepoWatch, refreshOnFocus, startRepoWatch } from "./repoWatch";
 
@@ -269,6 +270,8 @@ export default function App() {
         {/* Opened from the same places; it replaces the history rather than
             stacking on it (see its docblock). */}
         <BlamePanel />
+        {/* Opened from the operation strip and from a conflicted file in Changes. */}
+        <ConflictPanel />
         <DiscardPanel />
         <ModalHost />
       </div>

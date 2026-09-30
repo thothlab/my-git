@@ -10,10 +10,10 @@ use crate::engine::GitEngine;
 use crate::error::{Error, Result};
 use crate::engine::exec::{self, mask_credentials};
 use crate::engine::{
-    blame as blame_engine, branches, commit as commit_engine, discard, file_history as file_history_engine, log as log_engine, ops,
+    blame as blame_engine, branches, commit as commit_engine, conflict as conflict_engine, discard, file_history as file_history_engine, log as log_engine, ops,
 };
 use crate::model::{
-    Blame, BlameBefore, BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, DiscardEntry,
+    Blame, BlameBefore, BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, ConflictFile, DiscardEntry,
     DiscardKind, DiscardOutcome, Eol, FileDiff, FileHistoryCursor, FileHistoryPage, HunkPick,
     LinePick,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
@@ -714,6 +714,48 @@ pub async fn tag_create(
     exec::as_user("tag_create", || {
         ops::tag_create(&state.repo_path()?, &hash, &name, message.as_deref())
     })?;
+    build_state(&state)
+}
+
+// ── conflict resolution (R05e) ───────────────────────────────────────────────
+
+/// One conflicted path for the conflict editor: the three sides from the index, the
+/// working file with git's markers, the marker size and whether it can be resolved
+/// line by line at all. Read-only. A path with nothing to resolve is `Error::Rule`.
+#[tauri::command]
+pub async fn conflict_read(state: State<'_, AppState>, path: String) -> Result<ConflictFile> {
+    conflict_engine::read(&state.repo_path()?, &path)
+}
+
+/// Mark a conflict resolved (`git add`), writing the resolution first when `text` is
+/// given. `expect` is the digest of the file the editor last read or wrote — a file
+/// changed underneath is `Error::Stale` and nothing is staged; `None` takes the file
+/// as it lies (a binary one, resolved elsewhere).
+#[tauri::command]
+pub async fn conflict_resolve(
+    state: State<'_, AppState>,
+    path: String,
+    text: Option<String>,
+    eol: Eol,
+    expect: Option<String>,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    exec::as_user("conflict_resolve", || {
+        conflict_engine::resolve(&repo, &path, text.as_deref(), eol, expect.as_deref())
+    })?;
+    build_state(&state)
+}
+
+/// Resolve a conflict by taking one side whole — `ours` or `theirs`. A side on which
+/// the file was deleted resolves to the deletion (`git rm`).
+#[tauri::command]
+pub async fn conflict_take(
+    state: State<'_, AppState>,
+    path: String,
+    side: String,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    exec::as_user("conflict_take", || conflict_engine::take(&repo, &path, &side))?;
     build_state(&state)
 }
 

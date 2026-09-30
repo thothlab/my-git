@@ -32,8 +32,8 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
 /// operation" and the banner would never appear. A path git cannot resolve is an
 /// error, not silence.
 ///
-/// `current` / `total` / `conflicted` are filled by task 06; a calm repository is
-/// already reported exactly — `OperationKind::None`.
+/// `conflicted` comes from `engine::conflict::list` — each unmerged path with the
+/// kind of its conflict. A calm repository is reported exactly — `OperationKind::None`.
 pub fn detect_state(repo: &Path) -> Result<OperationState> {
     const MARKERS: [&str; 5] = [
         "MERGE_HEAD",
@@ -83,7 +83,7 @@ pub fn detect_state(repo: &Path) -> Result<OperationState> {
         kind,
         current,
         total,
-        conflicted: conflicted_paths(repo)?,
+        conflicted: crate::engine::conflict::list(repo)?,
     })
 }
 
@@ -91,19 +91,6 @@ pub fn detect_state(repo: &Path) -> Result<OperationState> {
 /// missing or unreadable — an absent counter is unknown, not zero.
 fn read_counter(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-/// Paths left unmerged by the stopped operation, in git's order.
-///
-/// `diff --diff-filter=U` names exactly the conflicted entries; `-z` keeps paths
-/// with spaces or non-ASCII intact, so the split is on NUL, never on whitespace.
-fn conflicted_paths(repo: &Path) -> Result<Vec<String>> {
-    let out = git(repo, &["diff", "--name-only", "--diff-filter=U", "-z"])?;
-    Ok(out
-        .split('\0')
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect())
 }
 
 /// git flag for a reset mode: `soft` | `mixed` | `hard` | `keep` (манифест G02,
@@ -514,6 +501,11 @@ mod tests {
     use crate::engine::cli::tests::scratch_repo;
     use std::process::Command;
 
+    /// The conflicted paths of an operation state, kinds left out.
+    fn conflicted_paths(state: &OperationState) -> Vec<&str> {
+        state.conflicted.iter().map(|c| c.path.as_str()).collect()
+    }
+
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
             .arg("-C")
@@ -668,7 +660,7 @@ mod tests {
 
         let state = detect_state(p).unwrap();
         assert_eq!(state.kind, OperationKind::Revert);
-        assert_eq!(state.conflicted, vec!["a.txt".to_string()]);
+        assert_eq!(conflicted_paths(&state), vec!["a.txt"]);
     }
 
     /// Three commits on `main`, the same file rewritten each time: c1 "one",
@@ -846,7 +838,7 @@ mod tests {
 
         let state = detect_state(p).unwrap();
         assert_eq!(state.kind, OperationKind::CherryPick);
-        assert_eq!(state.conflicted, vec!["a.txt".to_string()]);
+        assert_eq!(conflicted_paths(&state), vec!["a.txt"]);
     }
 
     /// История 55 / R24i.4: checking out a revision lands on a detached HEAD, and
@@ -938,7 +930,7 @@ mod tests {
         assert_eq!(state.kind, OperationKind::Rebase);
         assert_eq!(state.current, Some(1), "stopped on the first of the two commits");
         assert_eq!(state.total, Some(2));
-        assert_eq!(state.conflicted, vec!["a.txt".to_string()]);
+        assert_eq!(conflicted_paths(&state), vec!["a.txt"]);
     }
 
     /// Aborting puts the branch back exactly where it was.
