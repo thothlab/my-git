@@ -38,6 +38,9 @@ export interface DialogField {
   placeholder?: string;
   /** Optional field: an empty value is allowed. */
   optional?: boolean;
+  /** A commit message and the like: a text area where Enter starts a new line and
+   *  Cmd/Ctrl+Enter submits. */
+  multiline?: boolean;
 }
 
 export interface DialogSpec {
@@ -113,7 +116,7 @@ function DialogView(props: { spec: OpenDialog }) {
   const [checked, setChecked] = createSignal(props.spec.checkbox?.checked ?? false);
   const [error, setError] = createSignal("");
   const [busy, setBusy] = createSignal(false);
-  let first: HTMLInputElement | undefined;
+  let first: HTMLInputElement | HTMLTextAreaElement | undefined;
 
   // Resolves the specification this view was created for. Reading the module
   // signal instead would answer for whatever is current at the time, which is
@@ -149,7 +152,10 @@ function DialogView(props: { spec: OpenDialog }) {
     if (e.code === "Escape") {
       e.preventDefault();
       close(false);
-    } else if (e.code === "Enter") {
+    } else if (e.code === "Enter" || e.code === "NumpadEnter") {
+      // In a text area a plain Enter is a new line; the modifier submits.
+      const area = e.target instanceof HTMLTextAreaElement;
+      if (area && !(e.metaKey || e.ctrlKey)) return;
       e.preventDefault();
       void submit();
     }
@@ -159,7 +165,11 @@ function DialogView(props: { spec: OpenDialog }) {
     <Portal>
       <div class="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
         <div
-          class="w-[min(28rem,90vw)] rounded-lg border border-border bg-bg p-4 shadow-xl"
+          class="rounded-lg border border-border bg-bg p-4 shadow-xl"
+          classList={{
+            "w-[min(28rem,90vw)]": !props.spec.fields.some((f) => f.multiline),
+            "w-[min(40rem,92vw)]": props.spec.fields.some((f) => f.multiline),
+          }}
           onKeyDown={onKeyDown}
         >
           <div class="mb-1 text-sm font-semibold">{props.spec.title}</div>
@@ -170,17 +180,42 @@ function DialogView(props: { spec: OpenDialog }) {
             {(f, i) => (
               <label class="mb-3 block text-xs text-fg-muted">
                 {f.label}
-                <input
-                  ref={(el) => {
-                    if (i() === 0) first = el;
-                  }}
-                  class="mt-1 w-full rounded border border-border bg-bg-muted px-2 py-1 text-sm text-fg outline-none focus:border-accent"
-                  placeholder={f.placeholder}
-                  value={values()[f.key] ?? ""}
-                  onInput={(e) =>
-                    setValues({ ...values(), [f.key]: e.currentTarget.value })
+                <Show
+                  when={f.multiline}
+                  fallback={
+                    <input
+                      ref={(el) => {
+                        if (i() === 0) first = el;
+                      }}
+                      class="mt-1 w-full rounded border border-border bg-bg-muted px-2 py-1 text-sm text-fg outline-none focus:border-accent"
+                      placeholder={f.placeholder}
+                      value={values()[f.key] ?? ""}
+                      onInput={(e) =>
+                        setValues({ ...values(), [f.key]: e.currentTarget.value })
+                      }
+                    />
                   }
-                />
+                >
+                  <textarea
+                    ref={(el) => {
+                      if (i() === 0) first = el;
+                    }}
+                    rows={8}
+                    autocomplete="off"
+                    autocorrect="off"
+                    autocapitalize="off"
+                    spellcheck={false}
+                    class="mt-1 w-full resize-y rounded border border-border bg-bg-muted px-2 py-1 font-mono text-xs text-fg outline-none focus:border-accent"
+                    placeholder={f.placeholder}
+                    value={values()[f.key] ?? ""}
+                    onInput={(e) =>
+                      setValues({ ...values(), [f.key]: e.currentTarget.value })
+                    }
+                  />
+                  <span class="mt-0.5 block text-[0.625rem] text-fg-subtle">
+                    {d().dlgMultilineHint()}
+                  </span>
+                </Show>
               </label>
             )}
           </For>

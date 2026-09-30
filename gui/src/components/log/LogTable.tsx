@@ -1,6 +1,6 @@
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { For, Show, createEffect, createMemo, createSignal, on } from "solid-js";
-import { commitContains, type LogCommit, type RefLabel } from "../../api";
+import { commitContains, opRebaseRange, type LogCommit, type RefLabel } from "../../api";
 import { d, fmtDate, fmtDateTime } from "../../i18n";
 import {
   atEnd,
@@ -48,7 +48,7 @@ import { selectedBranch } from "./branchSelection";
 import FilterBar from "./FilterBar";
 import { commitMatches, matchRanges, type Span } from "./searchMatch";
 import { clearCompare } from "./actions/compareSelection";
-import { commitMenuItems } from "./actions/commitActions";
+import { commitMenuItems, rewriteAnchor, type RangeAnswer } from "./actions/commitActions";
 import ContextMenu, { createMenuController, type MenuAnchor } from "./actions/ContextMenu";
 import { ActionDialogHost } from "./actions/dialogs";
 import LogGraph, { LANE_W, lanesBelow } from "./LogGraph";
@@ -102,6 +102,7 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
   const menu = createMenuController();
   const [menuTargets, setMenuTargets] = createSignal<LogCommit[]>([]);
   const [menuContains, setMenuContains] = createSignal<boolean | null>(null);
+  const [menuRewrite, setMenuRewrite] = createSignal<RangeAnswer | null>(null);
 
   /**
    * The element of a row, for the keyboard path of the menu. Asked of the DOM
@@ -130,6 +131,17 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
       void commitContains(hash)
         .then((v) => menuTargets()[0]?.hash === hash && setMenuContains(v))
         .catch(() => setMenuContains(false));
+    }
+    // What rewriting from here would replay — reword, squash and the interactive
+    // rebase are disabled with a reason (merge in the range, dirty tree…) before
+    // they are clicked, exactly as cherry-pick is.
+    const anchor = rewriteAnchor(targets);
+    setMenuRewrite(anchor ? { status: "checking" } : null);
+    if (anchor) {
+      const current = () => menuTargets() === targets;
+      void opRebaseRange(anchor)
+        .then((range) => current() && setMenuRewrite({ status: "ok", range }))
+        .catch(() => current() && setMenuRewrite({ status: "failed" }));
     }
     menu.open(at);
   };
@@ -335,7 +347,7 @@ export default function LogTable(props: { onSelect?: (hash: string | null) => vo
             {(a) => (
               <ContextMenu
                 anchor={a()}
-                items={() => commitMenuItems(menuTargets(), menuContains())}
+                items={() => commitMenuItems(menuTargets(), menuContains(), menuRewrite())}
                 onClose={menu.close}
               />
             )}

@@ -1,12 +1,17 @@
 import {
   commitCheckout,
   commitCherryPick,
+  commitDetails,
+  commitReword,
+  commitsSquash,
   commitReset,
   commitResetLostCount,
   commitRevert,
   tagCreate,
   WORKING_TREE,
   type LogCommit,
+  type RebaseRange,
+  type RepoState,
   type ResetMode,
 } from "../../../api";
 import { d } from "../../../i18n";
@@ -15,6 +20,8 @@ import { copyOrReport, newBranchFrom } from "./branchActions";
 import type { MenuEntry } from "./ContextMenu";
 import { setCompareTarget } from "./compareSelection";
 import { openDialog } from "./dialogs";
+import { openRebasePlan } from "../../rebase/RebasePanel";
+import { runOpensRange, squashMessage, squashRun } from "../../rebase/rebaseRules";
 import { afterRepoChange, localChangesNow, operationActive, runResult } from "./repoRefresh";
 
 /**
@@ -147,6 +154,101 @@ export async function resetToCommit(commit: LogCommit): Promise<void> {
   afterRepoChange();
 }
 
+// ── Rewriting history: reword, squash, interactive rebase ────────────────────
+
+/**
+ * What the menu knows about rewriting from the commit it was opened on: the
+ * answer of `op_rebase_range`, asked when the menu opens (like `commit_contains`),
+ * for the target or — for a squash — for the oldest commit of the selected run.
+ * `null` when the question does not apply to this menu.
+ */
+export type RangeAnswer =
+  | { status: "checking" }
+  | { status: "failed" }
+  | { status: "ok"; range: RebaseRange };
+
+/**
+ * Rewritten commits the upstream already has: say so and ask. Rewriting them is
+ * legal, but the result only goes back with a force push.
+ */
+async function confirmPublished(range: RebaseRange): Promise<boolean> {
+  if (range.published === 0) return true;
+  return confirmAction(d().confirmRewritePublished(range.published), true);
+}
+
+/** After a rewrite: close on success or on a stop (conflict, `edit` — the strip
+ *  drives it now); keep the dialog open only for a refusal that changed nothing. */
+async function rewriteResult(p: Promise<RepoState>, label: string) {
+  const err = await runResult(p, label);
+  if (err && !operationActive()) return err;
+  afterRepoChange();
+  return null;
+}
+
+/**
+ * New message for one commit. HEAD is amended with `--only` — what is staged
+ * stays out of it; an older commit is rewritten by a rebase with one `reword`.
+ * The dialog is prefilled with the whole message, read from the range or, for a
+ * HEAD the range does not list (a merge), from the commit itself.
+ */
+export async function rewordCommit(commit: LogCommit, range: RebaseRange): Promise<void> {
+  const isHead = range.head === commit.hash;
+  let message = range.commits[0]?.hash === commit.hash ? range.commits[0].message : null;
+  if (message === null) {
+    try {
+      const c = await commitDetails(commit.hash);
+      message = c.body.trim() === "" ? c.subject : `${c.subject}\n\n${c.body.trim()}`;
+    } catch (e) {
+      reportError(e);
+      return;
+    }
+  }
+  if (!(await confirmPublished(range))) return;
+  await openDialog({
+    title: d().dlgRewordTitle(commit.shortHash),
+    note: isHead ? d().dlgRewordNoteHead() : d().dlgRewordNoteDeep(range.commits.length - 1),
+    fields: [{ key: "message", label: d().dlgMessage(), value: message, multiline: true }],
+    submitLabel: d().dlgRewordSubmit(),
+    submit: (v) => rewriteResult(commitReword(commit.hash, v.message), d().phaseReword()),
+  });
+}
+
+/** Meld the selected run into one commit, prefilled with every message of it. */
+export async function squashCommits(targets: LogCommit[], range: RebaseRange): Promise<void> {
+  const run = squashRun(targets);
+  if (!run.ok) return;
+  const n = run.oldestFirst.length;
+  const messages = range.commits.slice(0, n).map((c) => c.message);
+  if (!(await confirmPublished(range))) return;
+  await openDialog({
+    title: d().dlgSquashTitle(n),
+    note: d().dlgSquashNote(range.commits.length - n),
+    fields: [
+      { key: "message", label: d().dlgSquashMessage(), value: squashMessage(messages), multiline: true },
+    ],
+    submitLabel: d().dlgSquashSubmit(),
+    submit: (v) => rewriteResult(commitsSquash(run.oldestFirst, v.message), d().phaseSquash()),
+  });
+}
+
+/** The plan dialog for everything from this commit up to HEAD. */
+export async function rebaseFromCommit(commit: LogCommit, range: RebaseRange): Promise<void> {
+  if (!(await confirmPublished(range))) return;
+  openRebasePlan({ hash: commit.hash, shortHash: commit.shortHash, range });
+}
+
+/** Why a rewrite over `answer` cannot run, or undefined. `head` — rewording HEAD
+ *  by amend, which neither merges nor a dirty tree stop. */
+function rangeReason(answer: RangeAnswer | null, head?: LogCommit): string | undefined {
+  if (!answer || answer.status === "checking") return d().whyChecking();
+  if (answer.status === "failed") return d().whyRebaseUnknown();
+  const r = answer.range;
+  if (head && r.head === head.hash) return undefined;
+  if (r.blocked) return d().whyRebaseBlocked(r.blocked);
+  if (r.dirty) return d().whyDirtyTree();
+  return undefined;
+}
+
 // ── Menu ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -160,6 +262,7 @@ export async function resetToCommit(commit: LogCommit): Promise<void> {
 export function commitMenuItems(
   targets: LogCommit[],
   contains: boolean | null,
+  rewrite: RangeAnswer | null = null,
 ): MenuEntry[] {
   const n = targets.length;
   const one = n === 1 ? targets[0] : null;
@@ -245,7 +348,59 @@ export function commitMenuItems(
     },
   });
 
+  // Rewriting history. Squash is judged by first-parent links (the all-branches
+  // log interleaves lines), and then against the range read from the run's
+  // oldest commit: the run has to open it, i.e. lie on HEAD's line.
+  items.push({ kind: "sep" });
+  const range = rewrite?.status === "ok" ? rewrite.range : null;
+  const rewordReason = singleReason ?? (one ? rangeReason(rewrite, one) : undefined);
+  items.push({
+    label: d().menuReword(),
+    disabled: !!rewordReason,
+    reason: rewordReason,
+    run: () => {
+      if (one && range) void rewordCommit(one, range);
+    },
+  });
+  const squash = squashRun(targets);
+  let squashReason: string | undefined = opReason;
+  if (!squashReason && n < 2) squashReason = d().whyNeedTwoToSquash();
+  if (!squashReason && !squash.ok) squashReason = d().whySquashRun(squash.reason);
+  if (!squashReason) {
+    const r = rangeReason(rewrite);
+    if (r) squashReason = r;
+    else if (range && squash.ok && !runOpensRange(squash.oldestFirst, range.commits.map((c) => c.hash)))
+      squashReason = d().whySquashOffBranch();
+  }
+  items.push({
+    label: d().menuSquash(n),
+    disabled: !!squashReason,
+    reason: squashReason,
+    run: () => {
+      if (range) void squashCommits(targets, range);
+    },
+  });
+  const rebaseReason = singleReason ?? rangeReason(rewrite);
+  items.push({
+    label: d().menuRebaseFrom(),
+    disabled: !!rebaseReason,
+    reason: rebaseReason,
+    run: () => {
+      if (one && range) void rebaseFromCommit(one, range);
+    },
+  });
+
   return items;
+}
+
+/**
+ * The commit whose range the menu should read for `targets`: the target itself,
+ * or the oldest commit of a squashable run; null when nothing needs it.
+ */
+export function rewriteAnchor(targets: LogCommit[]): string | null {
+  if (targets.length === 1) return targets[0].hash;
+  const run = squashRun(targets);
+  return run.ok ? run.oldestFirst[0] : null;
 }
 
 /** "New branch from this commit" — the branch dialog, anchored on a hash. */

@@ -468,6 +468,82 @@ pub struct OperationState {
     pub current: Option<u32>,
     pub total: Option<u32>,
     pub conflicted: Vec<ConflictEntry>,
+    /// A rebase stopped on an `edit` step: the (original) hash of the commit it
+    /// stopped at, so the strip can say "amend it, then continue" instead of "no
+    /// conflicts". Read from the last line of `rebase-merge/done`, not from the
+    /// `amend` marker: git writes that one for a failed squash too.
+    #[serde(default)]
+    pub edit_stop: Option<String>,
+}
+
+/// One command of an interactive rebase plan (git's todo verbs, `break`/`exec`
+/// and friends left out — the dialog does not offer them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RebaseAction {
+    Pick,
+    Reword,
+    Edit,
+    Squash,
+    Fixup,
+    Drop,
+}
+
+/// One line of the plan the user approved, oldest first. `message` is the new
+/// text of a `reword`, or — on a `squash` / `fixup` — the text of the commit the
+/// whole chain melds into (`engine::rebase::compile` says where it is applied).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebaseStep {
+    pub hash: String,
+    pub action: RebaseAction,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// A commit an interactive rebase would replay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebaseCommit {
+    pub hash: String,
+    pub short_hash: String,
+    pub author: String,
+    pub author_at: i64,
+    pub subject: String,
+    /// The whole message (`%B`), for prefilling a reword or a squash.
+    pub message: String,
+}
+
+/// Why history from a commit cannot be rewritten by an interactive rebase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RebaseBlock {
+    /// The commit is not an ancestor of HEAD.
+    NotOnBranch,
+    /// A merge commit lies between the commit and HEAD: a plain rebase would
+    /// flatten it.
+    Merge,
+    /// More commits than a plan can hold (`engine::rebase::MAX_STEPS`).
+    TooMany,
+}
+
+/// What rewriting history from one commit up to HEAD would replay, and whether it
+/// may. Asked before the menu is drawn and before the dialog opens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebaseRange {
+    /// HEAD's full hash when the range was read.
+    pub head: String,
+    /// First parent of the commit — the rebase base; `None` for a root commit.
+    pub base: Option<String>,
+    /// Oldest first; empty when `blocked`.
+    pub commits: Vec<RebaseCommit>,
+    pub blocked: Option<RebaseBlock>,
+    /// Tracked files carry uncommitted changes (untracked files do not count).
+    pub dirty: bool,
+    /// How many of the replayed commits the upstream of the current branch already
+    /// has — rewriting them means a force push.
+    pub published: u32,
 }
 
 /// What kind of conflict an unmerged path is in — git's own seven, named after the

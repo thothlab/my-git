@@ -31,6 +31,7 @@ import DiscardPanel from "./components/DiscardPanel";
 import FileHistoryPanel from "./components/FileHistoryPanel";
 import BlamePanel from "./components/blame/BlamePanel";
 import ConflictPanel from "./components/conflicts/ConflictPanel";
+import RebasePanel from "./components/rebase/RebasePanel";
 import { DISABLED_CLASS } from "./components/IconButton";
 import { msSinceRefresh, nudgeRepoWatch, refreshOnFocus, startRepoWatch } from "./repoWatch";
 
@@ -273,6 +274,8 @@ export default function App() {
         {/* Opened from the operation strip and from a conflicted file in Changes. */}
         <ConflictPanel />
         <DiscardPanel />
+        {/* The interactive rebase plan, opened from the log's menu. */}
+        <RebasePanel />
         <ModalHost />
       </div>
     </ErrorBoundary>

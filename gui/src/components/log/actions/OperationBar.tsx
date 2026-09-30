@@ -24,6 +24,9 @@ import { CONFLICT_CODES } from "../../conflicts/conflictRules";
  * "Abort" is destructive, so it goes through the shared confirmation — the one
  * whose focus sits on Cancel and which Enter therefore does not accept.
  *
+ * A rebase stopped on an `edit` step (`OperationState.editStop`) says so and
+ * what to do — amend the commit, then Continue — instead of "no conflicts".
+ *
  * Each conflicted path carries git's two letters for its kind (`UU`, `DU`, …)
  * and opens the conflict editor (R05e); the editor itself offers "Continue"
  * once the last one is resolved, through the same `continueOperation`.
@@ -88,7 +91,13 @@ export default function OperationBar() {
           </div>
           <Show
             when={o().conflicted.length > 0}
-            fallback={<div class="mt-0.5 text-fg-subtle">{d().opNoConflicts()}</div>}
+            fallback={
+              <div class="mt-0.5 text-fg-subtle">
+                {o().editStop
+                  ? d().opEditStop((o().editStop ?? "").slice(0, 7))
+                  : d().opNoConflicts()}
+              </div>
+            }
           >
             <div class="mt-0.5 text-fg-muted">{d().opConflicts(o().conflicted.length)}</div>
             <ul class="mt-0.5 max-h-24 overflow-auto">

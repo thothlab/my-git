@@ -26,9 +26,9 @@
 | `cd gui && npm run tauri dev` | Запустить Graft локально (нужен дисплей) |
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
-| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, разбор и печать команды консоли), 269 утверждений |
-| `cargo test` | Оба крейта разом: 279 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 279 тестов |
+| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, разбор и печать команды консоли), 299 утверждений |
+| `cargo test` | Оба крейта разом: 302 теста GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 302 теста |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -73,6 +73,8 @@ gui/src-tauri/src/  бэк GUI
                     запись разрешения + `git add`, сторона целиком / удаление (`git rm`)
   engine/discard.rs резервная копия перед откатом (refs/graft/discard) и её восстановление
   engine/patch.rs   патч по выбранным строкам диффа (чистый, без git) + единая нумерация строк хунков
+  engine/rebase.rs  интерактивный rebase по утверждённому плану, reword, squash; файлы плана
+                    в каталоге данных приложения
 gui/src/            фронт
   api.ts            зеркала всех команд в camelCase + типы
   store.ts          глобальное состояние окна, run(), модалки
@@ -88,6 +90,10 @@ gui/src/            фронт
   components/conflicts/ ConflictPanel — оверлей редактора конфликта (блоки ours · base ·
                     theirs + редактируемый результат, свой undo); conflictRules.ts — разбор
                     маркеров, сборка результата из решений, история undo, без единого импорта
+  components/rebase/ RebasePanel — оверлей плана интерактивного rebase (строки с действием,
+                    перестановка, поля сообщений, предпросмотр); rebaseRules.ts — цепочки,
+                    где поле сообщения, что уходит на бэк, предпросмотр, `squashRun` по
+                    первым родителям, без единого импорта
   components/log/   панель Git: BranchTree, LogTable, LogGraph, CommitDetailsPane, FilterBar, LogView, PanelChrome + чистые модули
   components/log/actions/  действия над коммитами и ветками, контекстное меню, диалоги;
                     operation.ts — `continueOperation`, `operationWord` (полоса операции и
@@ -197,6 +203,19 @@ Git вызывается только как внешний процесс. `gix
   `stash_list`, `stash_apply`, `stash_pop`, `stash_drop`, `stash_files`, `stash_push`,
   `contains_commit`, `commits_after`, `has_local_changes`, `reset_mode_flag`, константа
   `APP_STASH_TAG`. Список конфликтов `detect_state` берёт у `engine::conflict::list`.
+  `op_continue` / `op_skip` / `op_abort` принимают вторым параметром каталог данных
+  приложения (`Option<&Path>`): идущему rebase из плана Graft `drive` ставит редакторы плана
+  вместо `GIT_EDITOR=true`, после — `rebase::sweep`. `OperationState.edit_stop` — хэш
+  коммита, на котором rebase встал по `edit` (последняя команда `rebase-merge/done`, не
+  маркер `amend`: его git пишет и для упавшего squash).
+- `engine::rebase` — `range(&Path, hash) -> RebaseRange` (от коммита **включительно** до
+  HEAD, старые первыми; `blocked`: `notOnBranch` | `merge` | `tooMany`; `dirty` — только
+  отслеживаемые; `published` — сколько из них уже в `@{upstream}`), `start(repo, data_dir,
+  hash, steps)`, `reword(repo, data_dir, hash, message)` (HEAD — `commit --amend --only`,
+  глубже — план с одним `reword`), `squash(repo, data_dir, hashes, message)` (старший —
+  `merge-base --octopus`, остальные `fixup`), `sweep(data_dir, repo)`, `pub(crate)`
+  `compile` (план → todo + сообщения по хэшам), `comment_char`, `resume`, `Plan::env`.
+  Константы `MAX_STEPS = 1000`, `MAX_MESSAGE = 100_000`. Как устроено — докблок модуля.
 - `engine::conflict` — `list(&Path) -> Vec<ConflictEntry>` (все unmerged-пути с видом),
   `read(&Path, path) -> ConflictFile` (стороны из индекса, рабочий файл через
   `read_text_file`, `conflict-marker-size`, `wholeOnly`), `resolve(&Path, path, text, eol,
@@ -404,7 +423,7 @@ Git вызывается только как внешний процесс. `gix
   `ConflictEntry[]` (`{ path, kind }`), а не строки: вид конфликта (`UU`, `DU`, …) едет с
   тем же `ls-files -u`, и второй команды за ним нет. Конфликт без операции (`stash pop`)
   виден только в Changes — туда же пункт «Разрешить конфликт…».
-- Имена команд: `log_*`, `commit_*`, `branch_*`, `op_*`, `ui_state_*`, `journal_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_history`, `file_blame`, `file_blame_before`). Имя `commit_list`
+- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`), `ui_state_*`, `journal_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_history`, `file_blame`, `file_blame_before`). Имя `commit_list`
   занято операцией «закоммитить changelist» и переиспользовано быть не может.
 - Полный список зарегистрированных команд — `invoke_handler` в `gui/src-tauri/src/lib.rs`;
   он же роспись того, что вообще доступно фронту.
@@ -511,6 +530,14 @@ Git вызывается только как внешний процесс. `gix
   недостижимой (её приберёт `gc`). Читается и людьми: `git log -p refs/graft/discard`. Из
   лога исключена (`--exclude=refs/graft/*`), в дерево веток не попадает (там только
   `refs/heads` + `refs/remotes`).
+- `<app_data_dir>/rebase/<fnv1a корня рабочего дерева>/` — план интерактивного rebase,
+  запущенного Graft: `todo`, `editor.sh`, `msg/<полный хэш>`, `head` (= `orig-head` этого
+  rebase — так план узнаётся своим), `comment` (выбранный `core.commentChar`). **Вне
+  репозитория.** Живёт, пока идёт его rebase: удаляется вызовом, который его запустил, abort'ом
+  и `rebase::sweep` на каждом `build_state` без rebase (так уходит план rebase, законченного в
+  терминале) — но не пока идёт действие пользователя (`OWN_ACTIONS`): между записью плана и
+  появлением `rebase-merge/` параллельное чтение состояния удалило бы план из-под старта.
+  Путь каталога данных — `AppState.data_dir`, резолвится один раз в `.setup()`.
 - `<repo>/.git/graft-ui.json` — настройки панели: избранные ветки, схлопнутые папки, ширины
   колонок, подсветка. Версионирован (`version: 1`), camelCase, атомарная запись. Отсутствующий
   файл — это состояние по умолчанию, битый файл — тоже: настройки не стоят неработающего
@@ -620,7 +647,7 @@ Git вызывается только как внешний процесс. `gix
   изменение сам забирает фокус и возвращает) и не при `!document.hasFocus()` (Cmd+Tab — не
   уход пользователя из редактора). Пробовать `relatedTarget` бесполезно: он `null` и для
   клика по любой нефокусируемой части приложения, а это как раз уход.
-- **`editRules.ts`, `lineSelection.ts`, `blame/blameRules.ts` и `conflicts/conflictRules.ts` не импортируют ничего и не должны начать** (у
+- **`editRules.ts`, `lineSelection.ts`, `blame/blameRules.ts`, `conflicts/conflictRules.ts` и `rebase/rebaseRules.ts` не импортируют ничего и не должны начать** (у
   каждого свой вызов `build()` в харнессе — по той же причине): `check-log-filters.mjs`
   *транспилирует* точки входа, а не бандлит, и один `import` из `../../api` превращается в
   падение резолва модулей, читающееся как посторонняя поломка. Свой вызов `build()` ему тоже
@@ -831,6 +858,31 @@ Git вызывается только как внешний процесс. `gix
   второго вызова `status`; тест сверяет его с буквами `status --porcelain=v2` на живом
   слиянии. Литеральный pathspec каталога совпадает со всем под ним, поэтому записи
   `ls-files -u -- :(literal)path` дополнительно фильтруются по равенству пути.
+
+- **Интерактивный rebase: git исполняет, Graft подставляет редакторы.** `GIT_SEQUENCE_EDITOR`
+  — `cp "$GRAFT_REBASE_TODO"`: git запускает редактор через `sh -c '<ed> "$@"'`, путь едет
+  переменной окружения и не требует своего экранирования (пробел в `Application Support`,
+  кавычки, `$`). Упавший `cp` — git не стартует rebase вовсе, а не исполняет свой todo
+  (тест с `rebase.autoSquash` и `fixup!`-коммитом). Git for Windows зовёт редакторы своим
+  `sh` с coreutils — там работает по построению, проверено только на macOS.
+- **Сообщения плана — по хэшу из `done`, не по позиции и не `exec`-строками.** Git зовёт
+  редактор раз на цепочку squash (после её последнего шага) и ещё раз на `--continue` после
+  конфликта; `exec git commit --amend` после `--skip` переписал бы **предыдущий** коммит.
+  Цепочка только из `fixup` редактор не открывает вовсе — её сообщение едет через `reword`
+  головы. Поэтому `op_continue` / `op_skip` для своего rebase ставят тот же редактор: с
+  `GIT_EDITOR=true` reword, вставший на конфликт, молча оставлял старое сообщение.
+- Сообщение через редактор проходит cleanup `strip`: строка `#123 …` пропала бы. План
+  выбирает `core.commentChar`, которым не начинается ни одна строка ни одного сообщения, и
+  передаёт `-c core.commentChar=…` на старт, continue и skip.
+- План сверяется с диапазоном **поштучно**: коммит, которого нет в todo, git считает
+  удалённым, и диалог, устаревший за время появления нового коммита, молча удалил бы его.
+  Хэши — только полный hex: это же закрывает инъекцию строк в todo и выход `msg/<hash>` из
+  каталога.
+- Reword HEAD — `commit --amend --only` без путей: коммитится дерево самого HEAD, а
+  подготовленное пользователем остаётся в индексе и в коммит не едет.
+- Грязное (отслеживаемое) дерево для rebase — отказ, не autostash: спрятанные изменения
+  исчезли бы на всё время rebase, включая остановку `edit`, а changelist'ы, синхронизированные
+  с чистым снимком, забыли бы, в каком списке лежали эти файлы.
 
 ## Инициативы и PRD
 

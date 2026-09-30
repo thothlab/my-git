@@ -416,6 +416,8 @@ export interface OperationState {
   total: number | null;
   /** Every unmerged path with the kind of its conflict (`engine::conflict::list`). */
   conflicted: ConflictEntry[];
+  /** A rebase stopped on an `edit` step: the original hash of that commit. */
+  editStop?: string | null;
 }
 
 /** git's seven kinds of conflict, named after the letters `git status` prints
@@ -627,6 +629,62 @@ export const commitResetLostCount = (hash: string) =>
 export const repoLocalChanges = () => invoke<boolean>("repo_local_changes");
 export const tagCreate = (hash: string, name: string, message?: string) =>
   invoke<RepoState>("tag_create", { hash, name, message: message ?? null });
+
+// interactive rebase, reword, squash (twig port, task 8) — `engine::rebase`
+
+/** git's todo verbs the plan dialog offers. */
+export type RebaseAction = "pick" | "reword" | "edit" | "squash" | "fixup" | "drop";
+
+/** One line of an approved plan, oldest first. `message` is the new text of a
+ *  `reword`, or — on a `squash` / `fixup` — the text of the commit the whole chain
+ *  melds into. At most one message per chain; the backend refuses more. */
+export interface RebaseStep {
+  hash: string;
+  action: RebaseAction;
+  message?: string | null;
+}
+
+export interface RebaseCommit {
+  hash: string;
+  shortHash: string;
+  author: string;
+  authorAt: number;
+  subject: string;
+  /** The whole message, for prefilling a reword or a squash. */
+  message: string;
+}
+
+/** Why history from a commit cannot be rewritten by an interactive rebase. */
+export type RebaseBlock = "notOnBranch" | "merge" | "tooMany";
+
+/** What rewriting from one commit (inclusive) up to HEAD would replay. */
+export interface RebaseRange {
+  /** HEAD's full hash when the range was read. */
+  head: string;
+  /** First parent of the commit; `null` for a root commit (`--root`). */
+  base: string | null;
+  /** Oldest first; empty when `blocked`. */
+  commits: RebaseCommit[];
+  blocked: RebaseBlock | null;
+  /** Tracked files carry uncommitted changes — a rebase refuses them. */
+  dirty: boolean;
+  /** Commits of the range the upstream already has: rewriting them needs a force push. */
+  published: number;
+}
+
+/** Read-only: asked when the log's menu opens and before the plan dialog shows. */
+export const opRebaseRange = (hash: string) =>
+  invoke<RebaseRange>("op_rebase_range", { hash });
+/** Replay `hash` (inclusive) up to HEAD by the plan, oldest first. */
+export const opRebaseStart = (hash: string, steps: RebaseStep[]) =>
+  invoke<RepoState>("op_rebase_start", { hash, steps });
+/** New message for one commit: HEAD by `commit --amend --only` (the index stays
+ *  out of it), an older commit through a one-`reword` rebase. */
+export const commitReword = (hash: string, message: string) =>
+  invoke<RepoState>("commit_reword", { hash, message });
+/** Meld a run of consecutive commits on HEAD's line into one. */
+export const commitsSquash = (hashes: string[], message: string) =>
+  invoke<RepoState>("commits_squash", { hashes, message });
 
 export const opContinue = () => invoke<RepoState>("op_continue");
 

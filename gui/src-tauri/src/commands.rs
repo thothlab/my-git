@@ -11,13 +11,15 @@ use crate::error::{Error, Result};
 use crate::engine::exec::{self, mask_credentials};
 use crate::engine::{
     blame as blame_engine, branches, commit as commit_engine, conflict as conflict_engine, discard, file_history as file_history_engine, log as log_engine, ops,
+    rebase,
 };
 use crate::model::{
     Blame, BlameBefore, BranchInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, ConflictFile, DiscardEntry,
     DiscardKind, DiscardOutcome, Eol, FileDiff, FileHistoryCursor, FileHistoryPage, HunkPick,
     LinePick,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
-    LogFilter, LogPage, RepoExternalChange, RepoState, StashEntry, TextFile, UiState,
+    LogFilter, LogPage, OperationKind, RebaseRange, RebaseStep, RepoExternalChange, RepoState,
+    StashEntry, TextFile, UiState,
 };
 use crate::uistate;
 use crate::watch::{self, RepoWatcher};
@@ -32,6 +34,11 @@ pub struct AppState {
     /// The git-dir watcher of the open repository (`crate::watch`). Replaced when
     /// another repository is opened — the old one stops on drop.
     pub watcher: Mutex<Option<RepoWatcher>>,
+    /// The application data directory (Tauri's `app_data_dir`), resolved once at
+    /// start-up. Plans of interactive rebases live under it — never inside the
+    /// repository (`engine::rebase`). `None` if the platform could not name one;
+    /// rewriting history is then refused, everything else works.
+    pub data_dir: Mutex<Option<PathBuf>>,
 }
 
 impl AppState {
@@ -41,6 +48,18 @@ impl AppState {
             .unwrap()
             .clone()
             .ok_or_else(|| Error::Rule("repository not open".into()))
+    }
+
+    /// The application data directory, if known.
+    pub fn data_dir_opt(&self) -> Option<PathBuf> {
+        self.data_dir.lock().unwrap().clone()
+    }
+
+    /// The application data directory, required: an interactive rebase keeps its plan
+    /// there and does not start without one.
+    pub fn data_dir(&self) -> Result<PathBuf> {
+        self.data_dir_opt()
+            .ok_or_else(|| Error::Io("the application data directory is unknown".into()))
     }
 }
 
@@ -84,6 +103,19 @@ pub fn build_state(state: &State<AppState>) -> Result<RepoState> {
         }
     }
 
+    let operation = ops::detect_state(&repo)?;
+    // A rebase plan outlives its rebase when that was finished or aborted in a
+    // terminal; the first state read without it removes the plan. Not while any
+    // user action runs: between writing a plan and git creating `rebase-merge/` a
+    // concurrent read would see no rebase and delete the plan under the start.
+    if operation.kind != OperationKind::Rebase
+        && !exec::OWN_ACTIONS.within(std::time::Duration::ZERO)
+    {
+        if let Some(dir) = state.data_dir_opt() {
+            let _ = rebase::sweep(&dir, &repo);
+        }
+    }
+
     Ok(RepoState {
         repo_path: repo.display().to_string(),
         branch: snap.branch,
@@ -96,7 +128,7 @@ pub fn build_state(state: &State<AppState>) -> Result<RepoState> {
         // The unfinished-operation banner has to appear on its own (История 30), and
         // every mutation already returns RepoState — so this travels with the state
         // instead of a second `op_state` command that would be a rival source of truth.
-        operation: ops::detect_state(&repo)?,
+        operation,
         user_email: crate::engine::cli::user_email(&repo),
     })
 }
@@ -761,19 +793,69 @@ pub async fn conflict_take(
 
 #[tauri::command]
 pub async fn op_continue(state: State<'_, AppState>) -> Result<RepoState> {
-    exec::as_user("op_continue", || ops::op_continue(&state.repo_path()?))?;
+    let data = state.data_dir_opt();
+    exec::as_user("op_continue", || ops::op_continue(&state.repo_path()?, data.as_deref()))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn op_abort(state: State<'_, AppState>) -> Result<RepoState> {
-    exec::as_user("op_abort", || ops::op_abort(&state.repo_path()?))?;
+    let data = state.data_dir_opt();
+    exec::as_user("op_abort", || ops::op_abort(&state.repo_path()?, data.as_deref()))?;
     build_state(&state)
 }
 
 #[tauri::command]
 pub async fn op_skip(state: State<'_, AppState>) -> Result<RepoState> {
-    exec::as_user("op_skip", || ops::op_skip(&state.repo_path()?))?;
+    let data = state.data_dir_opt();
+    exec::as_user("op_skip", || ops::op_skip(&state.repo_path()?, data.as_deref()))?;
+    build_state(&state)
+}
+
+/// What an interactive rebase from `hash` (inclusive) up to HEAD would replay, and
+/// whether it may — asked when the log's menu opens and before the dialog shows.
+#[tauri::command]
+pub async fn op_rebase_range(state: State<'_, AppState>, hash: String) -> Result<RebaseRange> {
+    rebase::range(&state.repo_path()?, &hash)
+}
+
+/// Replay `hash` (inclusive) up to HEAD by the plan the user approved, oldest first.
+#[tauri::command]
+pub async fn op_rebase_start(
+    state: State<'_, AppState>,
+    hash: String,
+    steps: Vec<RebaseStep>,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    let data = state.data_dir()?;
+    exec::as_user("op_rebase_start", || rebase::start(&repo, &data, &hash, &steps))?;
+    build_state(&state)
+}
+
+/// Give one commit a new message: HEAD by `commit --amend --only`, an older one by
+/// an interactive rebase with a single `reword`.
+#[tauri::command]
+pub async fn commit_reword(
+    state: State<'_, AppState>,
+    hash: String,
+    message: String,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    let data = state.data_dir()?;
+    exec::as_user("commit_reword", || rebase::reword(&repo, &data, &hash, &message))?;
+    build_state(&state)
+}
+
+/// Meld a run of consecutive commits on HEAD's line into one with `message`.
+#[tauri::command]
+pub async fn commits_squash(
+    state: State<'_, AppState>,
+    hashes: Vec<String>,
+    message: String,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    let data = state.data_dir()?;
+    exec::as_user("commits_squash", || rebase::squash(&repo, &data, &hashes, &message))?;
     build_state(&state)
 }
 

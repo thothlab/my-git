@@ -18,7 +18,10 @@
  *   - `src/components/conflicts/conflictRules.ts` - git's conflict markers
  *     (merge / diff3 / zdiff3, CRLF, broken and nested blocks, other marker
  *     sizes), the result assembled from per-block decisions, the editor's own
- *     undo and the navigation between blocks.
+ *     undo and the navigation between blocks;
+ *   - `src/components/rebase/rebaseRules.ts` - the interactive rebase plan: chains,
+ *     which row carries a message, what is sent, the preview, and whether a log
+ *     selection is one unbroken run that can be squashed.
  *
  * Run it:  node scripts/check-log-filters.mjs      (from `gui/`)
  * Another time zone:  TZ=America/Los_Angeles node scripts/check-log-filters.mjs
@@ -95,6 +98,14 @@ await build({
   logLevel: "warning",
 });
 
+// Its own call too: `rebase/` shares its base with nothing here.
+await build({
+  entryPoints: [join(here, "..", "src", "components", "rebase", "rebaseRules.ts")],
+  outdir: out,
+  format: "esm",
+  logLevel: "warning",
+});
+
 const load = (name) => import(pathToFileURL(join(out, name)).href);
 const { compilePattern, spansIn, matchesCommit } = await load("searchPattern.js");
 const { asInputDate, dayStart, dayEnd, startOfToday, relativeToRepo, toSlash } =
@@ -120,6 +131,7 @@ const { splitShellArgs, formatArgv } = await load("gitConsoleCommand.js");
 const sel = await load("lineSelection.js");
 const blame = await load("blameRules.js");
 const cr = await load("conflictRules.js");
+const rb = await load("rebaseRules.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -747,6 +759,66 @@ for (const argv of [
   eq(cr.coalesces({ kind: "type", at: 0 }, "type", 1500), false, "a pause starts a new step");
   eq(cr.coalesces({ kind: "pick", at: 0 }, "type", 10), false, "typing after a click is its own step");
   eq(cr.CONFLICT_CODES.deletedByUs, "DU", "deleted by us is DU");
+}
+
+// -- Interactive rebase plan (rebaseRules.ts) --------------------------------
+{
+  const commits = ["A", "B", "C", "D"].map((s, i) => ({
+    hash: String(i + 1).repeat(40),
+    shortHash: String(i + 1).repeat(7),
+    subject: s,
+    message: `${s}\n\nbody ${s}`,
+  }));
+  const plan = (...actions) =>
+    rb.fromCommits(commits).map((e, i) => ({ ...e, action: actions[i] ?? "pick" }));
+  const H = (i) => commits[i].hash;
+
+  eq(rb.fromCommits(commits).map((e) => e.action), ["pick", "pick", "pick", "pick"], "everything is picked at first");
+  eq(rb.moveEntry([1, 2, 3], 2, 0), [3, 1, 2], "move up to the top");
+  eq(rb.moveEntry([1, 2, 3], 0, 5), [1, 2, 3], "a move past the end changes nothing");
+  eq(rb.chainsOf(plan("pick", "squash", "drop", "fixup")), [[0, 1, 3]], "a drop does not split a chain");
+  eq(rb.chainsOf(plan("pick", "pick", "fixup", "pick")), [[0], [1, 2], [3]], "chains");
+
+  eq(rb.planProblem(plan("drop", "drop", "drop", "drop")), "noneKept", "nothing kept");
+  eq(rb.planProblem(plan("drop", "squash")), "firstMelds", "the oldest kept commit cannot meld");
+  eq(rb.planProblem(plan("pick", "squash")), null, "a squash after a pick is fine");
+
+  // Message fields.
+  let p = plan("pick", "squash", "fixup", "pick");
+  eq([0, 1, 2, 3].map((i) => rb.messageSlot(p, i)), [null, null, "combined", null], "a squash chain's field is on its last row");
+  eq(rb.slotText(p, 2), "A\n\nbody A\n\nB\n\nbody B", "prefilled with git's own default: head and squashed, fixups left out");
+  eq(rb.toSteps(p).map((s) => s.message ?? null), [null, null, null, null], "an untouched combined message is not sent");
+  p = p.map((e, i) => (i === 2 ? { ...e, text: "One" } : e));
+  eq(rb.toSteps(p)[2], { hash: H(2), action: "fixup", message: "One" }, "an edited one is, on the row that shows it");
+  eq(rb.preview(p)[0].subject, "One", "the preview shows the message typed");
+  eq(rb.preview(p)[0].from, ["1111111", "2222222", "3333333"], "and what melds into it");
+
+  p = plan("reword", "squash");
+  eq([0, 1].map((i) => rb.messageSlot(p, i)), ["reword", null], "a reworded head speaks for its chain");
+  eq(rb.toSteps(p)[0].message, "A\n\nbody A", "a reword is prefilled with the commit's own message");
+  p = p.map((e, i) => (i === 0 ? { ...e, text: "  " } : e));
+  eq(rb.planProblem(p), "emptyMessage", "an emptied message stops the plan");
+
+  eq([0, 1].map((i) => rb.messageSlot(plan("pick", "fixup"), i)), [null, null], "fixups keep the head's message: no field");
+
+  const pv = rb.preview(plan("edit", "drop", "reword"));
+  eq(pv.map((c) => [c.subject, c.stops]), [["A", true], ["C", false], ["D", false]], "preview: dropped commits vanish, edit stops");
+  eq(rb.summary(plan("pick", "squash", "drop", "fixup")), { kept: 1, melded: 2, dropped: 1 }, "summary");
+  eq(rb.ACTION_KEYS.KeyS, "squash", "S squashes");
+
+  // Squash from the log's selection: by first-parent links, not by rows.
+  const a = { hash: "a", parents: ["root"] };
+  const b = { hash: "b", parents: ["a"] };
+  const c = { hash: "c", parents: ["b"] };
+  eq(rb.squashRun([c, b, a]), { ok: true, oldestFirst: ["a", "b", "c"] }, "a run, newest first as the log lists it");
+  eq(rb.squashRun([a, c, b]), { ok: true, oldestFirst: ["a", "b", "c"] }, "order on screen does not matter");
+  eq(rb.squashRun([c, a]), { ok: false, reason: "gap" }, "a gap");
+  eq(rb.squashRun([a]), { ok: false, reason: "tooFew" }, "one commit");
+  eq(rb.squashRun([{ hash: "m", parents: ["b", "x"] }, b]), { ok: false, reason: "merge" }, "a merge");
+  eq(rb.squashRun([b, { hash: "s", parents: ["a"] }]), { ok: false, reason: "gap" }, "two siblings are no run");
+  eq(rb.runOpensRange(["a", "b"], ["a", "b", "c"]), true, "the run opens the range");
+  eq(rb.runOpensRange(["a", "b"], ["a", "x", "b"]), false, "something else between");
+  eq(rb.squashMessage(["one\n", "", "two"]), "one\n\ntwo", "squash prefill joins the messages");
 }
 
 await rm(out, { recursive: true, force: true });

@@ -7,7 +7,7 @@ mod uistate;
 mod watch;
 
 use commands::AppState;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 // `Menu` is built on every platform (`Menu::default` below runs
 // unconditionally); `MenuItem`/`MenuItemKind` are only reached inside the
 // `#[cfg(target_os = "macos")]` block that customises the app submenu, so
@@ -27,6 +27,15 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(AppState::default())
+        // Interactive rebase keeps its plan in the application data directory
+        // (`engine::rebase`). Resolved once here; a platform that cannot name it
+        // leaves `None`, and only rewriting history is refused for it.
+        .setup(|app| {
+            if let Ok(dir) = app.path().app_data_dir() {
+                *app.state::<AppState>().data_dir.lock().unwrap() = Some(dir);
+            }
+            Ok(())
+        })
         // The default macOS app menu's About item opens the native panel
         // directly and never reaches `on_menu_event`, so it can't show our
         // own About dialog. Everything else in the default menu (Edit's
@@ -125,6 +134,10 @@ pub fn run() {
             commands::op_continue,
             commands::op_abort,
             commands::op_skip,
+            commands::op_rebase_range,
+            commands::op_rebase_start,
+            commands::commit_reword,
+            commands::commits_squash,
             commands::conflict_read,
             commands::conflict_resolve,
             commands::conflict_take,

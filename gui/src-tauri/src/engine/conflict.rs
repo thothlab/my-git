@@ -491,7 +491,7 @@ mod tests {
         let op = ops::detect_state(p).unwrap();
         assert!(op.conflicted.is_empty());
 
-        ops::op_continue(p).unwrap();
+        ops::op_continue(p, None).unwrap();
         assert_eq!(ops::detect_state(p).unwrap().kind, OperationKind::None);
         assert_eq!(run(p, &["show", "HEAD:f.txt"]), "a\nOURS\nTHEIRS\nc");
         assert_eq!(run(p, &["rev-list", "--count", "--merges", "HEAD"]), "1");
@@ -580,7 +580,7 @@ mod tests {
         take(p, "f.txt", "ours").unwrap();
         assert!(!p.join("f.txt").exists());
         assert_eq!(unmerged(p), "");
-        ops::op_continue(p).unwrap();
+        ops::op_continue(p, None).unwrap();
         assert!(run(p, &["ls-tree", "--name-only", "HEAD"])
             .lines()
             .all(|l| l != "f.txt"));
@@ -591,7 +591,7 @@ mod tests {
         take(p, "f.txt", "theirs").unwrap();
         assert_eq!(std::fs::read_to_string(p.join("f.txt")).unwrap(), "a\nB\n");
         assert_eq!(unmerged(p), "");
-        ops::op_continue(p).unwrap();
+        ops::op_continue(p, None).unwrap();
         assert_eq!(run(p, &["show", "HEAD:f.txt"]), "a\nB");
     }
 

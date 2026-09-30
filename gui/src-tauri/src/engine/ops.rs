@@ -9,6 +9,7 @@ use std::path::Path;
 
 use crate::engine::cli::CliEngine;
 use crate::engine::exec;
+use crate::engine::rebase;
 use crate::error::{Error, Result};
 use crate::model::{CommitFileEntry, OperationKind, OperationState, StashEntry};
 
@@ -62,29 +63,57 @@ pub fn detect_state(repo: &Path) -> Result<OperationState> {
             current: None,
             total: None,
             conflicted: Vec::new(),
+            edit_stop: None,
         });
     }
 
     // "N of M" exists only for a rebase, and the two backends spell it differently:
     // the merge backend keeps `msgnum`/`end`, the apply backend `next`/`last`.
+    let mut done = None;
     let (current, total) = if kind == OperationKind::Rebase {
         let (cur_name, tot_name) = if present[1] {
             ("rebase-merge/msgnum", "rebase-merge/end")
         } else {
             ("rebase-apply/next", "rebase-apply/last")
         };
-        let counters = CliEngine::new(repo).git_paths(&[cur_name, tot_name])?;
+        let mut counters =
+            CliEngine::new(repo).git_paths(&[cur_name, tot_name, "rebase-merge/done"])?;
+        done = counters.pop().filter(|_| present[1]);
         (read_counter(&counters[0]), read_counter(&counters[1]))
     } else {
         (None, None)
     };
 
+    let conflicted = crate::engine::conflict::list(repo)?;
+    let edit_stop = match done {
+        Some(done) if conflicted.is_empty() => edit_step(&done),
+        _ => None,
+    };
     Ok(OperationState {
         kind,
         current,
         total,
-        conflicted: crate::engine::conflict::list(repo)?,
+        conflicted,
+        edit_stop,
     })
+}
+
+/// The commit an interactive rebase stopped at for `edit`, from the last command of
+/// its `done` file (`edit <hash>` or the short `e <hash>`); `None` for any other
+/// step. The `amend` marker is not the sign: git writes it for a squash that failed
+/// on a conflict as well.
+fn edit_step(done: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(done).ok()?;
+    let last = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && l.starts_with(|c: char| c.is_ascii_alphabetic()))
+        .last()?;
+    let mut words = last.split_whitespace();
+    let verb = words.next()?;
+    let hash = words.next()?;
+    ((verb == "edit" || verb == "e") && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| hash.to_string())
 }
 
 /// One number written by git into a rebase state file, or `None` when the file is
@@ -245,39 +274,79 @@ fn in_progress_command(repo: &Path) -> Result<&'static str> {
     }
 }
 
-/// Run `git <op> <flag>` with no editor: `--continue` would otherwise open one to
-/// confirm the message and hang a GUI process forever. `true` exits 0 without
-/// touching the file, which keeps the message git already prepared.
-fn drive(repo: &Path, op: &str, flag: &str) -> Result<()> {
-    exec::git(repo, &[op, flag])
-        .env(&[("GIT_EDITOR", "true"), ("GIT_SEQUENCE_EDITOR", "true")])
+/// Run `git <op> <flag>` with no editor of the user's: `--continue` would otherwise
+/// open one to confirm the message and hang a GUI process forever. `true` exits 0
+/// without touching the file, which keeps the message git already prepared.
+///
+/// An interactive rebase this application started (`plan`) gets its own editors
+/// instead — the one that hands out the planned messages by commit hash, and the
+/// plan's comment character — or a reword that stopped on a conflict would be
+/// committed with its old message here (`engine::rebase`).
+fn drive(repo: &Path, op: &str, flag: &str, plan: Option<&rebase::Plan>) -> Result<()> {
+    let Some(plan) = plan else {
+        exec::git(repo, &[op, flag])
+            .env(&[("GIT_EDITOR", "true"), ("GIT_SEQUENCE_EDITOR", "true")])
+            .run()?
+            .checked_both()?;
+        return Ok(());
+    };
+    let vars = plan.env(repo, false)?;
+    let env: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let config = plan.comment_config();
+    exec::git(repo, &["-c", &config, op, flag])
+        .env(&env)
         .run()?
         .checked_both()?;
     Ok(())
 }
 
-/// История 30: carry on with the operation the repository is in.
-pub fn op_continue(repo: &Path) -> Result<()> {
+/// The plan of the rebase in progress, when `data_dir` is known and it is ours.
+fn plan_for(repo: &Path, op: &str, data_dir: Option<&Path>) -> Result<Option<rebase::Plan>> {
+    match data_dir {
+        Some(d) if op == "rebase" => rebase::resume(d, repo),
+        _ => Ok(None),
+    }
+}
+
+/// История 30: carry on with the operation the repository is in. `data_dir` is the
+/// application data directory, where a plan of an interactive rebase lives.
+pub fn op_continue(repo: &Path, data_dir: Option<&Path>) -> Result<()> {
     let op = in_progress_command(repo)?;
-    drive(repo, op, "--continue")
+    let plan = plan_for(repo, op, data_dir)?;
+    let result = drive(repo, op, "--continue", plan.as_ref());
+    sweep(repo, data_dir);
+    result
 }
 
 /// История 30: undo the operation, returning the branch to where it started.
-pub fn op_abort(repo: &Path) -> Result<()> {
+pub fn op_abort(repo: &Path, data_dir: Option<&Path>) -> Result<()> {
     let op = in_progress_command(repo)?;
-    drive(repo, op, "--abort")
+    let result = drive(repo, op, "--abort", None);
+    sweep(repo, data_dir);
+    result
 }
 
 /// История 30: drop the current commit and carry on.
 ///
 /// A merge has no `--skip` — there is no "next commit" to move to. Saying so is
 /// better than running something else that happens to be spelled similarly.
-pub fn op_skip(repo: &Path) -> Result<()> {
+pub fn op_skip(repo: &Path, data_dir: Option<&Path>) -> Result<()> {
     let op = in_progress_command(repo)?;
     if op == "merge" {
         return Err(Error::Rule("a merge cannot skip a commit".into()));
     }
-    drive(repo, op, "--skip")
+    let plan = plan_for(repo, op, data_dir)?;
+    let result = drive(repo, op, "--skip", plan.as_ref());
+    sweep(repo, data_dir);
+    result
+}
+
+/// Drop a rebase plan the repository no longer needs. Best effort: the operation
+/// itself already happened, and a leftover plan is removed on the next state read.
+fn sweep(repo: &Path, data_dir: Option<&Path>) {
+    if let Some(d) = data_dir {
+        let _ = rebase::sweep(d, repo);
+    }
 }
 
 /// The marker `CliEngine::checkout` writes into the stash message when it shelves
@@ -939,7 +1008,7 @@ mod tests {
         let (dir, tip) = repo_with_a_stopped_rebase();
         let p = dir.path();
 
-        op_abort(p).unwrap();
+        op_abort(p, None).unwrap();
 
         assert_eq!(git(p, &["rev-parse", "HEAD"]), tip, "back at the old tip");
         assert_eq!(git(p, &["rev-parse", "--abbrev-ref", "HEAD"]), "feat");
@@ -955,7 +1024,7 @@ mod tests {
         std::fs::write(p.join("a.txt"), "resolved\n").unwrap();
         git(p, &["add", "a.txt"]);
 
-        op_continue(p).unwrap();
+        op_continue(p, None).unwrap();
 
         assert_eq!(detect_state(p).unwrap().kind, OperationKind::None);
         assert_eq!(git(p, &["rev-parse", "--abbrev-ref", "HEAD"]), "feat");
@@ -971,7 +1040,7 @@ mod tests {
         let (dir, _tip) = repo_with_a_stopped_rebase();
         let p = dir.path();
 
-        op_skip(p).unwrap();
+        op_skip(p, None).unwrap();
 
         assert_eq!(detect_state(p).unwrap().kind, OperationKind::None);
         // c1 + "main one" + only the second feat commit
@@ -986,9 +1055,9 @@ mod tests {
     fn driving_a_calm_repository_is_refused() {
         let dir = scratch_repo();
         for r in [
-            op_continue(dir.path()),
-            op_skip(dir.path()),
-            op_abort(dir.path()),
+            op_continue(dir.path(), None),
+            op_skip(dir.path(), None),
+            op_abort(dir.path(), None),
         ] {
             match r {
                 Err(Error::Rule(m)) => assert!(m.contains("no operation"), "{m}"),
@@ -1003,7 +1072,7 @@ mod tests {
         let dir = scratch_repo();
         let p = dir.path();
         std::fs::write(marker_path(p, "MERGE_HEAD"), b"deadbeef\n").unwrap();
-        match op_skip(p) {
+        match op_skip(p, None) {
             Err(Error::Rule(m)) => assert!(m.contains("skip"), "{m}"),
             other => panic!("expected a rule error, got {other:?}"),
         }

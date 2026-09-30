@@ -12,6 +12,7 @@ pub mod file_history;
 pub mod log;
 pub mod ops;
 pub mod patch;
+pub mod rebase;
 
 /// Abstraction over the git backend.
 ///

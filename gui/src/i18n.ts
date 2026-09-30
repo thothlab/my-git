@@ -361,6 +361,79 @@ const en = {
   menuRevertCommit: () => "Revert this commit",
   menuResetHere: () => "Reset the current branch to this commit…",
   menuCherryPick: () => "Cherry-pick onto the current branch",
+  menuReword: () => "Edit the message…",
+  menuSquash: (n: number) => (n < 2 ? "Squash selected commits…" : `Squash ${n} commits into one…`),
+  menuRebaseFrom: () => "Interactive rebase from here…",
+  whyRebaseBlocked: (why: string): string =>
+    why === "merge"
+      ? "a merge commit lies between this commit and HEAD — a rebase would flatten it"
+      : why === "tooMany"
+        ? "more than 1000 commits would be replayed"
+        : "the commit is not on the current branch",
+  whyRebaseUnknown: () => "could not read the commits to replay",
+  whyDirtyTree: () => "tracked files have uncommitted changes — commit or stash them first",
+  whyNeedTwoToSquash: () => "select two or more commits",
+  whySquashRun: (why: string): string =>
+    why === "merge"
+      ? "a merge commit cannot be squashed"
+      : "only commits that follow one another can be squashed",
+  whySquashOffBranch: () =>
+    "the selected commits are not one unbroken run on the current branch (a path filter can hide commits between them)",
+  dlgMultilineHint: () => "Enter starts a new line; Cmd/Ctrl+Enter confirms.",
+  dlgMessage: () => "Commit message",
+  dlgRewordTitle: (hash: string) => `Edit the message of ${hash}`,
+  dlgRewordNoteHead: () =>
+    "Only the message changes: the commit gets a new hash, its changes stay as they are, and whatever is staged is left out of it.",
+  dlgRewordNoteDeep: (after: number) =>
+    `The commit and the ${after} ${after === 1 ? "commit" : "commits"} after it get new hashes; their changes are replayed unchanged (an interactive rebase).`,
+  dlgRewordSubmit: () => "Change the message",
+  dlgSquashTitle: (n: number) => `Squash ${n} commits into one`,
+  dlgSquashNote: (after: number) =>
+    after > 0
+      ? `The selected commits melt into one new commit; the ${after} ${after === 1 ? "commit" : "commits"} after them are replayed unchanged.`
+      : "The selected commits melt into one new commit.",
+  dlgSquashMessage: () => "Message of the squashed commit",
+  dlgSquashSubmit: () => "Squash",
+  confirmRewritePublished: (n: number) =>
+    `${n} of the commits to be rewritten ${n === 1 ? "is" : "are"} already on the upstream branch. After rewriting, the remote accepts the result only with a force push, and anyone who built on the old commits has to recover.\n\nRewrite anyway?`,
+  rbTitle: (hash: string) => `Interactive rebase from ${hash}`,
+  rbNote: (n: number) =>
+    `Oldest first — the order git replays them in. ${n} ${n === 1 ? "commit is" : "commits are"} rewritten and get new hashes.`,
+  rbAction: (a: string) =>
+    (
+      ({
+        pick: "pick — keep",
+        reword: "reword — new message",
+        edit: "edit — stop to amend",
+        squash: "squash — meld, keep message",
+        fixup: "fixup — meld, drop message",
+        drop: "drop — remove",
+      }) as Record<string, string>
+    )[a] ?? a,
+  rbActionFor: (hash: string) => `Action for ${hash}`,
+  rbMoveUp: () => "Move earlier (Alt+↑)",
+  rbMoveDown: () => "Move later (Alt+↓)",
+  rbMessageReword: () => "New message",
+  rbMessageCombined: () => "Message of the combined commit (left as is, git joins the messages itself)",
+  rbPreviewTitle: () => "Result, oldest first",
+  rbPreviewStops: () => "stops here",
+  rbPreviewReworded: () => "new message",
+  rbSummary: (kept: number, melded: number, dropped: number) =>
+    `${kept} kept · ${melded} melded · ${dropped} dropped`,
+  rbProblem: (p: string): string =>
+    p === "noneKept"
+      ? "The plan has to keep at least one commit."
+      : p === "firstMelds"
+        ? "The oldest kept commit has nothing before it to be melded into."
+        : "A message cannot be empty.",
+  rbStart: () => "Start rebase",
+  rbKeysHint: () =>
+    "↑↓ row · P R E S F D action · Alt+↑↓ move · Cmd/Ctrl+Enter start · Esc cancel",
+  opEditStop: (hash: string) =>
+    `Stopped to edit ${hash}: change the files and commit them with "Amend last commit" in the Changes panel, then Continue.`,
+  phaseReword: () => "reword",
+  phaseSquash: () => "squash",
+  phaseRebaseInteractive: () => "interactive rebase",
   whyCurrentBranch: () => "this is the current branch",
   whyRemoteBranch: () => "this is a remote branch",
   whyAlreadyContained: () => "the commit is already on the current branch",
@@ -996,6 +1069,80 @@ const ru: Dict = {
   menuRevertCommit: () => "Откатить коммит (revert)",
   menuResetHere: () => "Сбросить текущую ветку на этот коммит…",
   menuCherryPick: () => "Перенести коммит в текущую ветку",
+  menuReword: () => "Изменить сообщение…",
+  menuSquash: (n) =>
+    n < 2 ? "Объединить выбранные коммиты…" : `Объединить ${n} ${ruPlural(n, "коммит", "коммита", "коммитов")} в один…`,
+  menuRebaseFrom: () => "Интерактивный rebase отсюда…",
+  whyRebaseBlocked: (why) =>
+    why === "merge"
+      ? "между этим коммитом и HEAD есть merge-коммит — rebase его развернёт"
+      : why === "tooMany"
+        ? "пришлось бы переписать больше 1000 коммитов"
+        : "коммит не в текущей ветке",
+  whyRebaseUnknown: () => "не удалось прочитать коммиты для переписывания",
+  whyDirtyTree: () => "в отслеживаемых файлах есть незакоммиченные изменения — закоммитьте или спрячьте их",
+  whyNeedTwoToSquash: () => "выберите два коммита или больше",
+  whySquashRun: (why) =>
+    why === "merge"
+      ? "merge-коммит объединить нельзя"
+      : "объединить можно только коммиты, идущие друг за другом",
+  whySquashOffBranch: () =>
+    "выбранные коммиты не идут подряд в текущей ветке (фильтр по пути может скрывать коммиты между ними)",
+  dlgMultilineHint: () => "Enter — новая строка; Cmd/Ctrl+Enter — подтвердить.",
+  dlgMessage: () => "Сообщение коммита",
+  dlgRewordTitle: (hash) => `Сообщение коммита ${hash}`,
+  dlgRewordNoteHead: () =>
+    "Меняется только сообщение: коммит получит новый хэш, изменения в нём останутся прежними, подготовленное в индексе в него не попадёт.",
+  dlgRewordNoteDeep: (after) =>
+    `Коммит и ${after} ${ruPlural(after, "коммит", "коммита", "коммитов")} после него получат новые хэши; их изменения переиграются без правок (интерактивный rebase).`,
+  dlgRewordSubmit: () => "Изменить сообщение",
+  dlgSquashTitle: (n) => `Объединить ${n} ${ruPlural(n, "коммит", "коммита", "коммитов")} в один`,
+  dlgSquashNote: (after) =>
+    after > 0
+      ? `Выбранные коммиты сольются в один новый; ${after} ${ruPlural(after, "коммит", "коммита", "коммитов")} после них переиграются без правок.`
+      : "Выбранные коммиты сольются в один новый.",
+  dlgSquashMessage: () => "Сообщение объединённого коммита",
+  dlgSquashSubmit: () => "Объединить",
+  confirmRewritePublished: (n) =>
+    `${n} из переписываемых ${ruPlural(n, "коммита", "коммитов", "коммитов")} уже есть в upstream-ветке. После переписывания удалённый репозиторий примет результат только через force push, а тем, кто строил работу на старых коммитах, придётся её переносить.\n\nВсё равно переписать?`,
+  rbTitle: (hash) => `Интерактивный rebase от ${hash}`,
+  rbNote: (n) =>
+    `Сверху самый старый — в этом порядке git их переиграет. ${n} ${ruPlural(n, "коммит будет переписан", "коммита будут переписаны", "коммитов будут переписаны")} и получат новые хэши.`,
+  rbAction: (a) =>
+    (
+      ({
+        pick: "pick — оставить",
+        reword: "reword — новое сообщение",
+        edit: "edit — остановиться для правки",
+        squash: "squash — влить, сохранить сообщение",
+        fixup: "fixup — влить, без сообщения",
+        drop: "drop — удалить",
+      }) as Record<string, string>
+    )[a] ?? a,
+  rbActionFor: (hash) => `Действие для ${hash}`,
+  rbMoveUp: () => "Раньше (Alt+↑)",
+  rbMoveDown: () => "Позже (Alt+↓)",
+  rbMessageReword: () => "Новое сообщение",
+  rbMessageCombined: () => "Сообщение объединённого коммита (если не менять, git склеит сообщения сам)",
+  rbPreviewTitle: () => "Результат, сверху самый старый",
+  rbPreviewStops: () => "остановка",
+  rbPreviewReworded: () => "новое сообщение",
+  rbSummary: (kept, melded, dropped) =>
+    `оставлено ${kept} · влито ${melded} · удалено ${dropped}`,
+  rbProblem: (p) =>
+    p === "noneKept"
+      ? "План должен оставить хотя бы один коммит."
+      : p === "firstMelds"
+        ? "Самому старому оставленному коммиту не во что вливаться."
+        : "Сообщение не может быть пустым.",
+  rbStart: () => "Начать rebase",
+  rbKeysHint: () =>
+    "↑↓ строка · P R E S F D действие · Alt+↑↓ перенос · Cmd/Ctrl+Enter начать · Esc отмена",
+  opEditStop: (hash) =>
+    `Остановка для правки ${hash}: поменяйте файлы и закоммитьте их с «Изменить последний коммит» в панели изменений, затем «Продолжить».`,
+  phaseReword: () => "изменение сообщения",
+  phaseSquash: () => "объединение коммитов",
+  phaseRebaseInteractive: () => "интерактивный rebase",
   whyCurrentBranch: () => "это текущая ветка",
   whyRemoteBranch: () => "это удалённая ветка",
   whyAlreadyContained: () => "коммит уже содержится в текущей ветке",
