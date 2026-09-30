@@ -36,15 +36,13 @@
 //! created it, emptied when it was an empty folder before. Nothing else is ever
 //! deleted — a destination that was not empty is refused before git starts.
 //!
-//! No prompt can open: `GIT_TERMINAL_PROMPT=0` (a missing https credential fails
-//! instead of waiting on a terminal nobody sees), no askpass program, and ssh runs
-//! with `BatchMode=yes` — but only when the user has no ssh command of their own
-//! (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`): replacing theirs would drop
-//! whatever key or agent it names. Why BatchMode at all: started from a terminal,
-//! Graft has a controlling tty, and ssh would ask for a passphrase or a host key
-//! there — a clone hung on a question in a window the reader is not looking at.
-//! Started from Finder there is no tty and ssh fails at once either way; keys held
-//! by ssh-agent work in both cases.
+//! No prompt can open: the clone is a network run (`exec::Git::network`, the same
+//! environment as push / fetch / pull — `GIT_TERMINAL_PROMPT=0`, no inherited
+//! askpass, ssh with `BatchMode=yes` unless the user has an ssh command of their
+//! own). Why BatchMode at all: started from a terminal, Graft has a controlling
+//! tty, and ssh would ask for a passphrase or a host key there — a clone hung on a
+//! question in a window the reader is not looking at. Started from Finder there is
+//! no tty and ssh fails at once either way; keys held by ssh-agent work in both.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -616,19 +614,6 @@ pub(crate) fn cleanup(t: &CloneTarget) -> Result<()> {
     last.map_err(|e| Error::Io(format!("{}: {e}", t.path.display())))
 }
 
-/// `GIT_SSH_COMMAND` for a clone, or `None` when the user has an ssh command of
-/// their own — see the module docs.
-fn batch_ssh(parent: &Path) -> Option<&'static str> {
-    if std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
-        return None;
-    }
-    let configured = exec::git(parent, &["config", "--get", "core.sshCommand"])
-        .run()
-        .map(|o| o.success())
-        .unwrap_or(true);
-    (!configured).then_some("ssh -o BatchMode=yes")
-}
-
 /// git's stderr with every `\r`-redrawn meter collapsed to its last state — the
 /// text of a failed clone's error, without a hundred "Receiving objects" lines.
 fn collapse_meters(stderr: &[u8]) -> String {
@@ -674,11 +659,6 @@ fn clone_with(
     args.extend_from_slice(extra);
     args.extend(["--", url, dest.as_str()]);
 
-    let mut env = vec![("GIT_TERMINAL_PROMPT", "0")];
-    if let Some(ssh) = batch_ssh(&target.parent) {
-        env.push(("GIT_SSH_COMMAND", ssh));
-    }
-
     let mut last: Option<Instant> = None;
     let mut pending: Option<String> = None;
     let mut throttled = |seg: &str| {
@@ -691,8 +671,7 @@ fn clone_with(
         }
     };
     let res = exec::git(&target.parent, &args)
-        .env(&env)
-        .env_remove(&["GIT_ASKPASS", "SSH_ASKPASS"])
+        .network()
         .stream(cancel, &mut throttled);
     if let Some(p) = pending.take() {
         on_line(&p);

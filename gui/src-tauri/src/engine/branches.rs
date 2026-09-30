@@ -253,7 +253,13 @@ pub fn delete(repo: &Path, name: &str, remote: bool, force: bool) -> Result<()> 
                 "{name} is not a remote branch name (expected <remote>/<branch>)"
             ))
         })?;
-        git(repo, &["push", "--delete", "--end-of-options", remote_name, branch])?;
+        exec::git(
+            repo,
+            &["push", "--delete", "--end-of-options", remote_name, branch],
+        )
+        .network()
+        .run()?
+        .checked_both()?;
         return Ok(());
     }
     if current_branch(repo)?.as_deref() == Some(name) {

@@ -172,8 +172,9 @@ pub(crate) struct Git<'a> {
     dir: &'a Path,
     args: Vec<String>,
     env: &'a [(&'a str, &'a str)],
-    env_remove: &'a [&'a str],
     input: Option<&'a [u8]>,
+    /// See [`Git::network`].
+    network: bool,
 }
 
 /// `git -C <dir> <args>`. stdin is closed unless [`Git::input`] supplies bytes —
@@ -183,8 +184,8 @@ pub(crate) fn git<'a, S: AsRef<str>>(dir: &'a Path, args: &[S]) -> Git<'a> {
         dir,
         args: args.iter().map(|a| a.as_ref().to_string()).collect(),
         env: &[],
-        env_remove: &[],
         input: None,
+        network: false,
     }
 }
 
@@ -194,8 +195,12 @@ impl<'a> Git<'a> {
         self
     }
 
-    pub(crate) fn env_remove(mut self, names: &'a [&'a str]) -> Self {
-        self.env_remove = names;
+    /// This run may talk to a remote (push, fetch, pull, clone, `push --delete`):
+    /// run it with [`network_env`] — no prompt of any kind, and a stalled
+    /// connection ends in a refusal instead of an endless wait. Variables given with
+    /// [`Git::env`] still win.
+    pub(crate) fn network(mut self) -> Self {
+        self.network = true;
         self
     }
 
@@ -383,11 +388,16 @@ impl<'a> Git<'a> {
     fn command(&self) -> Command {
         let mut cmd = Command::new("git");
         cmd.arg("-C").arg(self.dir).args(&self.args);
+        if self.network {
+            for (k, v) in network_env(self.dir) {
+                cmd.env(k, v);
+            }
+            for k in NETWORK_ENV_REMOVE {
+                cmd.env_remove(k);
+            }
+        }
         for (k, v) in self.env {
             cmd.env(k, v);
-        }
-        for k in self.env_remove {
-            cmd.env_remove(k);
         }
         cmd
     }
@@ -545,6 +555,74 @@ pub(crate) fn both_streams(stdout: &[u8], stderr: &[u8]) -> String {
         text.push_str(err);
     }
     text
+}
+
+// ── network runs ─────────────────────────────────────────────────────────────
+
+/// The ssh command of a network run when the user has none of their own: never
+/// ask (a passphrase or an unknown host key would be asked on the terminal Graft
+/// was started from — or nowhere), give up on a host that does not answer in 30 s,
+/// and on a connection silent for a minute.
+pub(crate) const NETWORK_SSH: &str = "ssh -o BatchMode=yes -o ConnectTimeout=30 \
+     -o ServerAliveInterval=15 -o ServerAliveCountMax=4";
+
+/// Askpass programs a network run does not inherit: `GIT_ASKPASS` / `SSH_ASKPASS` in
+/// the environment Graft was started with belong to that terminal or IDE (VS Code
+/// sets its own), and would ask there — where nobody is looking. A `core.askPass`
+/// the user configured is their choice and stays.
+pub(crate) const NETWORK_ENV_REMOVE: &[&str] = &["GIT_ASKPASS", "SSH_ASKPASS"];
+
+/// Environment of a run that may talk to a remote.
+///
+/// - `GIT_TERMINAL_PROMPT=0`: a credential git cannot get from a helper fails at
+///   once ("terminal prompts disabled") instead of waiting on a terminal.
+/// - `GIT_SSH_COMMAND` = [`NETWORK_SSH`] — only when the user has no ssh command of
+///   their own (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`): replacing theirs
+///   would drop whatever key or agent it names.
+/// - `GIT_HTTP_LOW_SPEED_LIMIT=1`, `GIT_HTTP_LOW_SPEED_TIME=60`: an http(s) transfer
+///   below one byte a second for a minute is abandoned — only when neither is set in
+///   the environment or the configuration. There is deliberately no wall-clock limit:
+///   a large fetch that keeps moving may take as long as it takes.
+///
+/// One `git config` read decides the conditional parts; if even that fails, nothing
+/// the user may have configured is overridden.
+pub(crate) fn network_env(dir: &Path) -> Vec<(&'static str, String)> {
+    let mut env = vec![("GIT_TERMINAL_PROMPT", "0".to_string())];
+    let configured: Option<Vec<String>> = git(
+        dir,
+        &[
+            "config",
+            "--name-only",
+            "--get-regexp",
+            r"^(core\.sshcommand|http\.lowspeedlimit|http\.lowspeedtime)$",
+        ],
+    )
+    .run()
+    .ok()
+    .filter(|o| matches!(o.code, Some(0) | Some(1)))
+    .map(|o| {
+        o.stdout_text()
+            .lines()
+            .map(|l| l.trim().to_ascii_lowercase())
+            .collect()
+    });
+    let Some(configured) = configured else {
+        return env;
+    };
+    let has = |key: &str| configured.iter().any(|k| k == key);
+    let set = |var: &str| std::env::var_os(var).is_some();
+    if !set("GIT_SSH_COMMAND") && !set("GIT_SSH") && !has("core.sshcommand") {
+        env.push(("GIT_SSH_COMMAND", NETWORK_SSH.to_string()));
+    }
+    if !set("GIT_HTTP_LOW_SPEED_LIMIT")
+        && !set("GIT_HTTP_LOW_SPEED_TIME")
+        && !has("http.lowspeedlimit")
+        && !has("http.lowspeedtime")
+    {
+        env.push(("GIT_HTTP_LOW_SPEED_LIMIT", "1".to_string()));
+        env.push(("GIT_HTTP_LOW_SPEED_TIME", "60".to_string()));
+    }
+    env
 }
 
 // ── credentials ──────────────────────────────────────────────────────────────
@@ -1087,5 +1165,141 @@ mod tests {
         assert!(out.success());
         let want = git(dir.path(), &["rev-parse", "HEAD:a.txt"]).run().unwrap();
         assert_eq!(out.stdout_text().trim(), want.stdout_text().trim());
+    }
+
+    // ── network runs ──
+
+    /// What a network run's git sees: no terminal prompt, no inherited askpass, the
+    /// stall limits — and nothing the user configured overridden.
+    #[test]
+    fn network_runs_get_the_no_prompt_environment() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let dump = |p: &Path| {
+            git(p, &["-c", "alias.envdump=!env", "envdump"])
+                .network()
+                .run()
+                .unwrap()
+                .stdout_text()
+        };
+        let env = dump(p);
+        let lines: Vec<&str> = env.lines().collect();
+        assert!(lines.contains(&"GIT_TERMINAL_PROMPT=0"), "{env}");
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.starts_with("GIT_ASKPASS=") || l.starts_with("SSH_ASKPASS=")),
+            "{env}"
+        );
+        if std::env::var_os("GIT_SSH_COMMAND").is_none()
+            && std::env::var_os("GIT_SSH").is_none()
+            && !git(p, &["config", "--get", "core.sshCommand"])
+                .run()
+                .unwrap()
+                .success()
+        {
+            assert!(
+                lines.contains(&format!("GIT_SSH_COMMAND={NETWORK_SSH}").as_str()),
+                "{env}"
+            );
+        }
+
+        // The user's own ssh command and stall limit are left alone.
+        let mine = scratch_repo();
+        let m = mine.path();
+        crate::engine::cli::tests::run_git(m, &["config", "core.sshCommand", "ssh -i /my/key"]);
+        crate::engine::cli::tests::run_git(m, &["config", "http.lowSpeedTime", "600"]);
+        let env = dump(m);
+        assert!(!env.contains("BatchMode"), "{env}");
+        assert!(!env.contains("GIT_HTTP_LOW_SPEED_TIME=60"), "{env}");
+        assert!(env.contains("GIT_TERMINAL_PROMPT=0"), "{env}");
+
+        // A plain run is untouched.
+        let plain = git(p, &["-c", "alias.envdump=!env", "envdump"])
+            .run()
+            .unwrap()
+            .stdout_text();
+        if std::env::var_os("GIT_TERMINAL_PROMPT").is_none() {
+            assert!(!plain.contains("GIT_TERMINAL_PROMPT"), "{plain}");
+        }
+    }
+
+    /// An http server that answers every request with "401, sign in".
+    fn refusing_http_server() -> String {
+        use std::io::Read;
+        use std::net::TcpListener;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(mut s) = s else { continue };
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 8192];
+                    let _ = s.read(&mut buf);
+                    let _ = s.write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"graft\"\r\n\
+                          Content-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                });
+            }
+        });
+        format!("http://127.0.0.1:{port}/r.git")
+    }
+
+    /// A remote that wants a password Graft does not have: every network action
+    /// fails at once with git's "terminal prompts disabled" — before, git asked on
+    /// the terminal Graft was started from and the action hung there, unseen.
+    #[test]
+    fn network_actions_refuse_instead_of_asking() {
+        use crate::engine::branches;
+        use crate::engine::cli::{tests::run_git, CliEngine};
+        let dir = scratch_repo();
+        let p = dir.path();
+        let url = refusing_http_server();
+        run_git(p, &["remote", "add", "origin", &url]);
+        // No helper of the machine's may answer: the list is reset for this repo.
+        run_git(p, &["config", "credential.helper", ""]);
+        run_git(p, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        run_git(p, &["update-ref", "refs/remotes/origin/side", "HEAD"]);
+        run_git(p, &["branch", "--set-upstream-to=origin/main"]);
+        run_git(p, &["branch", "side", "--track", "origin/side"]);
+
+        let eng = CliEngine::new(p);
+        let started = Instant::now();
+        let results: Vec<(&str, Result<()>)> = vec![
+            ("fetch", eng.fetch()),
+            ("pull", eng.pull()),
+            ("push", eng.push("normal")),
+            ("push upstream", eng.push("upstream")),
+            ("update side", branches::update_from_upstream(p, "side")),
+            (
+                "delete remote",
+                branches::delete(p, "origin/side", true, false),
+            ),
+            ("console fetch", {
+                let out = eng
+                    .exec_raw(&["fetch".to_string(), "origin".to_string()])
+                    .unwrap();
+                if out.exit_code == 0 {
+                    Ok(())
+                } else {
+                    Err(Error::Git {
+                        command: "fetch".into(),
+                        stderr: out.stderr,
+                        journal: None,
+                    })
+                }
+            }),
+        ];
+        for (what, r) in results {
+            match r {
+                Err(Error::Git { stderr, .. }) => assert!(
+                    stderr.contains("terminal prompts disabled"),
+                    "{what}: {stderr}"
+                ),
+                other => panic!("{what}: expected a git refusal, got {other:?}"),
+            }
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(60));
     }
 }

@@ -270,6 +270,13 @@ impl CliEngine {
         Ok(String::from_utf8_lossy(&self.git_bytes(args)?).to_string())
     }
 
+    /// [`Self::git`] for a command that talks to a remote — `exec::Git::network`:
+    /// no prompt, a stalled connection gives up.
+    fn git_net(&self, args: &[&str]) -> Result<String> {
+        let out = exec::git(&self.repo, args).network().run()?.checked()?;
+        Ok(String::from_utf8_lossy(&out).to_string())
+    }
+
     /// Run `git -C <repo> <args>` for the git console panel — an arbitrary
     /// command the user typed, at their own privilege level; this is not a
     /// sandbox, and no attempt is made to restrict what git is asked to do.
@@ -285,13 +292,11 @@ impl CliEngine {
     /// something that waits forever for input this process never supplies,
     /// hanging the whole application on the first such command.
     pub fn exec_raw(&self, args: &[String]) -> Result<RawOutput> {
+        // `network()`: any typed command may be a fetch or a push — no prompt, the
+        // ssh and http stall limits of every other remote call.
         let out = exec::git(&self.repo, args)
-            .env(&[
-                ("GIT_TERMINAL_PROMPT", "0"),
-                ("GIT_EDITOR", "false"),
-                ("GIT_SEQUENCE_EDITOR", "false"),
-            ])
-            .env_remove(&["GIT_ASKPASS", "SSH_ASKPASS"])
+            .network()
+            .env(&[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")])
             .run()?;
         Ok(RawOutput {
             stdout: String::from_utf8_lossy(&out.stdout).to_string(),
@@ -1185,16 +1190,16 @@ impl CliEngine {
         match mode {
             "upstream" => {
                 let br = self.current_branch()?;
-                self.git(&["push", "-u", "--end-of-options", "origin", &br])?;
+                self.git_net(&["push", "-u", "--end-of-options", "origin", &br])?;
             }
             "force" => {
-                self.git(&["push", "--force-with-lease"])?;
+                self.git_net(&["push", "--force-with-lease"])?;
             }
             "force-hard" => {
-                self.git(&["push", "--force"])?;
+                self.git_net(&["push", "--force"])?;
             }
             "normal" => {
-                self.git(&["push"])?;
+                self.git_net(&["push"])?;
             }
             other => {
                 return Err(Error::Rule(format!("unknown push mode: {other}")));
@@ -1204,12 +1209,12 @@ impl CliEngine {
     }
 
     pub fn fetch(&self) -> Result<()> {
-        self.git(&["fetch", "--prune"])?;
+        self.git_net(&["fetch", "--prune"])?;
         Ok(())
     }
 
     pub fn pull(&self) -> Result<()> {
-        self.git(&["pull"])?;
+        self.git_net(&["pull"])?;
         Ok(())
     }
 }
@@ -1510,6 +1515,11 @@ impl GitEngine for CliEngine {
 pub(crate) mod tests {
     use super::*;
     use std::process::Command;
+
+    /// [`run`] for the other modules' tests.
+    pub(crate) fn run_git(dir: &Path, args: &[&str]) {
+        run(dir, args)
+    }
 
     fn run(dir: &Path, args: &[&str]) {
         let out = Command::new("git")

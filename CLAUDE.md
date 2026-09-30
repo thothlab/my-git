@@ -27,8 +27,8 @@
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
 | `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `cloneRules`, разбор и печать команды консоли), 314 утверждений |
-| `cargo test` | Оба крейта разом: 347 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 347 тестов |
+| `cargo test` | Оба крейта разом: 349 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 349 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -145,7 +145,7 @@ Git вызывается только как внешний процесс. `gix
 Кто чем владеет:
 
 - `engine::exec` — **единственное место, где стартует процесс git**: `git(dir, args)` →
-  `.env()` / `.env_remove()` / `.input(bytes)` → `.run() -> Output` (сырые байты, код выхода,
+  `.env()` / `.network()` / `.input(bytes)` → `.run() -> Output` (сырые байты, код выхода,
   id записи журнала; ненулевой код здесь не ошибка). Что считать отказом, решает вызывающая
   обёртка: `Output::checked` (stderr — конвенция cli/commit/log), `checked_both` /
   `fail_both` (оба потока — branches/ops), трёхзначный код (`show-ref`,
@@ -231,9 +231,7 @@ Git вызывается только как внешний процесс. `gix
   `clone(parent, name, url, cancel, on_line) -> Option<PathBuf>` (`None` — отменён).
   Назначение `<канонизированный parent>/<name>` — отсутствует или пустой каталог (симлинк —
   отказ); после отказа или отмены возвращается как было: созданный — удаляется, бывший
-  пустым — опустошается. Окружение клона: `GIT_TERMINAL_PROMPT=0`, без `GIT_ASKPASS` /
-  `SSH_ASKPASS`, `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` — только если нет своего
-  (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`). Обоснование — докблок модуля.
+  пустым — опустошается. Клон — сетевой запуск (`exec::Git::network`, см. ниже).
 - `engine::ops` — `detect_state`, `detect_kind`, `revert`, `reset`, `cherry_pick`, `checkout_rev`,
   `tag_create`, `op_continue`, `op_abort`, `op_skip`, `stash_list_app`, `stash_restore`,
   `stash_list`, `stash_apply`, `stash_pop`, `stash_drop`, `stash_files`, `stash_push`,
@@ -347,9 +345,17 @@ Git вызывается только как внешний процесс. `gix
 
 - **git запускается только через `engine::exec`.** `Command::new("git")` вне `exec.rs`
   допустим лишь в тестовом коде. Своя обёртка в модуле — тонкий вызов `exec::git(...)`,
-  сохраняющий свою семантику ошибок; env (`GIT_EDITOR` и прочее) задаётся на месте вызова и
-  не унифицируется: `exec_raw` консоли и `remotes::clone` убирают ASKPASS и ставят
-  `GIT_TERMINAL_PROMPT=0`, а push/fetch/pull движка — нет.
+  сохраняющий свою семантику ошибок; env (`GIT_EDITOR` и прочее) задаётся на месте вызова.
+- **Всё, что ходит в сеть, запускается с `.network()`** (`exec::network_env`): push / fetch /
+  pull (`CliEngine::git_net`, им же `branches::update_from_upstream`), `push --delete`
+  удалённой ветки, `remotes::clone`, консоль (`exec_raw` — любая набранная команда может
+  быть fetch). Это `GIT_TERMINAL_PROMPT=0`, без унаследованных `GIT_ASKPASS` / `SSH_ASKPASS`,
+  `GIT_SSH_COMMAND = NETWORK_SSH` (`BatchMode=yes`, `ConnectTimeout=30`,
+  `ServerAliveInterval=15` × 4) и `GIT_HTTP_LOW_SPEED_LIMIT=1` / `_TIME=60` — два последних
+  только если у пользователя нет своего (env, `core.sshCommand`, `http.lowSpeed*`; решает
+  одно чтение `git config`). Общего потолка по времени нет сознательно: большой fetch, который
+  движется, идёт сколько идёт. Новая сетевая команда без `.network()` — это баг из «Что уже
+  кусало».
 - **Происхождение записи журнала объявляется, а не угадывается.** Команда Tauri, которая
   меняет репозиторий по воле пользователя, оборачивает вызов движка в
   `undoable(&state, "<имя команды>", hint, || …)` — тот зовёт `exec::as_user` с тем же
@@ -1040,6 +1046,12 @@ Git вызывается только как внешний процесс. `gix
   срабатывает, её делает `remotes::cleanup` (с повтором: помощник может дописывать ещё
   мгновение). Тест отмены — только через `file://` с `-u 'sleep …; git-upload-pack'`:
   локальный путь клонируется в обход upload-pack, и `-u` там ничего не замедляет.
+- push / fetch / pull шли без `GIT_TERMINAL_PROMPT=0` и с унаследованным ASKPASS: у
+  Graft, запущенного из терминала, git спрашивал логин https (или ssh — пароль ключа,
+  неизвестный хост) **в том терминале**, и действие висело без единого признака в окне.
+  Из Finder тот же запрос падал с невнятным «Device not configured». Теперь любой сетевой
+  вызов — `.network()`; тест — локальный http-сервер, отвечающий 401, и ожидание
+  «terminal prompts disabled» от каждого сетевого действия.
 - `git remote add` сам отказывает в имени, вложенном в существующее (`origin/sub` при
   `origin`), и принимает имя с ведущим `-` после `--` — второе режет `check_remote_name`.
 
