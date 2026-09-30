@@ -10,12 +10,12 @@ use crate::engine::GitEngine;
 use crate::error::{Error, Result};
 use crate::engine::exec::{self, mask_credentials};
 use crate::engine::{
-    bisect, blame as blame_engine, branches, commit as commit_engine, conflict as conflict_engine, discard, file_history as file_history_engine, log as log_engine, ops,
+    bisect, blame as blame_engine, branches, commit as commit_engine, conflict as conflict_engine, discard, file_history as file_history_engine, ignore, log as log_engine, ops,
     rebase, remotes,
     undo::{self, Hint},
 };
 use crate::model::{
-    Blame, BlameBefore, BranchInfo, CloneProgress, CoAuthor, RemoteInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, ConflictFile, DiscardEntry,
+    Blame, BlameBefore, BranchInfo, CloneProgress, CoAuthor, IgnoreChoice, IgnoreKind, RemoteInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, ConflictFile, DiscardEntry,
     DiscardKind, DiscardOutcome, Eol, FileDiff, FileHistoryCursor, FileHistoryPage, HunkPick,
     LinePick,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
@@ -271,6 +271,32 @@ pub async fn files_move(
     mutate(&state, |s| changelists::move_files(s, &paths, &to_list_id))
 }
 
+/// The rules "Ignore" offers for one untracked path, with the exact line each would
+/// write (`engine::ignore`). Read-only: computed from the path, nothing is read.
+#[tauri::command]
+pub async fn file_ignore_choices(path: String) -> Result<Vec<IgnoreChoice>> {
+    ignore::choices(&path)
+}
+
+/// Append the rule of `kind` for the untracked `path` to the root `.gitignore`
+/// (created when missing). Planned before the action so the undo step knows exactly
+/// what it appended; Undo takes it back out only over those very bytes.
+#[tauri::command]
+pub async fn file_ignore(
+    state: State<'_, AppState>,
+    path: String,
+    kind: IgnoreKind,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    let edit = ignore::plan(&repo, &path, kind)?;
+    let hint = Hint {
+        ignore: Some(edit.clone()),
+        ..Hint::default()
+    };
+    undoable(&state, "file_ignore", hint, || ignore::apply(&repo, &edit))?;
+    build_state(&state)
+}
+
 /// Roll files back to HEAD, backing their working-tree copies up first
 /// (`engine::discard`). A backup that cannot be taken stops the rollback.
 #[tauri::command]
@@ -474,7 +500,6 @@ pub async fn commit_list(
     }
     // Where each committed file sits now: an Undo puts it back there, not in Default.
     let hint = Hint {
-        args: Vec::new(),
         lists: paths
             .iter()
             .filter_map(|p| {
@@ -485,6 +510,7 @@ pub async fn commit_list(
                     .map(|c| (p.clone(), c.id.clone()))
             })
             .collect(),
+        ..Hint::default()
     };
     undoable(&state, "commit_list", hint, || CliEngine::new(&repo).commit_paths(&paths, &message, amend))?;
     build_state(&state)

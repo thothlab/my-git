@@ -257,6 +257,26 @@ pub struct LogCursor {
     pub open_lanes: Vec<String>,
 }
 
+/// Which rule "Ignore" writes for an untracked path (`engine::ignore`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IgnoreKind {
+    /// This one path, anchored at the root: `/<path>`.
+    File,
+    /// Every file with its extension, anywhere: `*.<ext>`.
+    Extension,
+    /// The folder it is in (or the folder entry itself): `/<folder>/`.
+    Folder,
+}
+
+/// One entry of the "Ignore" menu: the kind and the exact line it would write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IgnoreChoice {
+    pub kind: IgnoreKind,
+    pub pattern: String,
+}
+
 /// Someone who authored commits in this history, offered as a co-author
 /// (`log_co_authors`). One entry per address, compared without case.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

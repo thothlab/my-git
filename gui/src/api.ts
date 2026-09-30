@@ -133,6 +133,20 @@ export interface DiscardOutcome {
 export const fileRollback = (paths: string[]) =>
   invoke<DiscardOutcome>("file_rollback", { paths });
 
+/** Which rule "Ignore" writes for an untracked path (`engine::ignore`). */
+export type IgnoreKind = "file" | "extension" | "folder";
+/** One "Ignore" choice: the kind, and the exact line it would append. */
+export interface IgnoreChoice {
+  kind: IgnoreKind;
+  pattern: string;
+}
+/** The rules offered for one untracked path, most specific first. Read-only. */
+export const fileIgnoreChoices = (path: string) =>
+  invoke<IgnoreChoice[]>("file_ignore_choices", { path });
+/** Append the rule of `kind` for `path` to the root `.gitignore`. Undoable. */
+export const fileIgnore = (path: string, kind: IgnoreKind) =>
+  invoke<RepoState>("file_ignore", { path, kind });
+
 export const listRollback = (id: string) =>
   invoke<DiscardOutcome>("list_rollback", { id });
 

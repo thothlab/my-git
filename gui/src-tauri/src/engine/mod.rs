@@ -10,6 +10,7 @@ pub mod conflict;
 pub mod discard;
 pub mod exec;
 pub mod file_history;
+pub mod ignore;
 pub mod log;
 pub mod ops;
 pub mod patch;

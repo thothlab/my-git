@@ -27,8 +27,8 @@
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
 | `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; разбор и печать команды консоли), 345 утверждений |
-| `cargo test` | Оба крейта разом: 354 теста GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 354 теста |
+| `cargo test` | Оба крейта разом: 365 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 365 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -74,6 +74,8 @@ gui/src-tauri/src/  бэк GUI
   engine/conflict.rs конфликтные файлы: стороны из индекса (стадии 1/2/3), вид конфликта,
                     запись разрешения + `git add`, сторона целиком / удаление (`git rm`)
   engine/discard.rs резервная копия перед откатом (refs/graft/discard) и её восстановление
+  engine/ignore.rs  «Игнорировать» из меню: варианты правила по пути, дописывание в корневой
+                    `.gitignore`, обратная операция для Undo
   engine/patch.rs   патч по выбранным строкам диффа (чистый, без git) + единая нумерация строк хунков
   engine/rebase.rs  интерактивный rebase по утверждённому плану, reword, squash; файлы плана
                     в каталоге данных приложения
@@ -180,7 +182,9 @@ Git вызывается только как внешний процесс. `gix
   прибит флагами `--no-ext-diff --no-textconv --no-color --src-prefix=a/ --dst-prefix=b/`:
   внешний и textconv-дифф не применяются, `diff.noprefix` сдвинул бы путь под `-p1`. Плюс общие
   `pub(crate)`-функции: `parse_diff`, `parse_refs`, `whitespace_args`, `context_arg`,
-  `git_paths`, `user_email`, `fnv1a`, `literal`, `check_branch_name`, `check_tag_name`
+  `git_paths`, `user_email`, `fnv1a`, `literal`, `replace_file` (атомарная запись байтов:
+  уникальный tmp рядом + `rename`, права цели переносятся; ею пишут `write_text_file` и
+  `engine::ignore`), `check_branch_name`, `check_tag_name`
   (новое имя ветки или тега проверяется ими **до** мутации и отвергается `Error::Rule`:
   `check-ref-format --branch` / `refs/tags/<имя>`, ведущий `-`, голый `@`, раскрытие
   `@{-1}`) и метод `CliEngine::worktree_path` (резолв пути клиента с проверкой симлинков —
@@ -306,7 +310,18 @@ Git вызывается только как внешний процесс. `gix
   первого вызова быть не должно — нулевой файл git считает битым индексом). Восстановление трогает только
   рабочее дерево; изменённые после отката пути — `Error::Stale`, с `force` — сначала копия
   текущего (каждое восстановление само записывается как `kind: restore`).
-- `engine::undo` — `Undo` (`perform`, `state`, `step`), `Hint { args, lists }`, `DEPTH = 100`.
+- `engine::ignore` — `choices(path)`, `plan(repo, path, kind) -> IgnoreEdit`, `apply`,
+  `revert`, константа `IGNORE_FILE`. Шаблон считает **только бэкенд** из пути и вида
+  (`file` → `/<путь>`, `extension` → `*.<ext>`, `folder` → `/<папка>/`); клиент показывает
+  `choices` и присылает обратно лишь вид. Ведущий `/` — чтобы `a.log` в корне не прятал
+  `sub/a.log`: шаблон без слэша в середине git матчит на любой глубине. Компоненты пути
+  экранируются (`\ * ? [`, пробелы в конце, `#` / `!` в начале компонента). Запись — сырые
+  байты через `cli::replace_file`: перевод строки файла (CRLF, если в нём есть `\r\n`),
+  недостающий терминатор последней строки — вперёд. Уже имеющееся правило и
+  отслеживаемый путь — `Error::Rule`, не молчаливый no-op; `.gitignore`-симлинк — тоже
+  отказ (rename заменил бы ссылку файлом). Известное ограничение: вложенный `.gitignore`
+  с `!` главнее корневого, и правило тогда пути не спрячет.
+- `engine::undo` — `Undo` (`perform`, `state`, `step`), `Hint { args, lists, ignore }`, `DEPTH = 100`.
   **Каждая мутация команды Tauri идёт через `commands::undoable(&state, "<имя команды>",
   hint, || …)`, а не голый `exec::as_user`** — он внутри: действие, которого журнал не видел,
   для него «изменение вне Graft» и рвёт цепочку зря. `perform` снимает `Snapshot` до и после
@@ -319,7 +334,11 @@ Git вызывается только как внешний процесс. `gix
   checkout + ссылки: переключение, создание/удаление ветки (с upstream), тег, переключение со
   стешем; `Rename`; `StashPush` / `StashRestore` / `StashDrop` — только верхний стеш и
   восстановление только на чистое дерево; `Discard` — `discard::restore` копии отката и
-  копии самого restore, плюс записи индекса), «ничего» (отпечаток не изменился) или разрыв
+  копии самого restore, плюс записи индекса; `Ignore` — `file_ignore`: `IgnoreEdit` из
+  `Hint.ignore` (план снят **до** действия), Undo отрезает дописанное или удаляет созданный
+  файл, Redo дописывает снова — каждый только поверх ожидаемых байтов (своя сверка `fnv1a`
+  сверх отпечатка цепочки); шаг пишется, только если, кроме `.gitignore`, ничего не
+  сдвинулось, иначе код `worktree`), «ничего» (отпечаток не изменился) или разрыв
   цепочки с `UndoReasonCode` (push, pull, fetch с новыми тегами, rebase/squash/reword старого,
   консоль, незавершённая операция, упавшее действие, bisect — свой код `bisect` для
   `op_bisect_*` и для любого действия, до или после которого шёл bisect; проверяется раньше
@@ -533,7 +552,7 @@ Git вызывается только как внешний процесс. `gix
   `ConflictEntry[]` (`{ path, kind }`), а не строки: вид конфликта (`UU`, `DU`, …) едет с
   тем же `ls-files -u`, и второй команды за ним нет. Конфликт без операции (`stash pop`)
   виден только в Changes — туда же пункт «Разрешить конфликт…».
-- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`, `op_bisect_start`, `op_bisect_mark`, `op_bisect_reset`), `ui_state_*`, `journal_*`, `undo_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_history`, `file_blame`, `file_blame_before`), `remote_*`, `repo_*` (`repo_open`, `repo_state`, `repo_local_changes`, `repo_clone`, `repo_clone_cancel`). Имя `commit_list`
+- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`, `op_bisect_start`, `op_bisect_mark`, `op_bisect_reset`), `ui_state_*`, `journal_*`, `undo_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_ignore_choices`, `file_ignore`, `file_history`, `file_blame`, `file_blame_before`), `remote_*`, `repo_*` (`repo_open`, `repo_state`, `repo_local_changes`, `repo_clone`, `repo_clone_cancel`). Имя `commit_list`
   занято операцией «закоммитить changelist» и переиспользовано быть не может.
 - Полный список зарегистрированных команд — `invoke_handler` в `gui/src-tauri/src/lib.rs`;
   он же роспись того, что вообще доступно фронту.

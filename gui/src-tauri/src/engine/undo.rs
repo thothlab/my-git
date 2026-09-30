@@ -47,6 +47,10 @@
 //! - [`Inverse::Discard`] — the rollback copies of `engine::discard`: Undo is
 //!   `discard::restore` of the copy the discard took, Redo the restore of the copy
 //!   that restore took. The index entries the rollback reset come back too.
+//! - [`Inverse::Ignore`] — a rule "Ignore" appended to the root `.gitignore`
+//!   ([`ignore::IgnoreEdit`]): Undo cuts it off again, or deletes the file the action
+//!   created; Redo appends it again. Each only over the exact bytes it expects (an
+//!   FNV-1a check of its own, on top of the chain's digest).
 //!
 //! ## Storage
 //!
@@ -64,6 +68,7 @@ use std::sync::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
 use super::cli::{fnv1a, CliEngine, TMP_COUNTER};
+use super::ignore::{self, IgnoreEdit};
 use super::{discard, exec, ops};
 use crate::error::{Error, Result};
 use crate::model::{OperationKind, UndoDirection, UndoReason, UndoReasonCode, UndoSide, UndoState};
@@ -429,6 +434,9 @@ enum Inverse {
         undo_id: String,
         redo_id: Option<String>,
     },
+    Ignore {
+        edit: IgnoreEdit,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -488,6 +496,8 @@ pub struct Hint {
     pub args: Vec<String>,
     /// For a changelist commit: (path, list id) of every committed path.
     pub lists: Vec<(String, String)>,
+    /// For `file_ignore`: the rule the action writes, planned before it runs.
+    pub ignore: Option<IgnoreEdit>,
 }
 
 impl Hint {
@@ -498,7 +508,7 @@ impl Hint {
     pub fn args<S: Into<String>>(args: impl IntoIterator<Item = S>) -> Self {
         Self {
             args: args.into_iter().map(Into::into).collect(),
-            lists: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -841,6 +851,40 @@ impl Ctx<'_> {
     }
 }
 
+impl Ctx<'_> {
+    /// A rule appended to `.gitignore`: nothing may have moved but that file (and
+    /// the paths the rule now hides, which leave the status list byte for byte as
+    /// they were). Anything else happened alongside, and Undo would reverse it blind.
+    fn ignore(&self) -> Verdict {
+        let (b, a) = (self.b, self.a);
+        let Some(edit) = self.hint.ignore.clone() else {
+            return self.brk(UndoReasonCode::Unsupported);
+        };
+        if !self.same_position()
+            || !ref_delta(b, a).is_empty()
+            || !index_delta(b, a).is_empty()
+            || b.stash != a.stash
+            || b.discard_tip != a.discard_tip
+        {
+            return self.brk(UndoReasonCode::Unsupported);
+        }
+        let others = b
+            .paths
+            .iter()
+            .chain(&a.paths)
+            .filter(|p| p.as_str() != ignore::IGNORE_FILE)
+            .all(|p| {
+                let was = b.content(p);
+                was.is_some() && was == a.content(p)
+            });
+        if !others {
+            return self.brk(UndoReasonCode::Worktree);
+        }
+        let detail = edit.pattern.clone();
+        self.record(Inverse::Ignore { edit }, detail)
+    }
+}
+
 /// What the action `action` did, going from `b` to `a`.
 fn classify(
     repo: &Path,
@@ -938,6 +982,7 @@ fn classify(
         "stash_apply" | "stash_restore" => cx.stash_restore(false),
         "stash_drop" => cx.stash_drop(),
         "file_rollback" | "list_rollback" | "lines_revert" | "discard_restore" => cx.discard(),
+        "file_ignore" => cx.ignore(),
         "push" => cx.brk(UndoReasonCode::Published),
         "fetch" => cx.brk(UndoReasonCode::Fetched),
         "pull" | "branch_update" => cx.brk(UndoReasonCode::Integrated),
@@ -1159,6 +1204,13 @@ fn run_inverse(repo: &Path, step: &mut Step, dir: UndoDirection) -> Result<()> {
                 *undo_id = restored(&id)?;
             }
             set_index(repo, &step.index, back)?;
+        }
+        Inverse::Ignore { edit } => {
+            if back {
+                ignore::revert(repo, edit)?;
+            } else {
+                ignore::apply(repo, edit)?;
+            }
         }
     }
     Ok(())
@@ -1661,8 +1713,8 @@ mod tests {
         let head_before = g(p, &["rev-parse", "HEAD"]);
 
         let hint = Hint {
-            args: Vec::new(),
             lists: vec![("a.txt".into(), "feature".into())],
+            ..Hint::default()
         };
         let paths = vec!["a.txt".to_string(), "b.txt".to_string()];
         r.round_trip("commit_list", hint.clone(), || {
@@ -2247,5 +2299,61 @@ mod tests {
             });
             assert_eq!(r.reason(), UndoReasonCode::Remotes, "tracked: {tracked}");
         }
+    }
+
+    /// "Ignore" writes one line into `.gitignore`: Undo takes it out (or deletes the
+    /// file it created), Redo puts it back — the hidden file reappears and vanishes
+    /// with it. An edit of `.gitignore` afterwards ends the chain instead.
+    #[test]
+    fn an_ignore_rule_comes_and_goes_with_undo() {
+        use crate::model::IgnoreKind;
+        for existing in [false, true] {
+            let r = Rig::new();
+            let p = r.p();
+            if existing {
+                std::fs::write(p.join(".gitignore"), "*.tmp\r\n").unwrap();
+                g(p, &["add", ".gitignore"]);
+                g(p, &["commit", "-q", "-m", "rules"]);
+            }
+            std::fs::write(p.join("x.log"), "noise\n").unwrap();
+            let edit = ignore::plan(p, "x.log", IgnoreKind::File).unwrap();
+            let hint = Hint {
+                ignore: Some(edit.clone()),
+                ..Hint::default()
+            };
+            r.round_trip("file_ignore", hint, || ignore::apply(p, &edit));
+            assert_eq!(r.state().undo.detail.as_deref(), Some("/x.log"));
+
+            r.undo();
+            let listed = g(p, &["status", "--porcelain", "--untracked-files=all"]);
+            assert!(listed.contains("x.log"), "visible again: {listed}");
+            assert_eq!(p.join(".gitignore").exists(), existing, "a created file goes, an existing one stays");
+            if existing {
+                assert_eq!(std::fs::read(p.join(".gitignore")).unwrap(), b"*.tmp\r\n");
+            }
+            r.redo();
+            std::fs::write(p.join(".gitignore"), "edited by hand\n").unwrap();
+            assert_eq!(r.reason(), UndoReasonCode::External, "existing: {existing}");
+        }
+    }
+
+    /// Something else changing the working tree in the same action is not an ignore
+    /// the chain can take back.
+    #[test]
+    fn an_ignore_with_other_changes_ends_the_chain() {
+        use crate::model::IgnoreKind;
+        let r = Rig::new();
+        let p = r.p();
+        std::fs::write(p.join("x.log"), "noise\n").unwrap();
+        let edit = ignore::plan(p, "x.log", IgnoreKind::File).unwrap();
+        let hint = Hint {
+            ignore: Some(edit.clone()),
+            ..Hint::default()
+        };
+        r.act("file_ignore", hint, || {
+            ignore::apply(p, &edit)?;
+            std::fs::write(p.join("a.txt"), "changed alongside\n").map_err(|e| Error::Io(e.to_string()))
+        });
+        assert_eq!(r.reason(), UndoReasonCode::Worktree);
     }
 }

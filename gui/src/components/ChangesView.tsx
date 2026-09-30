@@ -1,9 +1,11 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import {
   changelistCreate,
   changelistDelete,
   changelistRename,
   changelistSetActive,
+  fileIgnore,
+  fileIgnoreChoices,
   fileRollback,
   filesMove,
   listRollback,
@@ -394,6 +396,18 @@ function ContextMenu() {
   const moveTargets = () =>
     (state()?.changelists ?? []).filter((c) => !c.isUnversioned);
 
+  // "Ignore" for an untracked path: the rules come from the backend, which also
+  // writes them — the menu shows the very line that goes into `.gitignore`.
+  const [ignoreChoices] = createResource(
+    () => {
+      const file = m()?.file;
+      return file && changeOf(file)?.status === "untracked" ? file : null;
+    },
+    (path) => fileIgnoreChoices(path),
+  );
+  const shownChoices = (path: string) =>
+    ignoreChoices.state === "ready" && m()?.file === path ? ignoreChoices() ?? [] : [];
+
   const rollbackFile = async (path: string) => {
     if (await confirmAction(d().revertFileConfirm(path)))
       await runDiscard(fileRollback([path]));
@@ -470,6 +484,22 @@ function ContextMenu() {
                     }}
                   />
                 </Show>
+                <Show when={shownChoices(path()).length > 0}>
+                  <Divider />
+                  <div class="px-3 py-1 text-[0.625rem] uppercase text-fg-muted">{d().ignoreHeader()}</div>
+                  <For each={shownChoices(path())}>
+                    {(c) => (
+                      <MenuItem
+                        label={d().ignoreKind(c.kind)}
+                        detail={c.pattern}
+                        onClick={() => {
+                          setMenu(null);
+                          void run(fileIgnore(path(), c.kind));
+                        }}
+                      />
+                    )}
+                  </For>
+                </Show>
                 <Divider />
                 <MenuItem
                   label={d().revertToHead()}
@@ -536,14 +566,19 @@ function ContextMenu() {
  */
 
 
-function MenuItem(props: { label: string; danger?: boolean; onClick: () => void }) {
+function MenuItem(props: { label: string; detail?: string; danger?: boolean; onClick: () => void }) {
   return (
     <button
-      class="block w-full px-3 py-1 text-left hover:bg-bg-muted"
+      class="flex w-full items-baseline gap-3 px-3 py-1 text-left hover:bg-bg-muted"
       classList={{ "text-danger": props.danger }}
       onClick={props.onClick}
     >
       {props.label}
+      <Show when={props.detail}>
+        <span class="ml-auto max-w-[16rem] truncate font-mono text-fg-muted" title={props.detail}>
+          {props.detail}
+        </span>
+      </Show>
     </button>
   );
 }

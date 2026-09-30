@@ -653,21 +653,7 @@ impl CliEngine {
                 return Err(Error::Io(format!("{rel}: {e}")));
             }
         }
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| Error::Io(format!("{rel} has no file name")))?;
-        let n = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = dir.join(format!(".{name}.graft.tmp.{}.{n}", std::process::id()));
-        if let Err(e) = std::fs::write(&tmp, &bytes) {
-            undo(dir, &created);
-            return Err(Error::Io(format!("{rel}: {e}")));
-        }
-        if let Ok(meta) = std::fs::metadata(&path) {
-            let _ = std::fs::set_permissions(&tmp, meta.permissions());
-        }
-        if let Err(e) = std::fs::rename(&tmp, &path) {
-            let _ = std::fs::remove_file(&tmp);
+        if let Err(e) = replace_file(&path, &bytes) {
             undo(dir, &created);
             return Err(Error::Io(format!("{rel}: {e}")));
         }
@@ -1338,6 +1324,30 @@ pub(crate) fn parse_refs(deco: &str, remotes: &[String]) -> Vec<RefLabel> {
         });
     }
     out
+}
+
+/// Write `bytes` to `path` as a whole: a uniquely named temp file next to it, then a
+/// rename, so an interrupted write never leaves the file half-written. The target's
+/// permissions are carried over — a rename would otherwise hand a 755 script the temp
+/// file's mode and turn "one line changed" into a mode change in git. The directory
+/// must exist. Used by `write_text_file` and by `engine::ignore` for `.gitignore`.
+pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().ok_or_else(|| std::io::Error::other("no parent directory"))?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| std::io::Error::other("no file name"))?;
+    let n = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".{name}.graft.tmp.{}.{n}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// `user.email` as the repository resolves it (local, global or system), or

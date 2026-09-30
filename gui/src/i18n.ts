@@ -168,6 +168,9 @@ const en = {
   deleteListConfirm: (name: string) => `Delete list "${name}"? Files will return to Default.`,
   moveTo: () => "Move to",
   revertToHead: () => "Revert to HEAD",
+  ignoreHeader: () => "Ignore",
+  ignoreKind: (kind: string): string =>
+    kind === "file" ? "This file" : kind === "extension" ? "All files of this type" : "The whole folder",
   makeActive: () => "Make active",
   renameItem: () => "Rename…",
   deleteList: () => "Delete list",
@@ -249,6 +252,8 @@ const en = {
         return `reverted lines in ${x}`;
       case "discard_restore":
         return `restore of ${x}`;
+      case "file_ignore":
+        return `ignore rule ${x}`;
       default:
         return `${action}${q}`;
     }
@@ -1145,6 +1150,9 @@ const ru: Dict = {
     `Удалить список "${name}"? Файлы вернутся в Default.`,
   moveTo: () => "Переместить в",
   revertToHead: () => "Откатить к HEAD",
+  ignoreHeader: () => "Игнорировать",
+  ignoreKind: (kind) =>
+    kind === "file" ? "Этот файл" : kind === "extension" ? "Все файлы этого типа" : "Всю папку",
   makeActive: () => "Сделать активным",
   renameItem: () => "Переименовать…",
   deleteList: () => "Удалить список",
@@ -1221,6 +1229,8 @@ const ru: Dict = {
         return `откат строк в ${x}`;
       case "discard_restore":
         return `восстановление ${x}`;
+      case "file_ignore":
+        return `правило игнора ${x}`;
       default:
         return `${action}${q}`;
     }

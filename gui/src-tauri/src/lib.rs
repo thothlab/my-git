@@ -88,6 +88,8 @@ pub fn run() {
             commands::changelist_set_active,
             commands::files_move,
             commands::file_rollback,
+            commands::file_ignore_choices,
+            commands::file_ignore,
             commands::list_rollback,
             commands::discard_list,
             commands::discard_check,
