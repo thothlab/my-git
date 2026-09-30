@@ -19,17 +19,20 @@ import {
   linesRevert,
   linesStage,
   linesUnstage,
+  lfsPull,
   repoState,
   type DiffBase,
   type DiffLine,
   type FileDiff,
   type Hunk,
   type HunkPick,
+  type LfsDiff,
+  type LfsSide,
   type RepoState,
   type TextFile,
   type WhitespaceMode,
 } from "../api";
-import { confirmAction, run, scaledPx, selectedPath, state } from "../store";
+import { busy, confirmAction, run, scaledPx, selectedPath, state } from "../store";
 import { d } from "../i18n";
 import { beginDrag } from "./Resizer";
 import { runDiscard } from "./DiscardPanel";
@@ -89,6 +92,7 @@ import {
   type LineSelection,
 } from "./diff/lineSelection";
 import { DISABLED_CLASS } from "./IconButton";
+import { lfsChange, scaleBytes, shortOid } from "./diff/lfsRules";
 
 export type { DiffSource, HighlightMode } from "./diff/model";
 
@@ -387,7 +391,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
   let drawnLines = 0;
   const view = createMemo(() => {
     const f = shown();
-    return f && !f.binary ? buildView(f) : null;
+    return f && !f.binary && !f.lfs ? buildView(f) : null;
   });
 
   // Per-file UI state: current difference, revealed folds, "show it whole".
@@ -725,6 +729,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
     editAvailability({
       split: split(),
       readOnly: labels()?.right.readOnly ?? true,
+      lfs: !!shown()?.lfs,
       loading: textFile.loading,
       blocked: textFile()?.blocked ?? null,
     });
@@ -735,9 +740,11 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
       ? d().editOffUnified()
       : r === "read-only"
         ? d().editOffReadOnly()
-        : r === "loading"
-          ? d().editOffLoading()
-          : blockText(r);
+        : r === "lfs"
+          ? d().editOffLfs()
+          : r === "loading"
+            ? d().editOffLoading()
+            : blockText(r);
   /** A disabled control here always says why — that is a rule of the project,
    *  not decoration. */
   const editTip = () => {
@@ -782,7 +789,7 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
   /** Lines can be chosen here at all. Not while the editor is open: the rows
    *  under it describe the file as it was when editing began. */
   const canChoose = () =>
-    lineBase() !== null && !editing() && rowsDrawn() && !!shown() && !shown()!.binary && shown()!.digest !== "";
+    lineBase() !== null && !editing() && rowsDrawn() && !!shown() && !shown()!.binary && !shown()!.lfs && shown()!.digest !== "";
   /** Why the actions are refused, when they are; `null` when they are not. */
   const actionOff = (): string | null =>
     editing() || editStale() ? d().hunkEditTip() : ws() !== "none" ? d().hunkWhitespaceTip() : null;
@@ -1278,13 +1285,23 @@ export default function DiffView(props: { source?: DiffSource | null; api?: (a: 
               }
             >
               <Show
-                when={shown() && !shown()!.binary}
+                when={shown() && !shown()!.binary && !shown()!.lfs}
                 fallback={
-                  <div class="p-3 text-fg-muted">
-                    {shown()?.binary
-                      ? d().binarySizes(sizeText(shown()!.oldSize), sizeText(shown()!.newSize))
-                      : d().noChangesForBase()}
-                  </div>
+                  shown()?.lfs ? (
+                    <LfsCard
+                      lfs={shown()!.lfs!}
+                      onDownload={() => {
+                        const p = shown()?.path;
+                        if (p) void run(lfsPull(p), d().lfsDownloading());
+                      }}
+                    />
+                  ) : (
+                    <div class="p-3 text-fg-muted">
+                      {shown()?.binary
+                        ? d().binarySizes(sizeText(shown()!.oldSize), sizeText(shown()!.newSize))
+                        : d().noChangesForBase()}
+                    </div>
+                  )
                 }
               >
                 <Show
@@ -1473,6 +1490,82 @@ function inAnyGap(ranges: GapRange[], row: Row): boolean {
     (r) =>
       (o != null && o >= r.oldFrom && o <= r.oldTo) ||
       (n != null && n >= r.newFrom && n <= r.newTo),
+  );
+}
+
+/** A size in the reader's units ("12 MB"), from `lfsRules.scaleBytes`. */
+function lfsSize(n: number): string {
+  const s = scaleBytes(n);
+  return s ? d().sizeScaled(s.value, s.unit) : "";
+}
+
+/**
+ * The Git LFS card, drawn in place of a pointer's three lines of hashes: what
+ * the change did to the stored file, each side's object and whether its content
+ * is local, and — only when it fetches exactly this object — "Download".
+ */
+function LfsCard(props: { lfs: LfsDiff; onDownload: () => void }): JSX.Element {
+  const headline = () => {
+    const l = props.lfs;
+    switch (lfsChange(l)) {
+      case "added":
+        return d().lfsAdded(lfsSize(l.new!.size));
+      case "removed":
+        return d().lfsRemoved(lfsSize(l.old!.size));
+      case "unchanged":
+        return d().lfsUnchanged(lfsSize(l.new!.size));
+      default:
+        return d().lfsReplaced(lfsSize(l.old!.size), lfsSize(l.new!.size));
+    }
+  };
+  const Side = (p: { label: string; side: LfsSide }) => (
+    <div class="flex flex-wrap items-baseline gap-x-2">
+      <span class="text-fg-subtle">{p.label}</span>
+      <span class="text-fg" title={p.side.oid}>
+        {d().lfsOid(shortOid(p.side.oid))}
+      </span>
+      <span class={p.side.downloaded ? "text-success" : "text-fg-muted"}>
+        {p.side.downloaded ? d().lfsDownloaded() : d().lfsNotDownloaded()}
+      </span>
+    </div>
+  );
+  const note = () => {
+    switch (props.lfs.download) {
+      case "no-lfs":
+        return d().lfsNoProgram();
+      case "not-checked-out":
+        return d().lfsNotCheckedOut();
+      case "unsafe-path":
+        return d().lfsUnsafePath();
+      default:
+        return "";
+    }
+  };
+  return (
+    <div class="flex flex-col items-start gap-2 p-3 font-sans">
+      <div class="text-fg">
+        <span class="font-semibold">{d().lfsTitle()}</span> {headline()}
+      </div>
+      <Show when={props.lfs.old && lfsChange(props.lfs) !== "unchanged"}>
+        <Side label={d().lfsWas()} side={props.lfs.old!} />
+      </Show>
+      <Show when={props.lfs.new}>
+        <Side label={lfsChange(props.lfs) === "unchanged" ? "" : d().lfsNow()} side={props.lfs.new!} />
+      </Show>
+      <Show when={props.lfs.download === "available"}>
+        <button
+          class="rounded border border-border px-2 py-0.5 text-fg hover:bg-bg-muted disabled:opacity-50"
+          disabled={busy()}
+          title={d().lfsDownloadTip()}
+          onClick={() => props.onDownload()}
+        >
+          {d().lfsDownload()}
+        </button>
+      </Show>
+      <Show when={note()}>
+        <span class="text-fg-muted">{note()}</span>
+      </Show>
+    </div>
   );
 }
 

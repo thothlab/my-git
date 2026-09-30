@@ -12,6 +12,8 @@
  *     that had already drifted apart;
  *   - `src/components/diff/lineSelection.ts` - which diff lines are chosen for
  *     stage / unstage / revert, and that a choice belongs to one diff;
+ *   - `src/components/diff/lfsRules.ts` - the Git LFS card: what a pointer
+ *     change did to the stored file and sizes as a person reads them;
  *   - `src/components/blame/blameRules.ts` - runs of one commit in the blame
  *     gutter, age shades, whether a line can be blamed further back, the width
  *     of the text column and where "blame before" lands;
@@ -94,8 +96,12 @@ await build({
 // Its own call too, for the same reason: `diff/lineSelection.ts` next to
 // `editRules.ts` would share its base with nothing else here, and a combined call
 // with any other directory would nest the output.
+// `lfsRules.ts` rides along: same directory, so the common base stays flat.
 await build({
-  entryPoints: [join(here, "..", "src", "components", "diff", "lineSelection.ts")],
+  entryPoints: [
+    join(here, "..", "src", "components", "diff", "lineSelection.ts"),
+    join(here, "..", "src", "components", "diff", "lfsRules.ts"),
+  ],
   outdir: out,
   format: "esm",
   logLevel: "warning",
@@ -148,6 +154,7 @@ const {
 } = await load("editRules.js");
 const { splitShellArgs, formatArgv } = await load("gitConsoleCommand.js");
 const sel = await load("lineSelection.js");
+const lfs = await load("lfsRules.js");
 const blame = await load("blameRules.js");
 const cr = await load("conflictRules.js");
 const rb = await load("rebaseRules.js");
@@ -374,6 +381,27 @@ eq(
   false,
   "a binary file is compared by its sizes",
 );
+{
+  const side = (oid, downloaded = false) => ({ oid, size: 10, downloaded });
+  const card = (over = {}) => ({ old: side("a"), new: side("b"), download: "available", ...over });
+  eq(samePayload(payload({ lfs: card() }), payload({ lfs: card() })), true, "the same LFS card read twice is the same");
+  eq(
+    samePayload(payload({ lfs: card() }), payload({ lfs: card({ new: side("b", true), download: "not-needed" }) })),
+    false,
+    "a download changes only the card, never the pointer diff - it must still be redrawn",
+  );
+  eq(
+    samePayload(payload({ lfs: card() }), payload({ lfs: card({ download: "no-lfs" }) })),
+    false,
+    "...and so does git-lfs appearing or going away",
+  );
+  eq(samePayload(payload({ lfs: card() }), payload()), false, "a card and no card differ");
+  eq(
+    samePayload(payload({ lfs: card({ old: null }) }), payload({ lfs: card() })),
+    false,
+    "an added pointer is not a replaced one",
+  );
+}
 eq(
   samePayload(payload(), payload({ mergeFirstParent: true })),
   false,
@@ -1121,6 +1149,39 @@ for (const argv of [
     "no date, the epoch or no clock: no step, no colour");
   eq(ag.AGE_STEPS.map((s) => s.key), ["day", "week", "month", "year", "older"], "five steps, freshest first");
   eq([ag.ageColor(0), ag.ageColor(4)], ["rgb(var(--age-0))", "rgb(var(--age-4))"], "a step is a theme variable, never a literal");
+}
+
+// -- Git LFS card ---------------------------------------------------------------
+{
+  eq(
+    [0, 1023, 1024, 1536, 10 * 1024 + 500, 1024 * 1024 - 1, 5 * 1024 ** 3, 3 * 1024 ** 5].map(lfs.scaleBytes),
+    [
+      { value: 0, unit: "B" },
+      { value: 1023, unit: "B" },
+      { value: 1, unit: "KB" },
+      { value: 1.5, unit: "KB" },
+      { value: 10, unit: "KB" },
+      { value: 1, unit: "MB" },
+      { value: 5, unit: "GB" },
+      { value: 3072, unit: "TB" },
+    ],
+    "sizes in powers of 1024, one decimal below ten, rounding carried into the next unit",
+  );
+  eq([lfs.scaleBytes(-1), lfs.scaleBytes(NaN)], [null, null], "not a size: nothing to show");
+  const s = (oid) => ({ oid, size: 1 });
+  eq(
+    [
+      lfs.lfsChange({ old: null, new: s("b") }),
+      lfs.lfsChange({ old: s("a"), new: null }),
+      lfs.lfsChange({ old: s("a"), new: s("b") }),
+      lfs.lfsChange({ old: s("a"), new: s("a") }),
+    ],
+    ["added", "removed", "replaced", "unchanged"],
+    "what the change did to the stored file",
+  );
+  eq(lfs.shortOid("0123456789abcdef"), "0123456789ab", "twelve digits of the oid");
+  eq(cond({ lfs: true }), "lfs", "an LFS pointer card is not edited");
+  eq(cond({ lfs: true, readOnly: true }), "read-only", "...but a read-only side says so first");
 }
 
 await rm(out, { recursive: true, force: true });

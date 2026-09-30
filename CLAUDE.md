@@ -26,9 +26,9 @@
 | `cd gui && npm run tauri dev` | Запустить Graft локально (нужен дисплей) |
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
-| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `ageColor`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; разбор и печать команды консоли), 361 утверждение |
-| `cargo test` | Оба крейта разом: 365 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 365 тестов |
+| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `ageColor`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; `lfsRules`; разбор и печать команды консоли), 372 утверждения |
+| `cargo test` | Оба крейта разом: 379 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 379 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -76,6 +76,8 @@ gui/src-tauri/src/  бэк GUI
   engine/discard.rs резервная копия перед откатом (refs/graft/discard) и её восстановление
   engine/ignore.rs  «Игнорировать» из меню: варианты правила по пути, дописывание в корневой
                     `.gitignore`, обратная операция для Undo
+  engine/lfs.rs     указатели Git LFS в диффе (строгий разбор по спеке), локальное хранилище
+                    объектов, поиск программы git-lfs, `git lfs pull --include` одного файла
   engine/patch.rs   патч по выбранным строкам диффа (чистый, без git) + единая нумерация строк хунков
   engine/rebase.rs  интерактивный rebase по утверждённому плану, reword, squash; файлы плана
                     в каталоге данных приложения
@@ -120,7 +122,8 @@ gui/src/            фронт
                     editRules.ts — чистые правила правки (доступность, редьюсер черновика,
                     замеры текста), без единого импорта; editState.ts — черновик, отложенная
                     запись, отпечаток, диалог при внешнем изменении; lineSelection.ts —
-                    чистые правила выбора строк (щелчок, диапазон, шаг, привязка к digest)
+                    чистые правила выбора строк (щелчок, диапазон, шаг, привязка к digest);
+                    lfsRules.ts — чистые правила карточки LFS (что стало с файлом, размеры)
 gui/scripts/        check-log-filters.mjs
 ```
 
@@ -225,6 +228,21 @@ Git вызывается только как внешний процесс. `gix
   `unreachable_from_head`; общий `pub(crate) parse_name_status` (разбор `--name-status -z`,
   им же `commit_paths` читает, что подготовлено у списка — своей копии не писать). Всё
   сравнивается с первым родителем; корневой коммит читается через `diff-tree --root`.
+- `engine::lfs` — `parse_pointer`, `pointer_sides`, `include_pattern`, `pull`,
+  `pub(crate) attach(repo, &mut FileDiff, raw)`, `object_dir`, `has_object`,
+  `find_program`, `installed`. **`attach` зовёт каждый производитель `FileDiff`**
+  (`CliEngine::diff_file`, обе ветки `commit::file_diff`, `commit::compare_diff`) — своих
+  копий распознавания не писать. Указатель узнаётся только когда патч доказывает его
+  целиком: один хунк, сторона с 1-й строки или отсутствует, число строк сходится с
+  заголовком, `\ No newline` учтён. Разбор строгий по спеке: < 1024 байт, `key value\n`
+  у каждой строки, `version` первым, ключи по возрастанию, из них только `ext-N-*`, `oid`,
+  `size` (то, что принимает сам git-lfs), `size` каноничный и положительный — пустой файл
+  карточкой не считается. «Скачан» — файл объекта нужного размера в
+  `<common dir>/lfs/objects/…` или под `lfs.storage`. Кнопка «Загрузить» (`download:
+  "available"`) — только когда `git lfs pull --include=<путь>` принесёт ровно этот объект:
+  git-lfs найден (exec-path, затем PATH — поиском файла, а не запуском), путь выразим
+  шаблоном, у пути `filter=lfs`, и в индексе (`:0:<путь>`) указатель на тот же oid. Коммит
+  из истории показывает размеры и наличие, но кнопки не получает.
 - `engine::branches` — `tree`, `rename`, `delete`, `merge`, `rebase_onto`, `unmerged_count`,
   `update_from_upstream`, константа `DETACHED_REF = "HEAD"`.
 - `engine::remotes` — `check_url` (чистое правило адреса: https / http / ssh / git / file,
@@ -554,7 +572,7 @@ Git вызывается только как внешний процесс. `gix
   `ConflictEntry[]` (`{ path, kind }`), а не строки: вид конфликта (`UU`, `DU`, …) едет с
   тем же `ls-files -u`, и второй команды за ним нет. Конфликт без операции (`stash pop`)
   виден только в Changes — туда же пункт «Разрешить конфликт…».
-- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`, `op_bisect_start`, `op_bisect_mark`, `op_bisect_reset`), `ui_state_*`, `journal_*`, `undo_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_ignore_choices`, `file_ignore`, `file_history`, `file_blame`, `file_blame_before`), `remote_*`, `repo_*` (`repo_open`, `repo_state`, `repo_local_changes`, `repo_clone`, `repo_clone_cancel`). Имя `commit_list`
+- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`, `op_bisect_start`, `op_bisect_mark`, `op_bisect_reset`), `ui_state_*`, `journal_*`, `undo_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_ignore_choices`, `file_ignore`, `file_history`, `file_blame`, `file_blame_before`), `lfs_pull`, `remote_*`, `repo_*` (`repo_open`, `repo_state`, `repo_local_changes`, `repo_clone`, `repo_clone_cancel`). Имя `commit_list`
   занято операцией «закоммитить changelist» и переиспользовано быть не может.
 - Полный список зарегистрированных команд — `invoke_handler` в `gui/src-tauri/src/lib.rs`;
   он же роспись того, что вообще доступно фронту.
@@ -1122,6 +1140,19 @@ Git вызывается только как внешний процесс. `gix
   (`user:secret@host:path`) уходил в журнал дословно: argv, вывод `remote -v` в консоли,
   чтение конфига за списком remotes, сообщения git об ошибке в баннере. Список remotes
   маскировал его своей копией правила — вторая копия и прятала дыру в первой.
+- Хранилище LFS ищется от **общего** git-dir (`git_paths(["config"])` → родитель), а не
+  `rev-parse --git-path lfs/objects`: `lfs` нет в списке общих каталогов git, и в linked
+  worktree тот ответ — `.git/worktrees/<имя>/lfs/objects`, куда git-lfs не пишет; каждый
+  объект читался бы «не скачанным». Держит тест `a_linked_worktree_reads_the_shared_store`.
+- У `git lfs … --include` нет литерального режима: это список gitignore-шаблонов через
+  запятую, концы обрезаются, `\` — то экранирование, то виндовый разделитель. Путь с
+  `, * ? [ ] \`, ведущими `!`/`#` или пробелами по краям — `Error::Rule`
+  (`lfs::include_pattern`), а не попытка экранировать. Шаблон без слэша совпадает с тем
+  же именем в подкаталогах — скачается лишнее, это безвредно и сознательно.
+- После `lfs_pull` дифф указателя байт в байт тот же, что уже нарисован, и digest тот же:
+  без сравнения поля `lfs` (вместе с `downloaded`) в `editRules.samePayload` перечитанный
+  ответ глотался бы, и карточка вечно звала «Загрузить». Карточка LFS — такой же гейт, как
+  `binary`: `view()` пуст, выбор строк и правка выключены (`editAvailability` → `"lfs"`).
 - `git remote add` сам отказывает в имени, вложенном в существующее (`origin/sub` при
   `origin`), и принимает имя с ведущим `-` после `--` — второе режет `check_remote_name`.
 

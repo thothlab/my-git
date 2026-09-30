@@ -107,6 +107,7 @@ pub fn run() {
             commands::push,
             commands::fetch,
             commands::pull,
+            commands::lfs_pull,
             commands::git_exec,
             commands::remote_list,
             commands::remote_add,

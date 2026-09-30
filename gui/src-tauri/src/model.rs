@@ -125,6 +125,50 @@ pub struct FileDiff {
     pub new_size: Option<u64>,
     pub merge_first_parent: bool,
     pub hunks: Vec<Hunk>,
+    /// The diff changes a Git LFS pointer and nothing else (`engine::lfs`): the
+    /// panel shows a card — sizes, oid, whether the content is local — instead of
+    /// the pointer's three lines. The hunks are still there, for staging.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lfs: Option<LfsDiff>,
+}
+
+/// One side of an LFS pointer change.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LfsSide {
+    /// sha256 of the real content, 64 lowercase hex digits.
+    pub oid: String,
+    /// Bytes of the real content, as the pointer says.
+    pub size: u64,
+    /// The object is in the local LFS store, whole.
+    pub downloaded: bool,
+}
+
+/// Whether the card offers "Download", and why not. `NotNeeded`: there is nothing
+/// to fetch (the new side is local, or the file was deleted).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LfsDownload {
+    NotNeeded,
+    /// `lfs_pull` would fetch exactly the new side's object.
+    Available,
+    /// git-lfs is not installed where git would look for it.
+    NoLfs,
+    /// The object is not the checked-out version of the file (a commit in
+    /// history), or the path is not marked `filter=lfs` — `git lfs pull` would
+    /// fetch something else or nothing.
+    NotCheckedOut,
+    /// The path cannot be written as a literal `--include` pattern.
+    UnsafePath,
+}
+
+/// An LFS pointer change: `old` absent for an added file, `new` for a deleted one.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LfsDiff {
+    pub old: Option<LfsSide>,
+    pub new: Option<LfsSide>,
+    pub download: LfsDownload,
 }
 
 /// A branch (local or remote-tracking) for the branch picker.

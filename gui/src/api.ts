@@ -193,6 +193,34 @@ export interface FileDiff {
    * has to say so, and the fact travels with the diff itself. */
   mergeFirstParent: boolean;
   hunks: Hunk[];
+  /** The diff changes a Git LFS pointer and nothing else: the panel shows a card
+   * instead of the pointer's lines. Absent for every other diff. */
+  lfs?: LfsDiff;
+}
+
+/** One side of an LFS pointer change. */
+export interface LfsSide {
+  /** sha256 of the real content, 64 lowercase hex digits. */
+  oid: string;
+  /** Bytes of the real content. */
+  size: number;
+  /** The object is in the local LFS store, whole. */
+  downloaded: boolean;
+}
+
+/** Whether the card offers "Download", and why not (`engine::lfs`). */
+export type LfsDownload =
+  | "not-needed"
+  | "available"
+  | "no-lfs"
+  | "not-checked-out"
+  | "unsafe-path";
+
+/** `old` absent: the file was added; `new` absent: deleted. */
+export interface LfsDiff {
+  old: LfsSide | null;
+  new: LfsSide | null;
+  download: LfsDownload;
 }
 
 /// `whitespace` defaults to "none" — showing every difference is the historical
@@ -262,6 +290,9 @@ export const branchCheckout = (name: string, stash: boolean) =>
 export type PushMode = "normal" | "upstream" | "force" | "force-hard";
 export const push = (mode: PushMode) => invoke<RepoState>("push", { mode });
 export const fetchRemote = () => invoke<RepoState>("fetch");
+/** `git lfs pull --include=<path>`: download the LFS content of one checked-out
+ * file. Offered only when the card says `download: "available"`. */
+export const lfsPull = (path: string) => invoke<RepoState>("lfs_pull", { path });
 export const pull = () => invoke<RepoState>("pull");
 
 /** What `git_exec` (the git console panel) reports back — see model.rs. */

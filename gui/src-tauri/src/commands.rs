@@ -10,7 +10,7 @@ use crate::engine::GitEngine;
 use crate::error::{Error, Result};
 use crate::engine::exec::{self, mask_credentials};
 use crate::engine::{
-    bisect, blame as blame_engine, branches, commit as commit_engine, conflict as conflict_engine, discard, file_history as file_history_engine, ignore, log as log_engine, ops,
+    bisect, blame as blame_engine, branches, commit as commit_engine, conflict as conflict_engine, discard, file_history as file_history_engine, ignore, lfs, log as log_engine, ops,
     rebase, remotes,
     undo::{self, Hint},
 };
@@ -554,6 +554,18 @@ pub async fn push(state: State<'_, AppState>, mode: String) -> Result<RepoState>
 #[tauri::command]
 pub async fn fetch(state: State<'_, AppState>) -> Result<RepoState> {
     undoable(&state, "fetch", Hint::none(), || CliEngine::new(state.repo_path()?).fetch())?;
+    build_state(&state)
+}
+
+/// Download the Git LFS content of one checked-out file (`git lfs pull --include`,
+/// network mode). The card offers it only when it fetches exactly the object shown
+/// (`engine::lfs`). Replaces the pointer in the working tree with the content; when
+/// the file was clean the undo digest does not move and the chain goes on.
+#[tauri::command]
+pub async fn lfs_pull(state: State<'_, AppState>, path: String) -> Result<RepoState> {
+    undoable(&state, "lfs_pull", Hint::args([path.as_str()]), || {
+        lfs::pull(&state.repo_path()?, &path)
+    })?;
     build_state(&state)
 }
 

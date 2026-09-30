@@ -19,7 +19,7 @@ export type EditBlock = "binary" | "too-large" | "mixed-eol" | "missing";
  * it can. Never a boolean: a disabled control in this project has to name its
  * reason, and a key is the only shape that survives the trip through `i18n`.
  */
-export type EditUnavailable = "unified" | "read-only" | "loading" | EditBlock;
+export type EditUnavailable = "unified" | "read-only" | "lfs" | "loading" | EditBlock;
 
 /** Pause after the last keystroke before the draft goes to disk on its own. */
 export const AUTOSAVE_MS = 800;
@@ -30,13 +30,16 @@ export interface EditConditions {
   /** `sideLabels(...).right.readOnly` — the existing answer to "is this side
    * the working tree", and deliberately not a fourth predicate. */
   readOnly: boolean;
+  /** The diff on screen is an LFS pointer change, drawn as a card: there are
+   * no rows to edit over, and a pointer is not something to type into. */
+  lfs?: boolean;
   /** The file is still being read, so `blocked` is not known yet. */
   loading: boolean;
   blocked: EditBlock | null;
 }
 
 /**
- * The three conditions of PRD §"Когда правка предлагается", in that order.
+ * The three conditions of PRD §"Когда правка предлагается" (plus the LFS card), in that order.
  * Ordered rather than combined so the reason shown is the one nearest to what
  * the reader is looking at: in the unified view of a commit, "editing is offered
  * side by side" is the actionable half.
@@ -44,6 +47,7 @@ export interface EditConditions {
 export function editAvailability(c: EditConditions): EditUnavailable | null {
   if (!c.split) return "unified";
   if (c.readOnly) return "read-only";
+  if (c.lfs) return "lfs";
   if (c.loading) return "loading";
   return c.blocked;
 }
@@ -187,7 +191,31 @@ export interface PatchPayload {
   newSize?: number;
   mergeFirstParent: boolean;
   hunks: PatchHunk[];
+  /** The LFS card's facts. Compared in full, `downloaded` included: after a
+   * download the pointer diff is byte for byte the one already drawn, and the
+   * card saying "not downloaded" would be kept forever. */
+  lfs?: {
+    old: LfsSidePayload | null;
+    new: LfsSidePayload | null;
+    download: string;
+  };
 }
+
+interface LfsSidePayload {
+  oid: string;
+  size: number;
+  downloaded: boolean;
+}
+
+const sameLfsSide = (a: LfsSidePayload | null, b: LfsSidePayload | null): boolean =>
+  a === null || b === null
+    ? a === b
+    : a.oid === b.oid && a.size === b.size && a.downloaded === b.downloaded;
+
+const sameLfs = (a: PatchPayload["lfs"], b: PatchPayload["lfs"]): boolean =>
+  !a || !b
+    ? !a === !b
+    : a.download === b.download && sameLfsSide(a.old, b.old) && sameLfsSide(a.new, b.new);
 
 /**
  * Do two answers describe the very same patch?
@@ -211,6 +239,7 @@ export function samePayload(a: PatchPayload | null, b: PatchPayload | null): boo
     a.oldSize !== b.oldSize ||
     a.newSize !== b.newSize ||
     a.mergeFirstParent !== b.mergeFirstParent ||
+    !sameLfs(a.lfs, b.lfs) ||
     a.hunks.length !== b.hunks.length
   )
     return false;

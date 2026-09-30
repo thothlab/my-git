@@ -734,8 +734,10 @@ impl CliEngine {
         context: Option<u32>,
     ) -> Result<FileDiff> {
         let raw = self.raw_diff(path, against, whitespace, context)?;
-        let mut d = parse_diff(path, &String::from_utf8_lossy(&raw));
+        let text = String::from_utf8_lossy(&raw);
+        let mut d = parse_diff(path, &text);
         d.digest = fnv1a(&raw);
+        super::lfs::attach(&self.repo, &mut d, &text);
         Ok(d)
     }
 

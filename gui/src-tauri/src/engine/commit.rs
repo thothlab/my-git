@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use crate::engine::exec;
+use crate::engine::{exec, lfs};
 use crate::engine::cli::{context_arg, literal, parse_diff, parse_refs, whitespace_args};
 use crate::error::{Error, Result};
 use crate::model::{CommitDetails, CommitFileEntry, FileDiff, FileState};
@@ -277,11 +277,13 @@ pub fn file_diff(
                 a.push(o);
             }
             a.push(&spec);
-            let mut d = parse_diff(path, &git_text(repo, &a)?);
+            let raw = git_text(repo, &a)?;
+            let mut d = parse_diff(path, &raw);
             if d.binary {
                 d.old_size = blob_size(repo, base, old.as_deref().unwrap_or(path));
                 d.new_size = blob_size(repo, hash, path);
             }
+            lfs::attach(repo, &mut d, &raw);
             d
         }
         // Root commit: nothing to diff against, so read the tree itself — every
@@ -292,10 +294,12 @@ pub fn file_diff(
             a.extend_from_slice(&ctx);
             let spec = literal(path);
             a.extend_from_slice(&["--end-of-options", hash, "--", &spec]);
-            let mut d = parse_diff(path, &git_text(repo, &a)?);
+            let raw = git_text(repo, &a)?;
+            let mut d = parse_diff(path, &raw);
             if d.binary {
                 d.new_size = blob_size(repo, hash, path);
             }
+            lfs::attach(repo, &mut d, &raw);
             d
         }
     };
@@ -375,7 +379,9 @@ pub fn compare_diff(
         a.push(o);
     }
     a.push(&spec);
-    let mut d = parse_diff(path, &git_text(repo, &a)?);
+    let raw = git_text(repo, &a)?;
+    let mut d = parse_diff(path, &raw);
+    lfs::attach(repo, &mut d, &raw);
     if d.binary {
         d.old_size = blob_size(repo, from, old.as_deref().unwrap_or(path));
         d.new_size = if to.is_empty() {
