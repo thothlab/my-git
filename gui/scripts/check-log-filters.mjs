@@ -21,7 +21,10 @@
  *     undo and the navigation between blocks;
  *   - `src/components/rebase/rebaseRules.ts` - the interactive rebase plan: chains,
  *     which row carries a message, what is sent, the preview, and whether a log
- *     selection is one unbroken run that can be squashed.
+ *     selection is one unbroken run that can be squashed;
+ *   - `src/components/log/bisectMarks.ts` - which bisect mark a log row carries
+ *     (first bad, candidate, bad, good, skipped, under test), what the search is
+ *     waiting for, and when the repository's own terms replace the UI's words.
  *
  * Run it:  node scripts/check-log-filters.mjs      (from `gui/`)
  * Another time zone:  TZ=America/Los_Angeles node scripts/check-log-filters.mjs
@@ -43,7 +46,7 @@ const src = join(here, "..", "src", "components", "log");
 const out = await mkdtemp(join(tmpdir(), "graft-log-filters-"));
 
 await build({
-  entryPoints: [join(src, "searchPattern.ts"), join(src, "filterValues.ts")],
+  entryPoints: [join(src, "searchPattern.ts"), join(src, "filterValues.ts"), join(src, "bisectMarks.ts")],
   outdir: out,
   format: "esm",
   logLevel: "warning",
@@ -132,6 +135,7 @@ const sel = await load("lineSelection.js");
 const blame = await load("blameRules.js");
 const cr = await load("conflictRules.js");
 const rb = await load("rebaseRules.js");
+const bm = await load("bisectMarks.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -819,6 +823,37 @@ for (const argv of [
   eq(rb.runOpensRange(["a", "b"], ["a", "b", "c"]), true, "the run opens the range");
   eq(rb.runOpensRange(["a", "b"], ["a", "x", "b"]), false, "something else between");
   eq(rb.squashMessage(["one\n", "", "two"]), "one\n\ntwo", "squash prefill joins the messages");
+}
+
+// -- Bisect marks on the log -------------------------------------------------
+{
+  const H = (c) => c.repeat(40);
+  const base = { bad: H("b"), good: [H("a")], skip: [H("c")], current: H("d"), firstBad: null, candidates: [], problem: null };
+  const m = bm.bisectMarks(base);
+  eq([m.get(H("b")), m.get(H("a")), m.get(H("c")), m.get(H("d"))], ["bad", "good", "skip", "testing"], "every role gets its mark");
+  eq(bm.bisectMarks({ ...base, current: H("c") }).get(H("c")), "skip", "an answered commit is not 'under test'");
+  const done = bm.bisectMarks({ ...base, firstBad: H("b"), current: H("b") });
+  eq(done.get(H("b")), "culprit", "the answer beats the bad mark on the same commit");
+  eq(done.has(H("d")), false, "a finished search has nothing under test");
+  const amb = bm.bisectMarks({ ...base, skip: [H("c"), H("e")], candidates: [H("c"), H("e"), H("b")], current: H("e") });
+  eq([amb.get(H("c")), amb.get(H("e")), amb.get(H("b"))], ["candidate", "candidate", "candidate"], "only skipped left: candidates");
+  eq(bm.bisectMarks({ ...base, problem: "BISECT_LOG line 3" }).size, 0, "a broken state draws nothing");
+  eq(bm.bisectMarks(null).size, 0, "no bisect, no marks");
+  eq(bm.bisectMarks({ ...base, bad: "ABC" }).has("abc"), true, "keys are lower case");
+  eq(
+    [
+      bm.bisectPhase({ ...base, bad: null, good: [] }),
+      bm.bisectPhase({ ...base, bad: null }),
+      bm.bisectPhase({ ...base, good: [] }),
+      bm.bisectPhase(base),
+      bm.bisectPhase({ ...base, firstBad: H("b") }),
+      bm.bisectPhase({ ...base, candidates: [H("c")] }),
+      bm.bisectPhase({ ...base, problem: "x" }),
+    ],
+    ["waitBoth", "waitBad", "waitGood", "testing", "found", "ambiguous", "broken"],
+    "what the strip says the search waits for",
+  );
+  eq([bm.customTerm("bad", "bad"), bm.customTerm("broken", "bad")], [null, "broken"], "custom terms replace the UI's words");
 }
 
 await rm(out, { recursive: true, force: true });

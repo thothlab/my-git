@@ -24,6 +24,44 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     exec::git(repo, args).run()?.checked_both()
 }
 
+/// The marker files of an unfinished operation, in the order [`kind_of`] reads them.
+const MARKERS: [&str; 6] = [
+    "MERGE_HEAD",
+    "rebase-merge",
+    "rebase-apply",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_START",
+];
+
+/// Which operation the present markers name. A bisect comes last: an operation
+/// stopped inside a bisect (a cherry-pick on a conflict) is the one to finish first,
+/// and the bisect is still reported beside it (`OperationState.bisect`).
+fn kind_of(present: &[bool]) -> OperationKind {
+    if present[0] {
+        OperationKind::Merge
+    } else if present[1] || present[2] {
+        OperationKind::Rebase
+    } else if present[3] {
+        OperationKind::CherryPick
+    } else if present[4] {
+        OperationKind::Revert
+    } else if present[5] {
+        OperationKind::Bisect
+    } else {
+        OperationKind::None
+    }
+}
+
+/// Which operation is in progress, from the markers alone — what the undo
+/// snapshots and the drivers below need. Reads no state file, so a bisect whose
+/// `BISECT_LOG` does not parse can still be recognised and ended.
+pub fn detect_kind(repo: &Path) -> Result<OperationKind> {
+    let paths = CliEngine::new(repo).git_paths(&MARKERS)?;
+    let present: Vec<bool> = paths.iter().map(|p| p.exists()).collect();
+    Ok(kind_of(&present))
+}
+
 /// Which multi-step operation, if any, is in progress.
 ///
 /// Recognised by the marker files git itself writes. Their location is resolved by
@@ -35,35 +73,27 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
 ///
 /// `conflicted` comes from `engine::conflict::list` — each unmerged path with the
 /// kind of its conflict. A calm repository is reported exactly — `OperationKind::None`.
+/// A bisect is read by `engine::bisect::state` whenever `BISECT_START` exists,
+/// whatever `kind` is.
 pub fn detect_state(repo: &Path) -> Result<OperationState> {
-    const MARKERS: [&str; 5] = [
-        "MERGE_HEAD",
-        "rebase-merge",
-        "rebase-apply",
-        "CHERRY_PICK_HEAD",
-        "REVERT_HEAD",
-    ];
     let paths = CliEngine::new(repo).git_paths(&MARKERS)?;
     let present: Vec<bool> = paths.iter().map(|p| p.exists()).collect();
-
-    let kind = if present[0] {
-        OperationKind::Merge
-    } else if present[1] || present[2] {
-        OperationKind::Rebase
-    } else if present[3] {
-        OperationKind::CherryPick
-    } else if present[4] {
-        OperationKind::Revert
+    let kind = kind_of(&present);
+    let bisect = if present[5] {
+        crate::engine::bisect::state(repo)?
     } else {
-        OperationKind::None
+        None
     };
-    if kind == OperationKind::None {
+    if kind == OperationKind::None || kind == OperationKind::Bisect {
+        // A bisect has no conflicts of its own: its checkouts either happen or
+        // are refused.
         return Ok(OperationState {
             kind,
             current: None,
             total: None,
             conflicted: Vec::new(),
             edit_stop: None,
+            bisect,
         });
     }
 
@@ -95,6 +125,7 @@ pub fn detect_state(repo: &Path) -> Result<OperationState> {
         total,
         conflicted,
         edit_stop,
+        bisect,
     })
 }
 
@@ -265,11 +296,12 @@ pub fn tag_create(repo: &Path, hash: &str, name: &str, message: Option<&str>) ->
 /// `git merge --abort` are different commands with different effects, and the
 /// panel button says only "Abort".
 fn in_progress_command(repo: &Path) -> Result<&'static str> {
-    match detect_state(repo)?.kind {
+    match detect_kind(repo)? {
         OperationKind::Merge => Ok("merge"),
         OperationKind::Rebase => Ok("rebase"),
         OperationKind::CherryPick => Ok("cherry-pick"),
         OperationKind::Revert => Ok("revert"),
+        OperationKind::Bisect => Ok("bisect"),
         OperationKind::None => Err(Error::Rule("no operation in progress".into())),
     }
 }
@@ -310,23 +342,36 @@ fn plan_for(repo: &Path, op: &str, data_dir: Option<&Path>) -> Result<Option<reb
 
 /// История 30: carry on with the operation the repository is in. `data_dir` is the
 /// application data directory, where a plan of an interactive rebase lives.
+///
+/// A bisect has nothing to continue — it moves on with an answer about the commit
+/// under test, and saying so beats running something else.
 pub fn op_continue(repo: &Path, data_dir: Option<&Path>) -> Result<()> {
     let op = in_progress_command(repo)?;
+    if op == "bisect" {
+        return Err(Error::Rule(
+            "a bisect has nothing to continue; mark the commit under test good, bad or skip".into(),
+        ));
+    }
     let plan = plan_for(repo, op, data_dir)?;
     let result = drive(repo, op, "--continue", plan.as_ref());
     sweep(repo, data_dir);
     result
 }
 
-/// История 30: undo the operation, returning the branch to where it started.
+/// История 30: undo the operation, returning the branch to where it started. For
+/// a bisect that is `git bisect reset` — back to the branch it started from.
 pub fn op_abort(repo: &Path, data_dir: Option<&Path>) -> Result<()> {
     let op = in_progress_command(repo)?;
+    if op == "bisect" {
+        return crate::engine::bisect::reset(repo);
+    }
     let result = drive(repo, op, "--abort", None);
     sweep(repo, data_dir);
     result
 }
 
-/// История 30: drop the current commit and carry on.
+/// История 30: drop the current commit and carry on — for a bisect, `git bisect
+/// skip` of the commit under test.
 ///
 /// A merge has no `--skip` — there is no "next commit" to move to. Saying so is
 /// better than running something else that happens to be spelled similarly.
@@ -334,6 +379,10 @@ pub fn op_skip(repo: &Path, data_dir: Option<&Path>) -> Result<()> {
     let op = in_progress_command(repo)?;
     if op == "merge" {
         return Err(Error::Rule("a merge cannot skip a commit".into()));
+    }
+    if op == "bisect" {
+        // `git bisect skip`: the commit under test cannot be tested.
+        return crate::engine::bisect::mark(repo, "skip", None);
     }
     let plan = plan_for(repo, op, data_dir)?;
     let result = drive(repo, op, "--skip", plan.as_ref());

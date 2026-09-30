@@ -616,7 +616,7 @@ pub fn sweep(data_dir: &Path, repo: &Path) -> Result<()> {
 // ── operations ──────────────────────────────────────────────────────────────
 
 fn ensure_calm(repo: &Path) -> Result<()> {
-    let kind = ops::detect_state(repo)?.kind;
+    let kind = ops::detect_kind(repo)?;
     if kind != OperationKind::None {
         return Err(Error::Rule(format!(
             "a {} is in progress; finish or abort it first",
@@ -625,6 +625,7 @@ fn ensure_calm(repo: &Path) -> Result<()> {
                 OperationKind::Rebase => "rebase",
                 OperationKind::CherryPick => "cherry-pick",
                 OperationKind::Revert => "revert",
+                OperationKind::Bisect => "bisect",
                 OperationKind::None => "",
             }
         )));

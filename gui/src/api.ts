@@ -327,7 +327,8 @@ export type UndoReasonCode =
   | "stash-dirty"
   | "no-earlier"
   | "no-next"
-  | "inverse-failed";
+  | "inverse-failed"
+  | "bisect";
 
 export interface UndoReason {
   code: UndoReasonCode;
@@ -470,7 +471,37 @@ export interface BranchNode {
   lastCommitAt: number;
 }
 
-export type OperationKind = "none" | "merge" | "rebase" | "cherryPick" | "revert";
+export type OperationKind = "none" | "merge" | "rebase" | "cherryPick" | "revert" | "bisect";
+
+/**
+ * A `git bisect` in progress (`engine::bisect`). `termBad` / `termGood` are the
+ * repository's words — `bad` / `good` unless it was started with `--term-new` /
+ * `--term-old`. Hashes are full. `remaining` / `steps` are git's own estimate
+ * ("N revisions left … roughly M steps"), `null` while an end of the range is
+ * unknown or once it is over. `problem`: `BISECT_LOG` or `refs/bisect/*` did not
+ * parse — the bisect can only be ended then, and no marks are reported.
+ */
+export interface BisectState {
+  termBad: string;
+  termGood: string;
+  startBranch: string | null;
+  startCommit: string | null;
+  current: string | null;
+  currentSubject: string | null;
+  bad: string | null;
+  good: string[];
+  skip: string[];
+  firstBad: string | null;
+  firstBadSubject: string | null;
+  /** Only skipped commits were left: the first bad commit is one of these. */
+  candidates: string[];
+  remaining: number | null;
+  steps: number | null;
+  problem: string | null;
+}
+
+/** A role in the search; `op_bisect_mark` spells it with the repository's terms. */
+export type BisectMark = "bad" | "good" | "skip";
 
 export interface OperationState {
   kind: OperationKind;
@@ -480,6 +511,9 @@ export interface OperationState {
   conflicted: ConflictEntry[];
   /** A rebase stopped on an `edit` step: the original hash of that commit. */
   editStop?: string | null;
+  /** The bisect under way, whatever `kind` says: a cherry-pick stopped inside a
+   *  bisect is `kind: "cherryPick"` with the search still here. */
+  bisect?: BisectState | null;
 }
 
 /** git's seven kinds of conflict, named after the letters `git status` prints
@@ -793,6 +827,16 @@ export const conflictTake = (path: string, side: "ours" | "theirs") =>
   invoke<RepoState>("conflict_take", { path, side });
 export const opAbort = () => invoke<RepoState>("op_abort");
 export const opSkip = () => invoke<RepoState>("op_skip");
+
+/** Start a bisect: `bad` has the bug (HEAD when null), `good` do not (empty: git
+ *  waits for one). */
+export const opBisectStart = (bad: string | null, good: string[]) =>
+  invoke<RepoState>("op_bisect_start", { bad, good });
+/** Answer for `hash`, or for the commit under test when null. */
+export const opBisectMark = (mark: BisectMark, hash: string | null = null) =>
+  invoke<RepoState>("op_bisect_mark", { mark, hash });
+/** End the bisect, back to the branch it started from (`git bisect reset`). */
+export const opBisectReset = () => invoke<RepoState>("op_bisect_reset");
 
 export const stashListApp = () => invoke<string[]>("stash_list_app");
 /** One entry of {@link stashListApp}: NUL-separated ref, unix time, git's text. */

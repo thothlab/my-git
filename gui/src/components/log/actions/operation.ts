@@ -18,7 +18,9 @@ export function operationWord(kind: OperationKind): string {
       ? d().phaseRebase()
       : kind === "cherryPick"
         ? d().phaseCherryPick()
-        : d().phaseRevert();
+        : kind === "bisect"
+          ? d().phaseBisect()
+          : d().phaseRevert();
 }
 
 /** `git <op> --continue`, then the refs and the log are re-read. */

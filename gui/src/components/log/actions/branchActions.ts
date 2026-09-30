@@ -22,6 +22,7 @@ import {
   afterRepoChange,
   localChangesNow,
   operationActive,
+  operationReason,
   runResult,
 } from "./repoRefresh";
 
@@ -233,7 +234,7 @@ export async function updateBranch(node: BranchNode): Promise<void> {
  */
 export function branchMenuItems(node: BranchNode | null, refreshTree: () => void): MenuEntry[] {
   const busyOp = operationActive();
-  const opReason = busyOp ? d().whyOperationRunning() : undefined;
+  const opReason = operationReason();
   const detached = !!state()?.detached;
   const currentBranch = state()?.branch ?? "";
   const after = (p: Promise<void>) => void p.then(refreshTree);

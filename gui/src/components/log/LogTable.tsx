@@ -52,6 +52,7 @@ import { commitMenuItems, rewriteAnchor, type RangeAnswer } from "./actions/comm
 import ContextMenu, { createMenuController, type MenuAnchor } from "./actions/ContextMenu";
 import { ActionDialogHost } from "./actions/dialogs";
 import LogGraph, { LANE_W, lanesBelow } from "./LogGraph";
+import { bisectMarks, customTerm, type BisectMarkKind } from "./bisectMarks";
 import { PanelBtn, PanelChrome, PanelNote } from "./PanelChrome";
 import { IconRefresh } from "../IconButton";
 
@@ -475,6 +476,10 @@ function VirtualRows(props: {
 
   props.register((i) => virt.scrollToIndex(i, { align: "auto" }));
 
+  // One map per state, not one lookup chain per row: the bisect's marks travel in
+  // `RepoState.operation.bisect` and change only when a mutation brings a new one.
+  const marks = createMemo(() => bisectMarks(state()?.operation?.bisect));
+
   // Ask for the next page as the end comes into view. Reading the virtual items
   // keeps this tied to actual scrolling rather than to a timer.
   createEffect(() => {
@@ -515,6 +520,7 @@ function VirtualRows(props: {
                 index={vi.index}
                 dimmed={dim() && !!search().text && !commitMatches(row()!)}
                 outside={outside()}
+                bisect={marks().get(row()!.hash.toLowerCase())}
               />
             </Show>
           );
@@ -551,6 +557,8 @@ function Row(props: {
   dimmed: boolean;
   /** Fetched by hash from outside the loaded pages: no graph is drawn for it. */
   outside: boolean;
+  /** This commit's mark in the bisect under way, if any. */
+  bisect?: BisectMarkKind;
 }) {
   return (
     <div
@@ -610,6 +618,7 @@ function Row(props: {
             {d().offGraphLabel()}
           </span>
         </Show>
+        <Show when={props.bisect}>{(k) => <BisectChip kind={k()} />}</Show>
         <Refs refs={props.commit.refs} />
         <span class="truncate">
           <Marked text={props.commit.subject} />
@@ -648,6 +657,47 @@ function Marked(props: { text: string }) {
     <For each={parts()}>
       {(p) => (p.hit ? <mark class="bg-warn/40 text-fg">{p.text}</mark> : <>{p.text}</>)}
     </For>
+  );
+}
+
+/**
+ * A bisect mark next to the reference labels: a word as well as a colour, so the
+ * colour is never the only cue, and the repository's own terms when it has them.
+ * A label beside the subject rather than anything drawn into the graph — the
+ * graph's geometry stays the history's alone.
+ */
+function BisectChip(props: { kind: BisectMarkKind }) {
+  const cls = () => {
+    switch (props.kind) {
+      case "culprit":
+        return "border-danger bg-danger/15 font-semibold text-danger";
+      case "candidate":
+        return "border-warn text-warn";
+      case "bad":
+        return "border-danger text-danger";
+      case "good":
+        return "border-success text-success";
+      case "testing":
+        return "border-accent text-accent";
+      default:
+        return "border-border text-fg-muted";
+    }
+  };
+  const word = () => {
+    const b = state()?.operation?.bisect;
+    return d().bisectChip(
+      props.kind,
+      b ? customTerm(b.termBad, "bad") : null,
+      b ? customTerm(b.termGood, "good") : null,
+    );
+  };
+  return (
+    <span
+      class={`shrink-0 rounded border px-1 text-[0.625rem] leading-4 ${cls()}`}
+      title={d().bisectChipTip(props.kind)}
+    >
+      {word()}
+    </span>
   );
 }
 

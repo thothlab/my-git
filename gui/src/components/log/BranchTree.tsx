@@ -27,7 +27,7 @@ import {
 } from "./actions/branchActions";
 import ContextMenu, { createMenuController } from "./actions/ContextMenu";
 import { ActionDialogHost } from "./actions/dialogs";
-import { operationActive, repoRevision } from "./actions/repoRefresh";
+import { operationActive, operationReason, repoRevision } from "./actions/repoRefresh";
 
 /**
  * Branch tree panel: HEAD on top, then the Favourites section, then the Local
@@ -428,7 +428,7 @@ export default function BranchTree() {
             label={<IconFetch />}
             tip={d().fetchPruneTip()}
             disabled={busy() || operationActive()}
-            disabledTip={operationActive() ? d().whyOperationRunning() : d().fetching()}
+            disabledTip={operationReason() ?? d().fetching()}
             onClick={() => void fetchAll()}
           />
           <PanelBtn label={<IconExpandAll />} tip={d().expandAllTip()} onClick={expandAllFolders} />
@@ -447,7 +447,7 @@ export default function BranchTree() {
             label={<IconPlus />}
             tip={d().newBranchTip()}
             disabled={operationActive()}
-            disabledTip={d().whyOperationRunning()}
+            disabledTip={operationReason()}
             onClick={() => {
               const r = current();
               const from = r?.kind === "branch" && r.node ? r.node.name : (state()?.branch ?? "HEAD");

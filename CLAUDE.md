@@ -26,9 +26,9 @@
 | `cd gui && npm run tauri dev` | Запустить Graft локально (нужен дисплей) |
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
-| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, разбор и печать команды консоли), 299 утверждений |
-| `cargo test` | Оба крейта разом: 321 тест GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 321 тест |
+| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, разбор и печать команды консоли), 309 утверждений |
+| `cargo test` | Оба крейта разом: 332 теста GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 332 теста |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -69,6 +69,8 @@ gui/src-tauri/src/  бэк GUI
   engine/commit.rs  один коммит и сравнение двух ревизий
   engine/branches.rs дерево веток и операции над ветками
   engine/ops.rs     операции, переписывающие историю, и распознавание незавершённой
+  engine/bisect.rs  git bisect: чтение BISECT_START / BISECT_TERMS / BISECT_LOG / refs/bisect,
+                    старт, ответ good/bad/skip, reset
   engine/conflict.rs конфликтные файлы: стороны из индекса (стадии 1/2/3), вид конфликта,
                     запись разрешения + `git add`, сторона целиком / удаление (`git rm`)
   engine/discard.rs резервная копия перед откатом (refs/graft/discard) и её восстановление
@@ -97,7 +99,8 @@ gui/src/            фронт
                     перестановка, поля сообщений, предпросмотр); rebaseRules.ts — цепочки,
                     где поле сообщения, что уходит на бэк, предпросмотр, `squashRun` по
                     первым родителям, без единого импорта
-  components/log/   панель Git: BranchTree, LogTable, LogGraph, CommitDetailsPane, FilterBar, LogView, PanelChrome + чистые модули
+  components/log/   панель Git: BranchTree, LogTable, LogGraph, CommitDetailsPane, FilterBar, LogView, PanelChrome + чистые модули;
+                    bisectMarks.ts — метка bisect у строки лога и фаза поиска, без единого импорта
   components/log/actions/  действия над коммитами и ветками, контекстное меню, диалоги;
                     operation.ts — `continueOperation`, `operationWord` (полоса операции и
                     редактор конфликта зовут одно и то же)
@@ -201,7 +204,7 @@ Git вызывается только как внешний процесс. `gix
   сравнивается с первым родителем; корневой коммит читается через `diff-tree --root`.
 - `engine::branches` — `tree`, `rename`, `delete`, `merge`, `rebase_onto`, `unmerged_count`,
   `update_from_upstream`, константа `DETACHED_REF = "HEAD"`.
-- `engine::ops` — `detect_state`, `revert`, `reset`, `cherry_pick`, `checkout_rev`,
+- `engine::ops` — `detect_state`, `detect_kind`, `revert`, `reset`, `cherry_pick`, `checkout_rev`,
   `tag_create`, `op_continue`, `op_abort`, `op_skip`, `stash_list_app`, `stash_restore`,
   `stash_list`, `stash_apply`, `stash_pop`, `stash_drop`, `stash_files`, `stash_push`,
   `contains_commit`, `commits_after`, `has_local_changes`, `reset_mode_flag`, константа
@@ -210,7 +213,22 @@ Git вызывается только как внешний процесс. `gix
   приложения (`Option<&Path>`): идущему rebase из плана Graft `drive` ставит редакторы плана
   вместо `GIT_EDITOR=true`, после — `rebase::sweep`. `OperationState.edit_stop` — хэш
   коммита, на котором rebase встал по `edit` (последняя команда `rebase-merge/done`, не
-  маркер `amend`: его git пишет и для упавшего squash).
+  маркер `amend`: его git пишет и для упавшего squash). `detect_kind` — вид по одним
+  маркерам, без чтения файлов состояния: им пользуются снимки Undo, драйверы `op_*` и
+  `rebase::ensure_calm`. Приоритет вида: merge > rebase > cherry-pick > revert > **bisect**;
+  `OperationState.bisect` заполняется при наличии `BISECT_START` независимо от `kind`
+  (cherry-pick, вставший на конфликте посреди bisect, — это `kind: cherryPick` плюс поиск).
+  Для bisect: `op_abort` = `git bisect reset`, `op_skip` = `git bisect skip`, `op_continue` —
+  `Error::Rule` (продолжать нечего, нужен ответ).
+- `engine::bisect` — `active`, `read` (строго), `state` (для `detect_state`), `start(&Path,
+  bad: Option, good: &[String])`, `mark(&Path, "bad"|"good"|"skip", hash: Option)`, `reset`,
+  `pub(crate) parse_log`. Состояние — только из файлов git (`BISECT_START`, `BISECT_TERMS`,
+  `BISECT_LOG`, `BISECT_HEAD` через `git_paths`) и `refs/bisect/*`, никогда из фраз `git
+  bisect`. Списки good/bad/skip — из ссылок (по ним работает алгоритм git), ответ поиска
+  (`# first <bad> commit: [oid] subject`) и кандидаты при одних пропущенных (`# possible
+  first …`) — из лога; следующая отметка в логе «переоткрывает» поиск. Оценка шагов —
+  `rev-list --bisect-vars` (те же числа, что печатает git; пропуски не вычитаются, как и у
+  него). Роли `bad`/`good` на входе `mark` пишутся словами репозитория (`--term-new/--term-old`).
 - `engine::rebase` — `range(&Path, hash) -> RebaseRange` (от коммита **включительно** до
   HEAD, старые первыми; `blocked`: `notOnBranch` | `merge` | `tooMany`; `dirty` — только
   отслеживаемые; `published` — сколько из них уже в `@{upstream}`), `start(repo, data_dir,
@@ -269,7 +287,9 @@ Git вызывается только как внешний процесс. `gix
   восстановление только на чистое дерево; `Discard` — `discard::restore` копии отката и
   копии самого restore, плюс записи индекса), «ничего» (отпечаток не изменился) или разрыв
   цепочки с `UndoReasonCode` (push, pull, fetch с новыми тегами, rebase/squash/reword старого,
-  консоль, незавершённая операция, упавшее действие). Undo и Redo выполняются, только если
+  консоль, незавершённая операция, упавшее действие, bisect — свой код `bisect` для
+  `op_bisect_*` и для любого действия, до или после которого шёл bisect; проверяется раньше
+  общего `operation`). Undo и Redo выполняются, только если
   текущий отпечаток равен ожидаемому, и только для шага с тем `id`, что показали клиенту.
   Два действия разом над одним репозиторием — второе не записывается, цепочка рвётся
   (`concurrent`). Своего «второго механизма» отката файлов нет: Undo отката — это копия
@@ -281,7 +301,8 @@ Git вызывается только как внешний процесс. `gix
   `OWN_GRACE = 1 с`. Крейт `notify` 8, пауза своя, а не `notify-debouncer-*`: каждое сырое
   событие помечается «своё / чужое» в момент прихода. Сам git на событиях не запускает —
   один `rev-parse` при создании. Слушается allowlist от корня git-dir, по компонентам:
-  `HEAD`, `ORIG_HEAD`, `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `packed-refs`,
+  `HEAD`, `ORIG_HEAD`, `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `BISECT_START`,
+  `BISECT_LOG`, `BISECT_TERMS`, `BISECT_HEAD`, `packed-refs`,
   `refs/`, `logs/HEAD`, `logs/refs/`, `rebase-merge/`, `rebase-apply/`, `sequencer/`; явно
   **нет**: `index`, `FETCH_HEAD`, `*.lock`, `refs/graft/` и `logs/refs/graft/`,
   `changelists.json*`, `graft-ui.json*`. В common-dir linked worktree — только общее (`refs/`,
@@ -449,7 +470,7 @@ Git вызывается только как внешний процесс. `gix
   `ConflictEntry[]` (`{ path, kind }`), а не строки: вид конфликта (`UU`, `DU`, …) едет с
   тем же `ls-files -u`, и второй команды за ним нет. Конфликт без операции (`stash pop`)
   виден только в Changes — туда же пункт «Разрешить конфликт…».
-- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`), `ui_state_*`, `journal_*`, `undo_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_history`, `file_blame`, `file_blame_before`). Имя `commit_list`
+- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`, `op_bisect_start`, `op_bisect_mark`, `op_bisect_reset`), `ui_state_*`, `journal_*`, `undo_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_history`, `file_blame`, `file_blame_before`). Имя `commit_list`
   занято операцией «закоммитить changelist» и переиспользовано быть не может.
 - Полный список зарегистрированных команд — `invoke_handler` в `gui/src-tauri/src/lib.rs`;
   он же роспись того, что вообще доступно фронту.
@@ -929,6 +950,31 @@ Git вызывается только как внешний процесс. `gix
   переписаны. `undo::untouched` смотрит ещё и на каждый путь, чья запись индекса сдвинулась
   (не перечисленный статусом путь побайтно равен своей записи индекса). Без этого hard reset
   записывался как `Soft`, и Undo двигал ветку, оставляя дерево новым.
+- **`git bisect` не принимает `--end-of-options`** («unrecognized option»), ни у `start`, ни у
+  `good`/`bad`. Поэтому каждая ревизия от клиента сначала резолвится `rev-parse --verify
+  --end-of-options <rev>^{commit}`, и в `git bisect` уходит только полный hex-oid (с `-` не
+  начинается); `start` закрывает ревизии `--` — дальше были бы pathspec.
+- **Битый `BISECT_LOG` не должен ронять весь `RepoState`**: `detect_state` зовут
+  `build_state` и драйверы. Строгий разбор (`bisect::read`, `parse_log`) отдаёт
+  `Error::Parse`, а `detect_state` складывает его текст в `BisectState.problem` и отметок не
+  отдаёт — полоса показывает ошибку и оставляет «Закончить» (`git bisect reset`, ему нужен
+  только `BISECT_START`). `mark` на битом логе отказывает до запуска git. Снимки Undo берут
+  вид через `detect_kind` — без чтения лога вообще.
+- Голый `git bisect start` из терминала не двигает ни HEAD, ни ссылки — наблюдатель видит его
+  только потому, что `BISECT_*` в allowlist `watch.rs`. `BISECT_START` при старте на
+  detached HEAD хранит **oid**, а не пустую строку.
+- «Остались только пропущенные» — `git bisect skip` выходит с кодом 2 («We cannot bisect
+  more!»), но это ответ, а не отказ: `mark` возвращает `Ok` только при коде 2 **и** логе,
+  который вырос этим ответом и несёт `# possible first …` — кандидаты от прошлого ответа
+  превратили бы отказ git (скажем, залоченный ref) в молчаливый успех. Кандидаты едут в
+  `BisectState.candidates`. Объявленный git'ом «X is
+  the first bad commit», которого нет в логе, — `Error::Parse`: ответ, который не переживёт
+  следующего чтения состояния, хуже ошибки.
+- Полоса операции для bisect — своя (`BisectStrip` в `OperationBar.tsx`), не общая: bisect не
+  продолжают, а отвечают. Причина выключенных пунктов при bisect — `operationReason()` из
+  `repoRefresh.ts` («идёт поиск коммита с ошибкой»), а не общее «незавершённая операция».
+  Проверки вида «идёт операция, значит это остановка моего действия» (`RebasePanel`,
+  `ConflictPanel`) исключают `bisect` явно: у bisect нет своих конфликтов.
 - Cmd/Ctrl+Z приложения зарегистрирован с `typing: false` и снимается, пока открыт
   редактор файла (`UndoButtons.tsx`, `createEffect` вокруг `registerHotkey`): в поле ввода
   и в редакторе это undo текста. Редактор конфликта — модалка со своим `onKeyDown`, под ней

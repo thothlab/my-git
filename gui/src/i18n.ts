@@ -285,6 +285,8 @@ const en = {
         return "nothing was undone";
       case "inverse-failed":
         return "the last Undo / Redo stopped halfway — check the repository";
+      case "bisect":
+        return "a bisect (the search for the commit with the bug) was involved — its checkouts cannot be taken back step by step";
       default:
         return `${name} cannot be undone`;
     }
@@ -621,6 +623,84 @@ const en = {
   phaseOpContinue: () => "continue",
   phaseOpSkip: () => "skip",
   phaseOpAbort: () => "abort",
+  // Bisect (task 10): the search for the commit that brought a bug in
+  phaseBisect: () => "bisect",
+  bisectTitle: () => "Searching for the commit that brought the bug in",
+  bisectTesting: (short: string, subject: string, steps: number | null) =>
+    `testing ${short} ${subject}` +
+    (steps === null ? "" : `, ≈${steps} ${steps === 1 ? "step" : "steps"} left`),
+  bisectWaitBoth: () =>
+    "Mark a commit with the bug and one without it: right-click a commit in the log, or use the buttons for the checked-out one.",
+  bisectWaitGood: () => "Now mark a commit where the bug is absent — right-click it in the log.",
+  bisectWaitBad: () => "Now mark a commit where the bug is present — right-click it in the log.",
+  bisectFound: (term: string | null, short: string, subject: string) =>
+    `${term === null ? "First bad commit" : `First "${term}" commit`}: ${short} ${subject}`,
+  bisectCandidates: (n: number) =>
+    `Only skipped commits are left: the first bad commit is one of these ${n}.`,
+  bisectBroken: (problem: string) =>
+    `The state of the bisect cannot be read, so only finishing it is possible. ${problem}`,
+  bisectBtnBad: () => "Bug present",
+  bisectBtnGood: () => "Bug absent",
+  bisectBtnSkip: () => "Cannot test · Skip",
+  bisectBtnTerm: (term: string) => `Mark "${term}"`,
+  bisectBtnFinish: () => "Finish",
+  bisectMarkTip: (what: string, short: string) => `${what}: ${short}`,
+  bisectFinishTip: (where: string) => `git bisect reset — back to ${where}`,
+  bisectShowInLog: () => "Show in log",
+  bisectReturnCommit: (short: string) => `commit ${short}`,
+  bisectReturnUnknown: () => "where it started",
+  confirmBisectFinish: (where: string) =>
+    `Finish the search and return to ${where}? The answers given so far are discarded.`,
+  confirmBisectStart: (bad: string, good: string | null) =>
+    good === null
+      ? `Start searching for the commit that brought the bug in, with ${bad} marked "bug present".\n\nNext, mark a commit where the bug was still absent: right-click it in the log. Git then checks out commits one by one for you to test.`
+      : `Start searching for the commit that brought the bug in between ${good} (bug absent) and ${bad} (bug present)?\n\nGit checks out commits one by one for you to test; the strip above the log takes your answers.`,
+  menuBisectStartBad: () => "Find the bug: it is present here…",
+  menuBisectBetween: () => "Find the bug between these two…",
+  menuBisectMark: (role: "bad" | "good" | "skip", term: string | null) =>
+    role === "skip"
+      ? "Bisect: cannot test · skip"
+      : term !== null
+        ? `Bisect: mark "${term}"`
+        : role === "bad"
+          ? "Bisect: bug present here"
+          : "Bisect: bug absent here",
+  whyBisectNeedsTwo: () => "select exactly two commits: the newer one with the bug, the older one without",
+  whyBisectRunning: () => "a bisect is in progress — finish it first",
+  whyBisectBroken: () => "the state of the bisect cannot be read — only Finish is possible",
+  whyBisectNoCommit: () => "no commit is checked out to test",
+  bisectChip: (kind: string, bad: string | null, good: string | null): string => {
+    switch (kind) {
+      case "culprit":
+        return bad === null ? "first bad" : `first ${bad}`;
+      case "bad":
+        return bad ?? "bad";
+      case "good":
+        return good ?? "good";
+      case "skip":
+        return "skipped";
+      case "testing":
+        return "testing";
+      default:
+        return "candidate";
+    }
+  },
+  bisectChipTip: (kind: string): string => {
+    switch (kind) {
+      case "culprit":
+        return "Bisect: the first bad commit — the search ended here";
+      case "bad":
+        return "Bisect: the bad end of the range — the bug is present here";
+      case "good":
+        return "Bisect: marked — the bug is absent here";
+      case "skip":
+        return "Bisect: skipped — this commit could not be tested";
+      case "testing":
+        return "Bisect: checked out for the current test";
+      default:
+        return "Bisect: only skipped commits were left — the first bad commit may be this one";
+    }
+  },
   // Stash manager
   stashesTitle: () => "Stashed changes",
   stashesTip: () => "Stashed changes",
@@ -1106,6 +1186,8 @@ const ru: Dict = {
         return "ничего не отменялось";
       case "inverse-failed":
         return "последняя отмена / повтор остановилась на полпути — проверьте репозиторий";
+      case "bisect":
+        return "затронут bisect (поиск коммита с ошибкой) — его переключения не откатываются по шагам";
       default:
         return `${name} нельзя отменить`;
     }
@@ -1439,6 +1521,84 @@ const ru: Dict = {
   phaseOpContinue: () => "continue",
   phaseOpSkip: () => "skip",
   phaseOpAbort: () => "abort",
+  // Bisect (задача 10): поиск коммита, который принёс ошибку
+  phaseBisect: () => "bisect",
+  bisectTitle: () => "Поиск коммита с ошибкой",
+  bisectTesting: (short, subject, steps) =>
+    `проверяется ${short} ${subject}` +
+    (steps === null ? "" : `, осталось ≈${steps} ${ruPlural(steps, "шаг", "шага", "шагов")}`),
+  bisectWaitBoth: () =>
+    "Отметьте коммит с ошибкой и коммит без неё: правый клик по коммиту в логе или кнопки для текущего.",
+  bisectWaitGood: () => "Теперь отметьте коммит, где ошибки ещё нет, — правый клик по нему в логе.",
+  bisectWaitBad: () => "Теперь отметьте коммит, где ошибка уже есть, — правый клик по нему в логе.",
+  bisectFound: (term, short, subject) =>
+    `${term === null ? "Первый плохой коммит" : `Первый коммит «${term}»`}: ${short} ${subject}`,
+  bisectCandidates: (n) =>
+    `Остались только пропущенные коммиты: первый плохой — один из этих ${n}.`,
+  bisectBroken: (problem) =>
+    `Состояние bisect не читается, поэтому его можно только закончить. ${problem}`,
+  bisectBtnBad: () => "Ошибка есть",
+  bisectBtnGood: () => "Ошибки нет",
+  bisectBtnSkip: () => "Не проверить · Пропустить",
+  bisectBtnTerm: (term) => `Отметить «${term}»`,
+  bisectBtnFinish: () => "Закончить",
+  bisectMarkTip: (what, short) => `${what}: ${short}`,
+  bisectFinishTip: (where) => `git bisect reset — вернуться на ${where}`,
+  bisectShowInLog: () => "Показать в логе",
+  bisectReturnCommit: (short) => `коммит ${short}`,
+  bisectReturnUnknown: () => "исходную позицию",
+  confirmBisectFinish: (where) =>
+    `Закончить поиск и вернуться на ${where}? Данные ответы будут сброшены.`,
+  confirmBisectStart: (bad, good) =>
+    good === null
+      ? `Начать поиск коммита, который принёс ошибку: ${bad} отмечен как «ошибка есть».\n\nДальше отметьте коммит, где ошибки ещё не было, — правым кликом в логе. Затем git будет по одному выдавать коммиты на проверку.`
+      : `Искать коммит, который принёс ошибку, между ${good} (ошибки нет) и ${bad} (ошибка есть)?\n\nGit будет по одному выдавать коммиты на проверку, ответы принимает полоса над логом.`,
+  menuBisectStartBad: () => "Искать коммит с ошибкой: здесь ошибка есть…",
+  menuBisectBetween: () => "Искать коммит с ошибкой между выбранными…",
+  menuBisectMark: (role, term) =>
+    role === "skip"
+      ? "Bisect: не проверить · пропустить"
+      : term !== null
+        ? `Bisect: отметить «${term}»`
+        : role === "bad"
+          ? "Bisect: здесь ошибка есть"
+          : "Bisect: здесь ошибки нет",
+  whyBisectNeedsTwo: () => "выделите ровно два коммита: новый — с ошибкой, старый — без неё",
+  whyBisectRunning: () => "идёт поиск коммита с ошибкой (bisect) — сначала закончите его",
+  whyBisectBroken: () => "состояние bisect не читается — можно только закончить",
+  whyBisectNoCommit: () => "нет коммита на проверке",
+  bisectChip: (kind, bad, good) => {
+    switch (kind) {
+      case "culprit":
+        return bad === null ? "первый плохой" : `первый ${bad}`;
+      case "bad":
+        return bad ?? "плохой";
+      case "good":
+        return good ?? "хороший";
+      case "skip":
+        return "пропущен";
+      case "testing":
+        return "проверяется";
+      default:
+        return "кандидат";
+    }
+  },
+  bisectChipTip: (kind) => {
+    switch (kind) {
+      case "culprit":
+        return "Bisect: первый плохой коммит — поиск закончился здесь";
+      case "bad":
+        return "Bisect: плохая граница диапазона — ошибка здесь есть";
+      case "good":
+        return "Bisect: отмечен — ошибки здесь нет";
+      case "skip":
+        return "Bisect: пропущен — этот коммит не удалось проверить";
+      case "testing":
+        return "Bisect: выдан на текущую проверку";
+      default:
+        return "Bisect: остались только пропущенные — первый плохой может быть этим";
+    }
+  },
   // Менеджер стешей
   stashesTitle: () => "Спрятанные изменения",
   stashesTip: () => "Спрятанные изменения",

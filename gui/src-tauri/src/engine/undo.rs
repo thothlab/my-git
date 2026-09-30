@@ -147,7 +147,9 @@ pub(crate) fn capture(repo: &Path, extra: &[String]) -> Result<Snapshot> {
             .run()?
             .checked()?,
     );
-    let operation = ops::detect_state(repo)?.kind;
+    // The kind alone, from the markers: a bisect whose log does not parse must not
+    // make every snapshot — and so every action — fail.
+    let operation = ops::detect_kind(repo)?;
 
     let mut snap = Snapshot {
         head: None,
@@ -865,6 +867,14 @@ fn classify(
         } else {
             Verdict::Nothing
         };
+    }
+    // A bisect moves HEAD through history on git's schedule and keeps its own
+    // marks; nothing here can be reversed step by step, before, during or after.
+    if action.starts_with("op_bisect")
+        || b.operation == OperationKind::Bisect
+        || a.operation == OperationKind::Bisect
+    {
+        return cx.brk(UndoReasonCode::Bisect);
     }
     if !ok {
         return cx.brk(UndoReasonCode::Failed);
@@ -2041,6 +2051,52 @@ mod tests {
             branches::rebase_onto(p, "main")
         });
         assert_eq!(r.reason(), UndoReasonCode::History);
+    }
+
+    /// Starting, answering and ending a bisect each end the chain with the bisect
+    /// named as the reason — not "an unfinished merge, rebase…" — and an action
+    /// taken during a bisect cannot start a new chain either.
+    #[test]
+    fn a_bisect_ends_the_chain() {
+        use crate::engine::bisect;
+        let r = Rig::new();
+        let p = r.p();
+        for i in 2..=5 {
+            std::fs::write(p.join("a.txt"), format!("{i}\n")).unwrap();
+            g(p, &["commit", "-qam", &format!("c{i}")]);
+        }
+        let first = g(p, &["rev-list", "--max-parents=0", "HEAD"]).trim().to_string();
+        g(p, &["branch", "side"]);
+        r.act("branch_checkout", Hint::args(["side"]), || {
+            CliEngine::new(p).checkout("side", false)
+        });
+        assert!(r.state().undo.id.is_some(), "a chain to end");
+
+        r.act("op_bisect_start", Hint::none(), || {
+            bisect::start(p, None, &[first.clone()])
+        });
+        let s = r.state();
+        assert!(s.undo.id.is_none());
+        assert_eq!(s.undo.reason.as_ref().unwrap().code, UndoReasonCode::Bisect);
+        assert_eq!(
+            s.undo.reason.unwrap().action.as_deref(),
+            Some("op_bisect_start")
+        );
+
+        r.act("op_bisect_mark", Hint::args(["good"]), || {
+            bisect::mark(p, "good", None)
+        });
+        assert_eq!(r.reason(), UndoReasonCode::Bisect);
+
+        g(p, &["tag", "during"]);
+        r.act("tag_create", Hint::args(["during2"]), || {
+            ops::tag_create(p, "HEAD", "during2", None)
+        });
+        assert_eq!(r.reason(), UndoReasonCode::Bisect, "no step is recorded mid-bisect");
+
+        r.act("op_bisect_reset", Hint::none(), || bisect::reset(p));
+        assert_eq!(r.reason(), UndoReasonCode::Bisect);
+        assert_eq!(g(p, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(), "side");
     }
 
     #[test]

@@ -68,6 +68,12 @@ const WATCH_ROOT_FILES: &[&str] = &[
     "MERGE_HEAD",
     "CHERRY_PICK_HEAD",
     "REVERT_HEAD",
+    // A bare `git bisect start` moves neither HEAD nor a ref: these are all it
+    // writes. `BISECT_HEAD` is the commit under test of a `--no-checkout` bisect.
+    "BISECT_START",
+    "BISECT_LOG",
+    "BISECT_TERMS",
+    "BISECT_HEAD",
     "packed-refs",
 ];
 
@@ -325,6 +331,10 @@ mod tests {
             "MERGE_HEAD",
             "CHERRY_PICK_HEAD",
             "REVERT_HEAD",
+            "BISECT_START",
+            "BISECT_LOG",
+            "BISECT_TERMS",
+            "BISECT_HEAD",
             "packed-refs",
             "refs",
             "refs/heads/main",

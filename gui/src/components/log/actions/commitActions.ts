@@ -7,8 +7,11 @@ import {
   commitReset,
   commitResetLostCount,
   commitRevert,
+  opBisectMark,
+  opBisectStart,
   tagCreate,
   WORKING_TREE,
+  type BisectMark,
   type LogCommit,
   type RebaseRange,
   type RepoState,
@@ -22,7 +25,8 @@ import { setCompareTarget } from "./compareSelection";
 import { openDialog } from "./dialogs";
 import { openRebasePlan } from "../../rebase/RebasePanel";
 import { runOpensRange, squashMessage, squashRun } from "../../rebase/rebaseRules";
-import { afterRepoChange, localChangesNow, operationActive, runResult } from "./repoRefresh";
+import { afterRepoChange, localChangesNow, operationActive, operationReason, runResult } from "./repoRefresh";
+import { customTerm } from "../bisectMarks";
 
 /**
  * Actions over commits and the log's context menu.
@@ -154,6 +158,74 @@ export async function resetToCommit(commit: LogCommit): Promise<void> {
   afterRepoChange();
 }
 
+// ── Bisect: the search for the commit that brought a bug in ──────────────────
+
+/**
+ * Start a bisect from the log. One commit: it has the bug, and the search then
+ * waits for a commit without it (the strip says so, the menu offers the mark).
+ * Two commits: the newer one in the log's order has the bug, the older one does
+ * not — git checks out the first commit to test straight away. A pair the other
+ * way round is git's to refuse, word for word.
+ */
+export async function startBisect(targets: LogCommit[]): Promise<void> {
+  if (targets.length !== 1 && targets.length !== 2) return;
+  const [bad, good] = targets; // display order is newest first
+  const ok = await confirmAction(d().confirmBisectStart(bad.shortHash, good ? good.shortHash : null), false);
+  if (!ok) return;
+  await run(opBisectStart(bad.hash, good ? [good.hash] : []), d().phaseBisect());
+  afterRepoChange();
+}
+
+/** Answer for one commit; `null` — the commit under test. The checkout that
+ *  follows moves HEAD, so the log and the tree are re-read. */
+export async function markBisect(mark: BisectMark, hash: string | null): Promise<void> {
+  await run(opBisectMark(mark, hash), d().phaseBisect());
+  afterRepoChange();
+}
+
+/** The menu's bisect items: start one, or — while one runs — answer for a commit. */
+function bisectItems(targets: LogCommit[], one: LogCommit | null): MenuEntry[] {
+  const op = state()?.operation;
+  const b = op?.bisect ?? null;
+  if (!b) {
+    const reason = operationReason();
+    return [
+      {
+        label: d().menuBisectStartBad(),
+        disabled: !!reason || !one,
+        reason: reason ?? (one ? undefined : d().whyOneCommitOnly()),
+        run: () => void startBisect(targets),
+      },
+      {
+        label: d().menuBisectBetween(),
+        disabled: !!reason || targets.length !== 2,
+        reason: reason ?? (targets.length === 2 ? undefined : d().whyBisectNeedsTwo()),
+        run: () => void startBisect(targets),
+      },
+    ];
+  }
+  const why =
+    op?.kind !== "bisect"
+      ? d().whyOperationRunning()
+      : b.problem
+        ? d().whyBisectBroken()
+        : one
+          ? undefined
+          : d().whyOneCommitOnly();
+  const item = (mark: BisectMark): MenuEntry => ({
+    label: d().menuBisectMark(
+      mark,
+      mark === "bad" ? customTerm(b.termBad, "bad") : mark === "good" ? customTerm(b.termGood, "good") : null,
+    ),
+    disabled: !!why,
+    reason: why,
+    run: () => {
+      if (one) void markBisect(mark, one.hash);
+    },
+  });
+  return [item("bad"), item("good"), item("skip")];
+}
+
 // ── Rewriting history: reword, squash, interactive rebase ────────────────────
 
 /**
@@ -267,7 +339,7 @@ export function commitMenuItems(
   const n = targets.length;
   const one = n === 1 ? targets[0] : null;
   const busyOp = operationActive();
-  const opReason = busyOp ? d().whyOperationRunning() : undefined;
+  const opReason = operationReason();
   const detached = !!state()?.detached;
   /** Reason a single-commit action cannot run right now, or undefined. */
   const singleReason = busyOp ? opReason : one ? undefined : d().whyOneCommitOnly();
@@ -389,6 +461,9 @@ export function commitMenuItems(
       if (one && range) void rebaseFromCommit(one, range);
     },
   });
+
+  items.push({ kind: "sep" });
+  items.push(...bisectItems(targets, one));
 
   return items;
 }

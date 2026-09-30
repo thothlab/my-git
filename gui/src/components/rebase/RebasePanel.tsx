@@ -128,7 +128,9 @@ function RebaseView(props: { target: Target }) {
       d().phaseRebaseInteractive(),
     );
     setRunning(false);
-    const stopped = (state()?.operation?.kind ?? "none") !== "none";
+    // A bisect is not a stop of this rebase (and refuses it before git runs).
+    const kind = state()?.operation?.kind ?? "none";
+    const stopped = kind !== "none" && kind !== "bisect";
     // Refused before git ran (a stale plan, a dirty tree): the plan stays on
     // screen with the reason. Anything else changed the repository — a finished
     // rebase, or one stopped on a conflict or an `edit`, which the operation

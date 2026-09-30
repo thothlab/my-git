@@ -100,7 +100,10 @@ function closeConflict(restore = true): void {
 function conflictedNow(): string[] {
   const s = state();
   if (!s) return [];
-  if (s.operation.kind !== "none") return s.operation.conflicted.map((c) => c.path);
+  // A bisect has no conflicts of its own: a `stash pop` that collided during one
+  // is read like one with no operation at all.
+  if (s.operation.kind !== "none" && s.operation.kind !== "bisect")
+    return s.operation.conflicted.map((c) => c.path);
   return s.changelists.flatMap((c) => c.files).filter((f) => f.status === "conflicted").map((f) => f.path);
 }
 
@@ -836,7 +839,10 @@ function Finished(props: {
       <Show
         when={props.next}
         fallback={
-          <Show when={op() !== "none"} fallback={<div class="text-fg-muted">{d().conflictNoneLeft()}</div>}>
+          <Show
+            when={op() !== "none" && op() !== "bisect"}
+            fallback={<div class="text-fg-muted">{d().conflictNoneLeft()}</div>}
+          >
             <div>{d().conflictAllResolved(operationWord(op()))}</div>
             <div class="flex gap-2">
               <Btn label={d().opContinue()} accent disabled={busy()} onClick={props.onContinue} />

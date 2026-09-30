@@ -453,6 +453,11 @@ pub enum OperationKind {
     Rebase,
     CherryPick,
     Revert,
+    /// `git bisect` — the search for the commit that brought a bug in. The lowest
+    /// priority of all: a cherry-pick stopped on a conflict in the middle of a
+    /// bisect is reported as the cherry-pick, and `OperationState.bisect` still
+    /// carries the search.
+    Bisect,
 }
 
 /// State of an unfinished operation. `kind: None` means the repository is calm.
@@ -474,6 +479,51 @@ pub struct OperationState {
     /// `amend` marker: git writes that one for a failed squash too.
     #[serde(default)]
     pub edit_stop: Option<String>,
+    /// The bisect under way, whatever `kind` says: filled whenever git's
+    /// `BISECT_START` exists, so a merge stopped inside a bisect does not hide the
+    /// search (`kind` names the innermost operation, the one to finish first).
+    #[serde(default)]
+    pub bisect: Option<BisectState>,
+}
+
+/// A `git bisect` in progress, read by `engine::bisect` from the files git keeps
+/// for it (`BISECT_START`, `BISECT_TERMS`, `BISECT_LOG`) and from `refs/bisect/*`.
+///
+/// `term_bad` / `term_good` are the repository's words — `bad` / `good` unless the
+/// bisect was started with `--term-new` / `--term-old` (or `--term-bad` / `--term-good`).
+/// Every hash is a full object id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BisectState {
+    pub term_bad: String,
+    pub term_good: String,
+    /// The branch `git bisect reset` goes back to; `None` when the bisect started
+    /// on a detached HEAD — then `start_commit` is where it goes back to.
+    pub start_branch: Option<String>,
+    pub start_commit: Option<String>,
+    /// The commit under test: what `git bisect good` without a revision marks —
+    /// HEAD, or `BISECT_HEAD` for a `--no-checkout` bisect.
+    pub current: Option<String>,
+    pub current_subject: Option<String>,
+    /// The bad end of the range (`refs/bisect/<term_bad>`); git keeps only the
+    /// newest bad answer.
+    pub bad: Option<String>,
+    pub good: Vec<String>,
+    pub skip: Vec<String>,
+    /// The answer: the first bad commit, once git has named it and no later mark
+    /// reopened the search.
+    pub first_bad: Option<String>,
+    pub first_bad_subject: Option<String>,
+    /// Only skipped commits were left: the first bad commit is one of these.
+    pub candidates: Vec<String>,
+    /// Revisions left to test after the current one, and roughly how many steps
+    /// that takes — `git rev-list --bisect-vars`, the numbers git itself prints.
+    /// `None` while either end of the range is unknown, or once it is over.
+    pub remaining: Option<u32>,
+    pub steps: Option<u32>,
+    /// `BISECT_LOG` or `refs/bisect/*` could not be read: the parse error, word for
+    /// word. The bisect is still reported (so it can be ended); the marks are not.
+    pub problem: Option<String>,
 }
 
 /// One command of an interactive rebase plan (git's todo verbs, `break`/`exec`
@@ -884,6 +934,9 @@ pub enum UndoReasonCode {
     NoNext,
     /// An Undo / Redo stopped halfway; the repository needs a look.
     InverseFailed,
+    /// A bisect was under way before or after the action: its checkouts move
+    /// HEAD through history on git's schedule, not the user's.
+    Bisect,
 }
 
 /// `action` names the command (`push`, `branch_rebase_onto`, …) where the reason is

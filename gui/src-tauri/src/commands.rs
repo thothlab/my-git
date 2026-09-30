@@ -10,7 +10,7 @@ use crate::engine::GitEngine;
 use crate::error::{Error, Result};
 use crate::engine::exec::{self, mask_credentials};
 use crate::engine::{
-    blame as blame_engine, branches, commit as commit_engine, conflict as conflict_engine, discard, file_history as file_history_engine, log as log_engine, ops,
+    bisect, blame as blame_engine, branches, commit as commit_engine, conflict as conflict_engine, discard, file_history as file_history_engine, log as log_engine, ops,
     rebase,
     undo::{self, Hint},
 };
@@ -846,6 +846,48 @@ pub async fn op_abort(state: State<'_, AppState>) -> Result<RepoState> {
 pub async fn op_skip(state: State<'_, AppState>) -> Result<RepoState> {
     let data = state.data_dir_opt();
     undoable(&state, "op_skip", Hint::none(), || ops::op_skip(&state.repo_path()?, data.as_deref()))?;
+    build_state(&state)
+}
+
+/// Start a bisect (`engine::bisect`): `bad` is the commit with the bug — HEAD when
+/// absent — and `good` the commits without it (none: git waits for one). What it
+/// is doing afterwards travels in `RepoState.operation.bisect`.
+#[tauri::command]
+pub async fn op_bisect_start(
+    state: State<'_, AppState>,
+    bad: Option<String>,
+    good: Vec<String>,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    undoable(&state, "op_bisect_start", Hint::none(), || {
+        bisect::start(&repo, bad.as_deref(), &good)
+    })?;
+    build_state(&state)
+}
+
+/// Answer for a commit — `mark` is the role `bad`, `good` or `skip`, spelled with
+/// the repository's own terms on the way to git; `hash` absent means the commit
+/// under test.
+#[tauri::command]
+pub async fn op_bisect_mark(
+    state: State<'_, AppState>,
+    mark: String,
+    hash: Option<String>,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    undoable(&state, "op_bisect_mark", Hint::args([mark.as_str()]), || {
+        bisect::mark(&repo, &mark, hash.as_deref())
+    })?;
+    build_state(&state)
+}
+
+/// End the bisect: back to the branch it started from (`git bisect reset`).
+/// Separate from `op_abort`, which ends the *innermost* operation — a cherry-pick
+/// stopped inside a bisect first.
+#[tauri::command]
+pub async fn op_bisect_reset(state: State<'_, AppState>) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    undoable(&state, "op_bisect_reset", Hint::none(), || bisect::reset(&repo))?;
     build_state(&state)
 }
 

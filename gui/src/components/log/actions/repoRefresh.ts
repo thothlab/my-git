@@ -1,5 +1,6 @@
 import { createSignal } from "solid-js";
 import { repoLocalChanges, type RepoState } from "../../../api";
+import { d } from "../../../i18n";
 import { error, run, state } from "../../../store";
 import { loaded, refreshLog } from "../../../logStore";
 
@@ -45,10 +46,19 @@ export function afterRepoChange(opts: { log?: boolean; tree?: boolean } = {}): v
   if (opts.log !== false && loaded()) void refreshLog();
 }
 
-/** Is a merge / rebase / cherry-pick / revert unfinished right now? */
+/** Is a merge / rebase / cherry-pick / revert / bisect unfinished right now? */
 export const operationActive = (): boolean => {
   const k = state()?.operation?.kind;
   return !!k && k !== "none";
+};
+
+/** Why an action waits for the unfinished operation, or undefined when none
+ *  is — a bisect is named as such: "an unfinished operation" reads like a merge
+ *  gone wrong to someone who only started a search. */
+export const operationReason = (): string | undefined => {
+  const k = state()?.operation?.kind;
+  if (!k || k === "none") return undefined;
+  return k === "bisect" ? d().whyBisectRunning() : d().whyOperationRunning();
 };
 
 /**
