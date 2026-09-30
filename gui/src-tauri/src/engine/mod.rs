@@ -19,6 +19,7 @@ pub mod rebase;
 pub mod remotes;
 pub mod signature;
 pub mod undo;
+pub mod worktrees;
 
 /// Abstraction over the git backend.
 ///

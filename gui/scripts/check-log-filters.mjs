@@ -37,6 +37,8 @@
  *     the "by age" graph colouring;
  *   - `src/components/backgroundFetchRules.ts` - when the scheduled background
  *     fetch is due and what holds a due one back;
+ *   - `src/components/worktreeRules.ts` - what a row of the Worktrees dialog may
+ *     do and why not, which branches a new worktree can take;
  *   - `src/components/log/signatureRules.ts` - how alarming a signature verdict is
  *     and which explanation fits it (SSH and OpenPGP fail differently).
  *
@@ -83,6 +85,7 @@ await build({
     join(here, "..", "src", "components", "cloneRules.ts"),
     join(here, "..", "src", "components", "coAuthorRules.ts"),
     join(here, "..", "src", "components", "backgroundFetchRules.ts"),
+    join(here, "..", "src", "components", "worktreeRules.ts"),
   ],
   outdir: out,
   format: "esm",
@@ -168,6 +171,7 @@ const bm = await load("bisectMarks.js");
 const clone = await load("cloneRules.js");
 const co = await load("coAuthorRules.js");
 const bf = await load("backgroundFetchRules.js");
+const wt = await load("worktreeRules.js");
 const fu = await load("forgeUrl.js");
 const ag = await load("ageColor.js");
 const sig = await load("signatureRules.js");
@@ -1281,6 +1285,65 @@ for (const argv of [
     [bf.normalizeInterval("15"), bf.normalizeInterval("7"), bf.normalizeInterval(null), bf.normalizeInterval(60)],
     [15, 0, 0, 60],
     "a stored value that is not an interval reads as Off",
+  );
+}
+
+// -- Worktrees dialog (worktreeRules.ts) -----------------------------------------
+{
+  const row = (o) => ({
+    path: "/r",
+    branch: "main",
+    bare: false,
+    locked: false,
+    prunable: false,
+    isMain: false,
+    isCurrent: false,
+    ...o,
+  });
+  const main = row({ path: "/src/app", isMain: true, isCurrent: true });
+  const side = row({ path: "/src/app-side", branch: "side" });
+  const locked = row({ path: "/src/app-l", branch: "l", locked: true });
+  const gone = row({ path: "/src/app-g", branch: null, prunable: true });
+  const bare = row({ path: "/src/bare", branch: null, bare: true, isMain: true });
+  const all = [main, side, locked, gone];
+  eq(
+    [main, side, locked, gone, bare].map(wt.openBlock),
+    ["current", null, null, "prunable", "bare"],
+    "Open: not the open one, not a missing folder, not a bare repository",
+  );
+  eq(
+    [main, side, locked, gone, row({ path: "/x", isCurrent: true })].map(wt.removeBlock),
+    ["main", null, "locked", "prunable", "current"],
+    "Remove: never the main or the open one; locked asks to unlock; a missing folder is pruned",
+  );
+  eq([wt.lockBlock(main), wt.lockBlock(side)], ["main", null], "git refuses to lock the main worktree");
+  eq(wt.checkedOutIn("side", all)?.path, "/src/app-side", "where a branch is checked out");
+  eq(wt.checkedOutIn("free", all), null, "a free branch is checked out nowhere");
+  eq(
+    wt.freeBranches(["main", "side", "free", "l"], all),
+    ["free"],
+    "existing-branch mode offers only branches no worktree holds",
+  );
+  eq([wt.hasPrunable(all), wt.hasPrunable([main, side])], [true, false], "clean-up is offered only with missing folders");
+  eq(
+    [wt.folderOf("/src/app-side/"), wt.folderOf("C:\\w\\x"), wt.folderOf("/")],
+    ["app-side", "x", "/"],
+    "row title is the folder name",
+  );
+  const input = (o) => ({ create: true, branch: "fix", path: "/src/app-fix", worktrees: all, local: ["main", "side"], ...o });
+  eq(
+    [
+      wt.createBlock(input({})),
+      wt.createBlock(input({ branch: "  " })),
+      wt.createBlock(input({ branch: "side" })),
+      wt.createBlock(input({ create: false, branch: "side" })),
+      wt.createBlock(input({ create: false, branch: "free" })),
+      wt.createBlock(input({ path: " " })),
+      wt.createBlock(input({ path: "../app-fix" })),
+      wt.createBlock(input({ path: "C:\\src\\fix" })),
+    ],
+    [null, "no-branch", "exists", "taken", null, "no-path", "relative-path", null],
+    "create form: a branch, not an existing name for a new one, not one held elsewhere, an absolute folder",
   );
 }
 

@@ -304,6 +304,8 @@ const en = {
         return "a bisect (the search for the commit with the bug) was involved — its checkouts cannot be taken back step by step";
       case "remotes":
         return "a remote was renamed or removed — the branches tracking it changed with it";
+      case "worktrees":
+        return "a worktree was added — its branch is checked out there, and taking steps back could pull it from under that folder";
       default:
         return `${name} cannot be undone`;
     }
@@ -806,6 +808,72 @@ const en = {
   phaseDiscardRestore: () => "restore",
   restoreDiscardedMenu: () => "Restore discarded…",
   restoreDiscardedNoRepo: () => "Open a repository first",
+  // Worktrees (WorktreesPanel)
+  worktreesMenu: () => "Worktrees…",
+  worktreesTitle: () => "Worktrees",
+  worktreesIntro: () =>
+    "Each worktree is a second checkout of this repository in its own folder, on its own branch: fix something urgent without stashing the work here.",
+  worktreeBadgeCurrent: () => "open",
+  worktreeBadgeMain: () => "main",
+  worktreeBadgeLocked: () => "locked",
+  worktreeBadgePrunable: () => "folder missing",
+  worktreeDetached: (hash: string) => (hash ? `detached at ${hash}` : "detached"),
+  worktreeBare: () => "bare repository",
+  worktreeUnborn: () => "no commits yet",
+  worktreeLockedBy: (reason: string | null) => (reason ? `Locked: ${reason}` : "Locked"),
+  worktreeMissing: (reason: string | null) => `Folder missing${reason ? `: ${reason}` : ""}`,
+  worktreeOpenBtn: () => "Open",
+  worktreeCreateBtn: () => "Create…",
+  worktreeRemoveBtn: () => "Remove…",
+  worktreeLockBtn: () => "Lock…",
+  worktreeUnlockBtn: () => "Unlock",
+  worktreePruneBtn: () => "Clean up missing",
+  worktreeSelectOne: () => "Select a worktree",
+  worktreesKeys: () => "↑↓ select · Enter open · Delete remove · Esc close",
+  whyWorktreeOpenCurrent: () => "this worktree is open in the window",
+  whyWorktreeOpenPrunable: () => "its folder is gone",
+  whyWorktreeOpenBare: () => "a bare repository has no files to show",
+  whyWorktreeRemoveMain: () => "the main worktree holds the repository itself",
+  whyWorktreeRemoveCurrent: () => "it is open in the window — open another worktree to remove this one",
+  whyWorktreeRemoveLocked: () => "it is locked — unlock it first",
+  whyWorktreeRemovePrunable: () => "its folder is gone — clean up missing worktrees instead",
+  whyWorktreeLockMain: () => "git does not lock the main worktree",
+  whyWorktreeNoPrunable: () => "every worktree folder is in place",
+  worktreeFormTitle: () => "New worktree",
+  worktreeModeNew: () => "New branch",
+  worktreeModeExisting: () => "Existing branch",
+  worktreeBranchLabel: () => "Branch name",
+  worktreeStartLabel: () => "Start at (branch, tag or commit)",
+  worktreeExistingLabel: () => "Branch",
+  worktreeNoFreeBranch: () => "every local branch is checked out somewhere",
+  worktreePathLabel: () => "Folder",
+  worktreePathNote: () => "Must not exist yet, or be an empty folder.",
+  worktreeChooseFolder: () => "Choose…",
+  worktreeFolderDialog: () => "Folder for the new worktree",
+  worktreeOpenAfter: () => "Open it in this window",
+  worktreeCreateSubmit: () => "Create",
+  worktreeTakenNote: (branch: string, path: string) =>
+    `"${branch}" is already checked out in ${path}. A branch can be checked out in one worktree at a time.`,
+  whyWorktreeNoBranch: () => "enter a branch name",
+  whyWorktreeExists: () => "a branch with this name exists — choose it under Existing branch",
+  whyWorktreeTaken: () => "this branch is checked out in another worktree",
+  whyWorktreeNoPath: () => "choose a folder",
+  whyWorktreeRelativePath: () => "the folder must be an absolute path",
+  confirmWorktreeRemove: (path: string, branch: string | null) =>
+    `Remove the worktree ${path}?\n\nIts folder is deleted. ` +
+    (branch ? `The branch "${branch}" and its commits stay in the repository.` : "Its commits stay in the repository."),
+  confirmWorktreeRemoveForce: (path: string) =>
+    `${path} has uncommitted or untracked files.\n\nRemoving it anyway (git worktree remove --force) deletes them for good — there is no backup and no Undo.`,
+  worktreeLockPrompt: () => "Lock the worktree — reason (optional)",
+  phaseWorktreeAdd: () => "worktree add",
+  phaseWorktreeRemove: () => "worktree remove",
+  phaseWorktreeLock: () => "worktree lock",
+  phaseWorktreeUnlock: () => "worktree unlock",
+  phaseWorktreePrune: () => "worktree prune",
+  worktreeLinkedBadge: () => "worktree",
+  worktreeLinkedOf: (main: string) => `Linked worktree of ${main}`,
+  menuOpenInWorktree: () => "Open in new worktree…",
+  whyWorktreeHere: () => "this branch is checked out here",
   // Remotes (RemotesPanel) and clone (CloneDialog)
   remotesMenu: () => "Remotes…",
   cloneMenu: () => "Clone…",
@@ -1342,6 +1410,8 @@ const ru: Dict = {
         return "затронут bisect (поиск коммита с ошибкой) — его переключения не откатываются по шагам";
       case "remotes":
         return "remote переименован или удалён — вместе с ним поменялись ветки, которые его отслеживали";
+      case "worktrees":
+        return "добавлен worktree — его ветка выгружена там, и шаги назад могли бы выдернуть её из-под той папки";
       default:
         return `${name} нельзя отменить`;
     }
@@ -1844,6 +1914,72 @@ const ru: Dict = {
     `Эти файлы изменились после отката:\n\n${paths.join("\n")}\n\nВсё равно восстановить? Их текущие версии сначала будут сохранены в копию, так что и это можно будет вернуть.`,
   phaseDiscardRestore: () => "восстановление",
   restoreDiscardedMenu: () => "Восстановить откаченное…",
+  // Worktrees (WorktreesPanel)
+  worktreesMenu: () => "Worktrees…",
+  worktreesTitle: () => "Worktrees",
+  worktreesIntro: () =>
+    "Каждый worktree — вторая рабочая папка этого репозитория на своей ветке: чините срочное, не убирая текущую работу в стеш.",
+  worktreeBadgeCurrent: () => "открыт",
+  worktreeBadgeMain: () => "главный",
+  worktreeBadgeLocked: () => "заблокирован",
+  worktreeBadgePrunable: () => "папки нет",
+  worktreeDetached: (hash: string) => (hash ? `detached на ${hash}` : "detached"),
+  worktreeBare: () => "bare-репозиторий",
+  worktreeUnborn: () => "коммитов ещё нет",
+  worktreeLockedBy: (reason: string | null) => (reason ? `Заблокирован: ${reason}` : "Заблокирован"),
+  worktreeMissing: (reason: string | null) => `Папки нет${reason ? `: ${reason}` : ""}`,
+  worktreeOpenBtn: () => "Открыть",
+  worktreeCreateBtn: () => "Создать…",
+  worktreeRemoveBtn: () => "Удалить…",
+  worktreeLockBtn: () => "Заблокировать…",
+  worktreeUnlockBtn: () => "Разблокировать",
+  worktreePruneBtn: () => "Очистить пропавшие",
+  worktreeSelectOne: () => "Выберите worktree",
+  worktreesKeys: () => "↑↓ выбор · Enter открыть · Delete удалить · Esc закрыть",
+  whyWorktreeOpenCurrent: () => "этот worktree открыт в окне",
+  whyWorktreeOpenPrunable: () => "его папки больше нет",
+  whyWorktreeOpenBare: () => "у bare-репозитория нет файлов",
+  whyWorktreeRemoveMain: () => "главный worktree хранит сам репозиторий",
+  whyWorktreeRemoveCurrent: () => "он открыт в окне — откройте другой worktree, чтобы удалить этот",
+  whyWorktreeRemoveLocked: () => "он заблокирован — сначала разблокируйте",
+  whyWorktreeRemovePrunable: () => "его папки нет — очистите пропавшие",
+  whyWorktreeLockMain: () => "git не блокирует главный worktree",
+  whyWorktreeNoPrunable: () => "папки всех worktree на месте",
+  worktreeFormTitle: () => "Новый worktree",
+  worktreeModeNew: () => "Новая ветка",
+  worktreeModeExisting: () => "Существующая ветка",
+  worktreeBranchLabel: () => "Имя ветки",
+  worktreeStartLabel: () => "Начать от (ветка, тег или коммит)",
+  worktreeExistingLabel: () => "Ветка",
+  worktreeNoFreeBranch: () => "каждая локальная ветка где-то выгружена",
+  worktreePathLabel: () => "Папка",
+  worktreePathNote: () => "Её не должно быть, или она должна быть пустой.",
+  worktreeChooseFolder: () => "Выбрать…",
+  worktreeFolderDialog: () => "Папка для нового worktree",
+  worktreeOpenAfter: () => "Открыть его в этом окне",
+  worktreeCreateSubmit: () => "Создать",
+  worktreeTakenNote: (branch: string, path: string) =>
+    `«${branch}» уже выгружена в ${path}. Ветка может быть выгружена только в одном worktree.`,
+  whyWorktreeNoBranch: () => "введите имя ветки",
+  whyWorktreeExists: () => "ветка с таким именем есть — выберите её в «Существующая ветка»",
+  whyWorktreeTaken: () => "эта ветка выгружена в другом worktree",
+  whyWorktreeNoPath: () => "выберите папку",
+  whyWorktreeRelativePath: () => "путь к папке должен быть абсолютным",
+  confirmWorktreeRemove: (path: string, branch: string | null) =>
+    `Удалить worktree ${path}?\n\nЕго папка будет удалена. ` +
+    (branch ? `Ветка «${branch}» и её коммиты останутся в репозитории.` : "Его коммиты останутся в репозитории."),
+  confirmWorktreeRemoveForce: (path: string) =>
+    `В ${path} есть незакоммиченные или неотслеживаемые файлы.\n\nУдалить всё равно (git worktree remove --force)? Они пропадут насовсем — ни копии, ни Undo.`,
+  worktreeLockPrompt: () => "Заблокировать worktree — причина (необязательно)",
+  phaseWorktreeAdd: () => "worktree add",
+  phaseWorktreeRemove: () => "worktree remove",
+  phaseWorktreeLock: () => "worktree lock",
+  phaseWorktreeUnlock: () => "worktree unlock",
+  phaseWorktreePrune: () => "worktree prune",
+  worktreeLinkedBadge: () => "worktree",
+  worktreeLinkedOf: (main: string) => `Linked worktree репозитория ${main}`,
+  menuOpenInWorktree: () => "Открыть в новом worktree…",
+  whyWorktreeHere: () => "эта ветка выгружена здесь",
   restoreDiscardedNoRepo: () => "Сначала откройте репозиторий",
   remotesMenu: () => "Remotes…",
   cloneMenu: () => "Клонировать…",

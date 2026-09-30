@@ -43,6 +43,9 @@ export interface RepoState {
   /** `user.email` of this repository, or null when git has none configured.
    * The log tells the reader's own commits apart by it (R45i). */
   userEmail?: string | null;
+  /** The main worktree's path when the open folder is a linked worktree; null for
+   *  the main worktree (and a submodule). */
+  linkedWorktreeOf?: string | null;
 }
 
 // Error shape returned by Rust commands (see error.rs). Always carries a message;
@@ -335,6 +338,42 @@ export const remoteRemove = (name: string) => invoke<RepoState>("remote_remove",
 export const remoteSetUrl = (name: string, url: string, push: boolean) =>
   invoke<RepoState>("remote_set_url", { name, url, push });
 
+// ── Worktrees (engine/worktrees.rs) ──────────────────────────────────────────
+
+/** One worktree of the repository. `branch` — short name, null when detached or
+ *  bare; `head` null on an unborn branch. `isMain` — the first one, which holds the
+ *  repository; `isCurrent` — the one open in the window; `prunable` — its folder is
+ *  gone. */
+export interface WorktreeInfo {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  detached: boolean;
+  bare: boolean;
+  locked: boolean;
+  lockReason: string | null;
+  prunable: boolean;
+  prunableReason: string | null;
+  isMain: boolean;
+  isCurrent: boolean;
+}
+export const worktreeList = () => invoke<WorktreeInfo[]>("worktree_list");
+/** `<main folder>-<branch>` next to the main worktree, numbered while taken. */
+export const worktreeSuggestPath = (branch: string) =>
+  invoke<string>("worktree_suggest_path", { branch });
+/** Whether removing it needs `force` (uncommitted or untracked files). */
+export const worktreeDirty = (path: string) => invoke<boolean>("worktree_dirty", { path });
+/** A new branch `branch` from `start` (null — HEAD) when `create`, else the existing
+ *  local branch. The window stays where it is. */
+export const worktreeAdd = (path: string, branch: string, create: boolean, start: string | null) =>
+  invoke<RepoState>("worktree_add", { path, branch, create, start });
+export const worktreeRemove = (path: string, force: boolean) =>
+  invoke<RepoState>("worktree_remove", { path, force });
+export const worktreeLock = (path: string, reason: string | null) =>
+  invoke<RepoState>("worktree_lock", { path, reason });
+export const worktreeUnlock = (path: string) => invoke<RepoState>("worktree_unlock", { path });
+export const worktreePrune = () => invoke<RepoState>("worktree_prune");
+
 /** Clone into `<parent>/<name>`: the new repository's path, or null when it was
  *  cancelled with `repoCloneCancel`. Not a mutation of the open repository — the
  *  caller opens the result the way "Open" does. */
@@ -418,7 +457,8 @@ export type UndoReasonCode =
   | "no-next"
   | "inverse-failed"
   | "bisect"
-  | "remotes";
+  | "remotes"
+  | "worktrees";
 
 export interface UndoReason {
   code: UndoReasonCode;

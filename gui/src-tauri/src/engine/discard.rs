@@ -15,8 +15,18 @@
 //! then. No path list is kept anywhere a machine reads: every path the discard changed
 //! is in the union of the two trees, and `git diff-tree before after` names exactly
 //! those. The message is for people reading `git log refs/graft/discard`; the only
-//! machine-read parts are two fixed trailers, `Graft-Discard: before|after` and
-//! `Graft-Kind: <DiscardKind>`.
+//! machine-read parts are three fixed trailers, `Graft-Discard: before|after`,
+//! `Graft-Kind: <DiscardKind>` and `Graft-Worktree: <canonical root>`.
+//!
+//! ## One chain, many worktrees
+//!
+//! `refs/` are shared by every worktree of a repository, and so is this chain — on
+//! purpose: a private `refs/worktree/…` is no root for a `gc` run from another
+//! worktree, and the copies would be pruned. A copy belongs to the worktree it was
+//! taken in (`Graft-Worktree`); `list` shows only this worktree's, `restore` and
+//! `stale_paths` refuse another's with `Error::Rule`. Without that a copy from B
+//! restored into A without a word whenever A's files equal B's "after" (both at
+//! HEAD). A copy without the trailer predates it and is the main worktree's.
 //!
 //! The chain holds at most [`CHAIN_LIMIT`] commits. The decision to start over is
 //! taken for the *before* commit only (it becomes a root), so an *after* never lands
@@ -75,6 +85,8 @@ const IDENTITY: &[(&str, &str)] = &[
 
 const ROLE_TRAILER: &str = "Graft-Discard";
 const KIND_TRAILER: &str = "Graft-Kind";
+/// The worktree a copy was taken in: its canonical root ([`owner_key`]).
+const WORKTREE_TRAILER: &str = "Graft-Worktree";
 
 /// How many paths go on one `hash-object` command line.
 const ARGS_CHUNK: usize = 200;
@@ -325,7 +337,25 @@ fn shown(path: &str) -> String {
     }
 }
 
-fn message(before: bool, kind: DiscardKind, paths: &[String]) -> String {
+/// Which worktree `repo` is, as the `Graft-Worktree` trailer spells it: the canonical
+/// root, control characters escaped (a trailer is one line). The same spelling is
+/// computed for reading, so the two compare as strings.
+fn owner_key(repo: &Path) -> String {
+    let root = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+    shown(&root.to_string_lossy())
+}
+
+/// Whether a copy tagged `tag` (`None` — taken before copies were tagged) belongs to
+/// the worktree at `repo`. An untagged copy is the main worktree's: before worktrees
+/// were told apart Graft could not open a linked one at all.
+fn owns(repo: &Path, tag: Option<&str>) -> bool {
+    match tag {
+        Some(t) => t == owner_key(repo),
+        None => matches!(super::worktrees::main_of(repo), Ok(None)),
+    }
+}
+
+fn message(before: bool, kind: DiscardKind, paths: &[String], owner: &str) -> String {
     let n = paths.len();
     let files = if n == 1 {
         "1 file".to_string()
@@ -345,7 +375,7 @@ fn message(before: bool, kind: DiscardKind, paths: &[String]) -> String {
     };
     let list: Vec<String> = paths.iter().map(|p| shown(p)).collect();
     format!(
-        "{subject}\n\n{}\n\n{ROLE_TRAILER}: {}\n{KIND_TRAILER}: {}\n",
+        "{subject}\n\n{}\n\n{ROLE_TRAILER}: {}\n{KIND_TRAILER}: {}\n{WORKTREE_TRAILER}: {owner}\n",
         list.join("\n"),
         if before { "before" } else { "after" },
         kind_name(kind)
@@ -423,7 +453,8 @@ fn with_backup_limit(
         Some(t) if chain_length(repo)? + 2 <= limit => Some(t.as_str()),
         _ => None,
     };
-    let msg = message(true, kind, &files);
+    let owner = owner_key(repo);
+    let msg = message(true, kind, &files, &owner);
     let before = commit(repo, &write_tree(repo, &before_state)?, parent, &msg)?;
     move_ref(
         repo,
@@ -436,7 +467,7 @@ fn with_backup_limit(
 
     let recorded = (|| -> Result<(String, Vec<(String, Entry)>)> {
         let after_state = read_paths(repo, &files, true, true)?;
-        let msg = message(false, kind, &files);
+        let msg = message(false, kind, &files, &owner);
         let after = commit(repo, &write_tree(repo, &after_state)?, Some(&before), &msg)?;
         move_ref(
             repo,
@@ -477,6 +508,8 @@ struct Record {
     at: i64,
     role: String,
     kind: String,
+    /// `Graft-Worktree`, `None` on a copy taken before it was written.
+    worktree: Option<String>,
     /// Paths changed against the first parent.
     paths: Vec<String>,
 }
@@ -487,7 +520,7 @@ fn records(repo: &Path) -> Result<Vec<Record>> {
         return Ok(Vec::new());
     }
     let format = format!(
-        "--format=%x01%H%x00%P%x00%ct%x00%(trailers:key={ROLE_TRAILER},valueonly,separator=%x2C)%x00%(trailers:key={KIND_TRAILER},valueonly,separator=%x2C)"
+        "--format=%x01%H%x00%P%x00%ct%x00%(trailers:key={ROLE_TRAILER},valueonly,separator=%x2C)%x00%(trailers:key={KIND_TRAILER},valueonly,separator=%x2C)%x00%(trailers:key={WORKTREE_TRAILER},valueonly,separator=%x2C)"
     );
     let out = exec::git(
         repo,
@@ -522,7 +555,7 @@ fn parse_records(text: &str) -> Result<Vec<Record>> {
             continue;
         }
         if let Some(hash) = t.strip_prefix('\u{1}') {
-            if i + 4 >= tokens.len() {
+            if i + 5 >= tokens.len() {
                 return Err(Error::Parse(format!("truncated backup record {hash}")));
             }
             let at = tokens[i + 2]
@@ -535,9 +568,12 @@ fn parse_records(text: &str) -> Result<Vec<Record>> {
                 at,
                 role: tokens[i + 3].trim().to_string(),
                 kind: tokens[i + 4].trim().to_string(),
+                worktree: Some(tokens[i + 5].trim())
+                    .filter(|w| !w.is_empty())
+                    .map(str::to_string),
                 paths: Vec::new(),
             });
-            i += 5;
+            i += 6;
             continue;
         }
         let rec = out
@@ -561,6 +597,8 @@ fn parse_records(text: &str) -> Result<Vec<Record>> {
 /// A restorable backup and the commit it restores from.
 struct Pair {
     before: String,
+    /// The worktree it was taken in (`Graft-Worktree` of the *after* commit).
+    worktree: Option<String>,
     entry: DiscardEntry,
 }
 
@@ -582,6 +620,7 @@ fn pairs(repo: &Path) -> Result<Vec<Pair>> {
         };
         out.push(Pair {
             before: prev.hash.clone(),
+            worktree: r.worktree.clone(),
             entry: DiscardEntry {
                 id: r.hash.clone(),
                 at: r.at,
@@ -593,23 +632,39 @@ fn pairs(repo: &Path) -> Result<Vec<Pair>> {
     Ok(out)
 }
 
-/// The newest `limit` restorable backups, newest first.
+/// The newest `limit` restorable backups **of this worktree**, newest first. The
+/// chain is shared by every worktree of the repository (`refs/` are); copies taken
+/// in another one are not shown here.
 pub fn list(repo: &Path, limit: usize) -> Result<Vec<DiscardEntry>> {
+    let mine = owner_key(repo);
+    let main = matches!(super::worktrees::main_of(repo), Ok(None));
     Ok(pairs(repo)?
         .into_iter()
+        .filter(|p| match &p.worktree {
+            Some(t) => *t == mine,
+            None => main,
+        })
         .take(limit)
         .map(|p| p.entry)
         .collect())
 }
 
+/// Backup `id`, refused when it is gone from the chain or was taken in another
+/// worktree: its files belong to that folder, and written here they would land
+/// without a word whenever these files happen to equal its "after" record.
 fn find(repo: &Path, id: &str) -> Result<Pair> {
-    pairs(repo)?
+    let short: String = id.chars().take(12).collect();
+    let pair = pairs(repo)?
         .into_iter()
         .find(|p| p.entry.id == id)
-        .ok_or_else(|| {
-            let short: String = id.chars().take(12).collect();
-            Error::Rule(format!("backup {short} is no longer in {DISCARD_REF}"))
-        })
+        .ok_or_else(|| Error::Rule(format!("backup {short} is no longer in {DISCARD_REF}")))?;
+    if !owns(repo, pair.worktree.as_deref()) {
+        let whose = pair.worktree.as_deref().unwrap_or("the main worktree");
+        return Err(Error::Rule(format!(
+            "backup {short} was taken in another worktree ({whose}); open that worktree to restore it"
+        )));
+    }
+    Ok(pair)
 }
 
 /// One side of a path in `diff-tree`: absent (all-zero mode), or content and mode.
@@ -1327,11 +1382,125 @@ mod tests {
         assert_eq!(names, strings(&["main"]));
     }
 
+    /// A linked worktree next to `main`: (its tempdir holder, its path).
+    fn linked(main: &Path, branch: &str) -> (tempfile::TempDir, PathBuf) {
+        let outer = tempfile::tempdir().unwrap();
+        let at = outer.path().join("linked");
+        git(
+            main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                "--",
+                at.to_str().unwrap(),
+            ],
+        );
+        (outer, at)
+    }
+
+    fn rule_of<T: std::fmt::Debug>(r: Result<T>) -> String {
+        match r {
+            Err(Error::Rule(m)) => m,
+            other => panic!("expected a rule refusal, got {other:?}"),
+        }
+    }
+
+    /// `refs/graft/discard` is shared by every worktree (`refs/` are); a copy is
+    /// tagged with the worktree it was taken in and belongs to it alone. Restored
+    /// into another one it would land silently whenever that one's files happen to
+    /// equal the copy's "after" (both at HEAD) — so it is not listed there, and
+    /// restoring or checking it there is refused.
+    #[test]
+    fn a_backup_from_another_worktree_is_neither_listed_nor_restored() {
+        let dir = scratch_repo();
+        let a = dir.path();
+        let (_keep, b) = linked(a, "side");
+
+        std::fs::write(b.join("a.txt"), "work in b\n").unwrap();
+        let entry = rollback(&b, &["a.txt"]).expect("rolled back in b");
+        assert_eq!(read(&b, "a.txt"), "one\n");
+        assert_eq!(
+            read(a, "a.txt"),
+            "one\n",
+            "a is at HEAD too — the silent case"
+        );
+
+        assert!(
+            list(a, 10).unwrap().is_empty(),
+            "b's copy is not listed in a"
+        );
+        assert_eq!(list(&b, 10).unwrap()[0].id, entry.id);
+
+        let m = rule_of(restore(a, &entry.id, false));
+        assert!(m.contains("another worktree"), "{m}");
+        assert!(rule_of(restore(a, &entry.id, true)).contains("another worktree"));
+        assert!(rule_of(stale_paths(a, &entry.id)).contains("another worktree"));
+        assert_eq!(read(a, "a.txt"), "one\n", "nothing written into a");
+
+        restore(&b, &entry.id, false).unwrap();
+        assert_eq!(read(&b, "a.txt"), "work in b\n");
+    }
+
+    /// Copies taken before worktrees were told apart carry no `Graft-Worktree`
+    /// trailer; they are the main worktree's (where Graft had always been able to
+    /// open a repository), and a linked worktree neither lists nor restores them.
+    #[test]
+    fn an_old_backup_without_a_worktree_trailer_belongs_to_the_main_worktree() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        let (_keep, b) = linked(p, "side");
+
+        let files = strings(&["a.txt"]);
+        let legacy = |role: &str| {
+            format!("Graft: old copy\n\na.txt\n\n{ROLE_TRAILER}: {role}\n{KIND_TRAILER}: files\n")
+        };
+        std::fs::write(p.join("a.txt"), "old work\n").unwrap();
+        let before_state = read_paths(p, &files, true, true).unwrap();
+        let before = commit(
+            p,
+            &write_tree(p, &before_state).unwrap(),
+            None,
+            &legacy("before"),
+        )
+        .unwrap();
+        std::fs::write(p.join("a.txt"), "one\n").unwrap();
+        let after_state = read_paths(p, &files, true, true).unwrap();
+        let after = commit(
+            p,
+            &write_tree(p, &after_state).unwrap(),
+            Some(&before),
+            &legacy("after"),
+        )
+        .unwrap();
+        move_ref(p, &after, None, "legacy").unwrap();
+
+        assert_eq!(
+            list(p, 10).unwrap()[0].id,
+            after,
+            "listed in the main worktree"
+        );
+        assert!(list(&b, 10).unwrap().is_empty(), "not in the linked one");
+        assert!(rule_of(restore(&b, &after, false)).contains("another worktree"));
+
+        restore(p, &after, false).unwrap();
+        assert_eq!(read(p, "a.txt"), "old work\n");
+    }
+
     #[test]
     fn unparsable_backup_records_are_errors() {
-        assert!(parse_records("\u{1}h\0p\0notatime\0after\0files\0").is_err());
-        assert!(parse_records("\u{1}h\0p\0\u{31}\0after\0files\0\nQ\0x\0").is_err());
-        let ok = parse_records("\u{1}h\0p\0\u{31}\0after\0files\0\nA\0x y\0").unwrap();
+        assert!(parse_records("\u{1}h\0p\0notatime\0after\0files\0\0").is_err());
+        assert!(parse_records("\u{1}h\0p\0\u{31}\0after\0files\0\0\nQ\0x\0").is_err());
+        assert!(
+            parse_records("\u{1}h\0p\0\u{31}\0after").is_err(),
+            "truncated"
+        );
+        let ok = parse_records("\u{1}h\0p\0\u{31}\0after\0files\0/w t\0\nA\0x y\0").unwrap();
         assert_eq!(ok[0].paths, strings(&["x y"]));
+        assert_eq!(ok[0].worktree.as_deref(), Some("/w t"));
+        let old = parse_records("\u{1}h\0p\0\u{31}\0after\0files\0\0\nA\0x\0").unwrap();
+        assert_eq!(old[0].worktree, None, "a copy without the trailer");
     }
 }

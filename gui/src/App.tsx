@@ -29,6 +29,7 @@ import StashPanel from "./components/StashPanel";
 import GitConsolePanel, { openGitConsole } from "./components/GitConsolePanel";
 import DiscardPanel from "./components/DiscardPanel";
 import RemotesPanel from "./components/RemotesPanel";
+import WorktreesPanel from "./components/WorktreesPanel";
 import CloneDialog from "./components/CloneDialog";
 import FileHistoryPanel from "./components/FileHistoryPanel";
 import BlamePanel from "./components/blame/BlamePanel";
@@ -281,6 +282,7 @@ export default function App() {
         <DiscardPanel />
         {/* Both opened from the repository menu, which both modes show. */}
         <RemotesPanel />
+        <WorktreesPanel />
         <CloneDialog />
         {/* The interactive rebase plan, opened from the log's menu. */}
         <RebasePanel />

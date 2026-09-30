@@ -223,6 +223,27 @@ pub struct RemoteInfo {
     pub branches: u32,
 }
 
+/// One worktree of the repository (`engine::worktrees`, `git worktree list
+/// --porcelain -z`). `branch` is the short name, `None` when detached (or bare);
+/// `head` is `None` on an unborn branch. `is_main` — the first record, the worktree
+/// that holds the repository; `is_current` — the one open in the window. `prunable`
+/// — its folder is gone and `git worktree prune` would forget it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeInfo {
+    pub path: String,
+    pub head: Option<String>,
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub bare: bool,
+    pub locked: bool,
+    pub lock_reason: Option<String>,
+    pub prunable: bool,
+    pub prunable_reason: Option<String>,
+    pub is_main: bool,
+    pub is_current: bool,
+}
+
 /// Payload of the `repo-clone-progress` event: one line of `git clone --progress`
 /// (a `\r`-redrawn meter arrives as its successive states), masked.
 #[derive(Debug, Clone, Serialize)]
@@ -251,6 +272,9 @@ pub struct RepoState {
     /// Unfinished merge / rebase / cherry-pick / revert, if any. Travels with the
     /// state rather than a separate command — see prd_02 §Контракты и API.
     pub operation: OperationState,
+    /// When the open folder is a **linked** worktree: the main worktree's path (whose
+    /// worktree it is). `None` for the main worktree and for a submodule.
+    pub linked_worktree_of: Option<String>,
 }
 
 // ── History panel (prd_02) ───────────────────────────────────────────────────
@@ -1106,6 +1130,10 @@ pub enum UndoReasonCode {
     /// and the branches tracking it were re-pointed or unset, which an inverse that
     /// puts an upstream back (a deleted branch's) relies on.
     Remotes,
+    /// A worktree was added: its branch is checked out there now, and an inverse
+    /// that deletes or moves that branch (`update-ref` does not ask other
+    /// worktrees) would pull it from under that folder.
+    Worktrees,
 }
 
 /// `action` names the command (`push`, `branch_rebase_onto`, …) where the reason is

@@ -30,9 +30,9 @@ git-dir этого worktree (`.git/worktrees/<имя>/changelists.json`); TUI
 | `cd gui && npm run tauri dev` | Запустить Graft локально (нужен дисплей) |
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
-| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `ageColor`, `signatureRules`, `backgroundFetchRules`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; `lfsRules`; разбор и печать команды консоли), 385 утверждений |
-| `cargo test` | Оба крейта разом: 396 тестов GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 396 тестов |
+| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `ageColor`, `signatureRules`, `backgroundFetchRules`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; `lfsRules`, `worktreeRules`; разбор и печать команды консоли), 394 утверждения |
+| `cargo test` | Оба крейта разом: 411 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 411 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -90,6 +90,8 @@ gui/src-tauri/src/  бэк GUI
                     прогрессом и отменой; правило допустимого адреса (`check_url`)
   engine/undo.rs    Undo / Redo своих действий: снимок + отпечаток до и после каждой мутации,
                     цепочка шагов на репозиторий (память + каталог данных приложения)
+  engine/worktrees.rs worktrees: список (`worktree list --porcelain -z`), add / remove /
+                    lock / unlock / prune, «грязный ли», предлагаемая папка
 gui/src/            фронт
   api.ts            зеркала всех команд в camelCase + типы
   store.ts          глобальное состояние окна, run(), модалки
@@ -104,6 +106,9 @@ gui/src/            фронт
                     FileHistoryPanel — оверлей «История файла» (список коммитов + DiffView)
                     UndoButtons — Undo/Redo в тулбаре и Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z;
                     RemotesPanel — диалог «Remotes…» (список + форма add / rename / адрес);
+                    WorktreesPanel — диалог «Worktrees…» (список + форма создания, открыть /
+                    удалить / заблокировать / очистить пропавшие); worktreeRules.ts — что
+                    можно строке и почему нет, свободные ветки, чего не хватает форме, без импортов;
                     CloneDialog — «Клонировать…»; cloneRules.ts — имя папки из адреса и
                     прочие чистые правила диалога, без единого импорта;
                     CommitPanel — ещё и выбор соавторов; coAuthorRules.ts — кого предлагать
@@ -347,10 +352,11 @@ Git вызывается только как внешний процесс. `gix
   `restore(repo, id, force)`, `patch_paths` (пути патча по `apply --numstat -z`), константы
   `DISCARD_REF = "refs/graft/discard"`, `CHAIN_LIMIT = 200`. **Любое действие, уничтожающее
   содержимое рабочего дерева, оборачивается в `with_backup`**: снимок до, действие, снимок
-  после. Не удался снимок — действие не выполняется. Один откат — два коммита (`before`,
+  после. Не удался снимок — действие не выполняется. Цепочка общая на все worktree, копия —
+  своего (трейлер `Graft-Worktree`, см. «Где живёт состояние»). Один откат — два коммита (`before`,
   `after`, родитель `after` — всегда его `before`); решение начать цепочку заново
   принимается только для `before`. Машиночитаемы только трейлеры `Graft-Discard` /
-  `Graft-Kind`; список путей — объединение деревьев пары (`diff-tree before after`), тело
+  `Graft-Kind` / `Graft-Worktree`; список путей — объединение деревьев пары (`diff-tree before after`), тело
   сообщения — для людей. Байты пишутся и читаются как на диске (`hash-object
   --no-filters` + своя запись tmp + rename, не `git restore`): смешать фильтрованный хэш
   с нефильтрованной записью значит испортить CRLF/LFS-файлы. Дерево собирается во
@@ -402,11 +408,33 @@ Git вызывается только как внешний процесс. `gix
   общего `operation`; `remote_rename` / `remote_remove` — код `remotes`, `remote_add` /
   `remote_set_url` — «ничего», и обе ветки стоят **до** сравнения отпечатков: конфиг и
   `refs/remotes/` отпечаток не читает, а заголовок `# branch.upstream` — читает, и без этого
-  вердикт зависел бы от того, отслеживает ли текущая ветка этот remote). Undo и Redo выполняются, только если
+  вердикт зависел бы от того, отслеживает ли текущая ветка этот remote; так же до сравнения
+  `worktree_add` — код `worktrees` **всегда**, даже на существующей ветке, где отпечаток не
+  сдвинулся: обратные ходят `update-ref`, который другие worktree не спрашивает, и Undo
+  создания ветки удалил бы её из-под новой папки; `worktree_remove` / `_lock` / `_unlock` /
+  `_prune` — «ничего»: снимок — открытого worktree, а чужой удалённый ветку освобождает, а не
+  занимает). Undo и Redo выполняются, только если
   текущий отпечаток равен ожидаемому, и только для шага с тем `id`, что показали клиенту.
   Два действия разом над одним репозиторием — второе не записывается, цепочка рвётся
   (`concurrent`). Своего «второго механизма» отката файлов нет: Undo отката — это копия
   `refs/graft/discard`.
+- `engine::worktrees` — `list -> Vec<WorktreeInfo>` (главный первым — порядок git; `is_current`
+  — сравнением канонизированных путей: git печатает `/private/var/…`), `main_of` (путь главного,
+  если открыт **linked** worktree; `.git`-каталог — ответ без git, субмодуль — `None`: он
+  первый в своём списке), `folder_name`, `suggest_path` (`<папка главного>-<ветка>` рядом с
+  ним, `-2`, `-3`… пока занято), `add(repo, path, branch, create, start)`, `dirty`, `remove(repo,
+  path, force)`, `lock`, `unlock`, `prune`, `pub(crate) parse_list`. Неизвестный атрибут списка
+  пропускается (git их добавляет), атрибут вне записи — `Error::Parse`. Назначение add —
+  абсолютный путь, отсутствующий или пустой каталог, симлинк — отказ. Новая ветка —
+  `check_branch_name` + «такой ещё нет» + старт, называющий коммит; старт уходит в git
+  **как есть** после `--` (удалённая ветка тогда становится upstream, хэш бы это потерял).
+  Существующая — только локальная и **коротким именем** (`refs/heads/x` git читает как
+  «detach на коммите»); выгруженная в другом worktree — `Error::Rule` с его путём до запуска
+  git. Remove: не главный, не открытый в окне, не заблокированный, не пропавший (тот —
+  prune); без `force` git отказывает грязному, клиент спрашивает `dirty` до второго
+  подтверждения. Копии того, что выбрасывает `--force`, не снимается — подтверждение говорит
+  «насовсем». Worktree, над которым действие, всегда ищется в свежем списке по пути клиента, и
+  git получает путь из списка.
 - `uistate` — `get`, `set`, `state_path`. Атомарная запись через уникальный tmp + rename.
 - `watch` — `start(repo, own, report) -> RepoWatcher` (drop — остановка), `GitDirs::resolve`
   (git-dir и common-dir через `git_paths`, канонизированные), чистые `relevant` /
@@ -610,7 +638,14 @@ Git вызывается только как внешний процесс. `gix
   `ConflictEntry[]` (`{ path, kind }`), а не строки: вид конфликта (`UU`, `DU`, …) едет с
   тем же `ls-files -u`, и второй команды за ним нет. Конфликт без операции (`stash pop`)
   виден только в Changes — туда же пункт «Разрешить конфликт…».
-- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`, `op_bisect_start`, `op_bisect_mark`, `op_bisect_reset`), `ui_state_*`, `journal_*`, `undo_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_ignore_choices`, `file_ignore`, `file_history`, `file_blame`, `file_blame_before`), `lfs_pull`, `remote_*`, `repo_*` (`repo_open`, `repo_state`, `repo_local_changes`, `repo_clone`, `repo_clone_cancel`, `repo_fetch_background`). Имя `commit_list`
+- Worktrees: `worktree_list -> WorktreeInfo[]`, `worktree_suggest_path(branch) -> string`,
+  `worktree_dirty(path) -> bool` (все read-only, зовутся из `WorktreesPanel` по требованию),
+  `worktree_add(path, branch, create, start)`, `worktree_remove(path, force)`,
+  `worktree_lock(path, reason)`, `worktree_unlock(path)`, `worktree_prune()` — мутации через
+  `undoable` → `RepoState`. Окно add не переключает: «Открыть» — это `openRepoAt(path)`, путь
+  «Открыть…» (и `recentRepos`). `RepoState.linkedWorktreeOf` — путь главного worktree, если
+  открыт linked (метка в `RepoMenu`); не прочитался список — `null`, состояние не падает.
+- Имена команд: `log_*`, `commit_*`, `commits_*` (`commits_compare`, `commits_squash`, …), `branch_*`, `op_*` (в т.ч. `op_rebase_range`, `op_rebase_start`, `op_bisect_start`, `op_bisect_mark`, `op_bisect_reset`), `ui_state_*`, `journal_*`, `undo_*`, `discard_*`, `lines_*`, `conflict_*`, `file_*` (`file_read`, `file_write`, `file_rollback`, `file_ignore_choices`, `file_ignore`, `file_history`, `file_blame`, `file_blame_before`), `lfs_pull`, `remote_*`, `worktree_*`, `repo_*` (`repo_open`, `repo_state`, `repo_local_changes`, `repo_clone`, `repo_clone_cancel`, `repo_fetch_background`). Имя `commit_list`
   занято операцией «закоммитить changelist» и переиспользовано быть не может.
 - Полный список зарегистрированных команд — `invoke_handler` в `gui/src-tauri/src/lib.rs`;
   он же роспись того, что вообще доступно фронту.
@@ -701,7 +736,7 @@ Git вызывается только как внешний процесс. `gix
   вешают вызывающего навсегда. **`ActionDialogHost` смонтирован только в панелях режима Log**
   (`BranchTree`, `LogTable`): `openDialog` из диалога, доступного и в Changes (меню
   репозитория), не нарисуется нигде и оставит `modalOpen()` истинным — такие формы живут
-  внутри своего диалога (`RemotesPanel`).
+  внутри своего диалога (`RemotesPanel`, `WorktreesPanel`).
 - **«Модалка открыта» — один флаг на приложение**: `store.modalOpen()`. Свой источник
   регистрируется через `registerModalSource(isOpen)`. Второй приватный флаг означает, что
   стрелки продолжают двигать список за невидимым диалогом.
@@ -754,6 +789,18 @@ Git вызывается только как внешний процесс. `gix
   читает и не пишет.** У linked worktree свой файл — `<common>/.git/worktrees/<имя>/changelists.json`
   (`cli::private_git_file`): списки — про файлы одного рабочего дерева. Так же и
   `graft-ui.json`.
+- `refs/graft/discard` — **одна на все worktree** (`refs/` общие), и так сознательно:
+  `refs/worktree/graft/discard` (приватная ссылка worktree) не защищает объекты — git 2.54
+  `gc --prune=now`, запущенный из главного worktree, удалил коммит, на который указывала
+  только она в linked worktree, и оставил там битую ссылку (`log --all` падает). Следствие:
+  копия помечена трейлером `Graft-Worktree: <канонический корень>` (управляющие символы
+  экранированы), `discard_list` показывает только копии открытого worktree, а
+  `discard_restore` / `discard_check` чужой — `Error::Rule`. Без этого копия из B молча
+  ложилась в A, когда файлы A совпадали с её записью «после» (оба на HEAD). Копия без
+  трейлера (снята до него) — копия главного worktree. Держат тесты
+  `a_backup_from_another_worktree_is_neither_listed_nor_restored` и
+  `an_old_backup_without_a_worktree_trailer_belongs_to_the_main_worktree`. Undo и план
+  rebase — по корню, то есть свои у каждого worktree.
 - `refs/graft/discard` — копии перед откатом (`engine::discard`): своя цепочка коммитов от
   имени `Graft <graft@localhost>`, не больше 200, потом начинается заново, а старая становится
   недостижимой (её приберёт `gc`). Читается и людьми: `git log -p refs/graft/discard`. Из
@@ -1223,6 +1270,11 @@ Git вызывается только как внешний процесс. `gix
   Держат тесты `a_linked_worktree_keeps_its_own_store`,
   `a_linked_worktree_reads_and_writes_its_own_state`,
   `a_linked_worktree_opens_and_commits_like_a_repository`.
+- **`git worktree add -- <путь> refs/heads/x` выгружает не ветку, а detached HEAD** на её
+  коммите: ветку git узнаёт только по короткому имени. Поэтому `worktrees::add` проверяет
+  `refs/heads/<имя>` через `show-ref` и отдаёт git короткое имя после `--`.
+- Приватные ссылки worktree (`refs/worktree/*`) не корни достижимости для `gc` из другого
+  worktree (git 2.54) — хранить в них то, что должно жить, нельзя (см. `refs/graft/discard`).
 - `git remote add` сам отказывает в имени, вложенном в существующее (`origin/sub` при
   `origin`), и принимает имя с ведущим `-` после `--` — второе режет `check_remote_name`.
 

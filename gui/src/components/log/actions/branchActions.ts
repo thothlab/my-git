@@ -14,6 +14,7 @@ import {
 import { d } from "../../../i18n";
 import { chooseOption, confirmAction, reportError, run, setError, state } from "../../../store";
 import { openStashPanel } from "../../StashPanel";
+import { openWorktreeCreate } from "../../WorktreesPanel";
 import { selectedBranch, setSelectedBranch } from "../branchSelection";
 import { copyText } from "./clipboard";
 import type { MenuEntry } from "./ContextMenu";
@@ -253,6 +254,20 @@ export function branchMenuItems(node: BranchNode | null, refreshTree: () => void
       disabled: busyOp,
       reason: opReason,
       run: () => after(newBranchFrom(node.name, node.name)),
+    });
+    // Not held back by an unfinished operation: the new worktree is another
+    // folder, and nothing here is touched. A branch checked out in another
+    // worktree is only known to the dialog, which says where.
+    items.push({
+      label: d().menuOpenInWorktree(),
+      disabled: !node.isRemote && node.isCurrent,
+      reason: !node.isRemote && node.isCurrent ? d().whyWorktreeHere() : undefined,
+      run: () =>
+        openWorktreeCreate(
+          node.isRemote
+            ? { create: true, branch: localNameOf(node.name), start: node.fullRef }
+            : { create: false, branch: node.name, start: null },
+        ),
     });
     items.push({
       label: d().menuRenameBranch(),

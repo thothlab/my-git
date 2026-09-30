@@ -911,9 +911,22 @@ fn classify(
     // removal re-points or unsets the upstream of every branch tracking it, and an
     // inverse that puts an upstream back (a deleted branch's) would then name a remote
     // that is gone — the chain ends, with that reason.
+    //
+    // Worktrees: the snapshot is of the open worktree, and adding, removing, locking
+    // or pruning another one changes nothing in it — except that an added worktree
+    // has a branch checked out now (a new one, or one this chain may have created
+    // or renamed). The inverses move branches with `update-ref`, which does not ask
+    // other worktrees, so an Undo could delete or move that branch from under the
+    // new folder: an added worktree ends the chain, whatever the digest says. The
+    // rest leaves it as it is — removing another worktree frees a branch, it does
+    // not take one.
     match action {
         "remote_add" | "remote_set_url" => return Verdict::Nothing,
         "remote_rename" | "remote_remove" if ok => return cx.brk(UndoReasonCode::Remotes),
+        "worktree_add" if ok => return cx.brk(UndoReasonCode::Worktrees),
+        "worktree_remove" | "worktree_lock" | "worktree_unlock" | "worktree_prune" => {
+            return Verdict::Nothing
+        }
         _ => {}
     }
     if b.digest == a.digest {
@@ -2388,6 +2401,55 @@ mod tests {
             });
             assert_eq!(r.reason(), UndoReasonCode::Remotes, "tracked: {tracked}");
         }
+    }
+
+    /// Removing, locking, unlocking and pruning another worktree leave the chain
+    /// alone; adding one ends it with `Worktrees` — also for an existing branch,
+    /// where the digest does not move: the step before created that branch, and its
+    /// Undo would delete it from under the new folder.
+    #[test]
+    fn an_added_worktree_ends_the_chain_the_rest_leave_it() {
+        use crate::engine::worktrees;
+        let r = Rig::new();
+        let p = r.p();
+        let outer = tempfile::tempdir().unwrap();
+        let at = |n: &str| outer.path().join(n).display().to_string();
+
+        r.act("branch_create", Hint::args(["x"]), || {
+            CliEngine::new(p).create_branch("x", None)
+        });
+        let (a, b) = (at("a"), at("b"));
+        r.act("worktree_add", Hint::args(["y", b.as_str()]), || {
+            worktrees::add(p, &b, "y", true, None)
+        });
+        assert_eq!(r.reason(), UndoReasonCode::Worktrees);
+
+        r.act("branch_create", Hint::args(["z"]), || {
+            CliEngine::new(p).create_branch("z", None)
+        });
+        r.act("worktree_lock", Hint::args([b.as_str()]), || {
+            worktrees::lock(p, &b, None)
+        });
+        r.act("worktree_unlock", Hint::args([b.as_str()]), || {
+            worktrees::unlock(p, &b)
+        });
+        r.act("worktree_remove", Hint::args([b.as_str()]), || {
+            worktrees::remove(p, &b, false)
+        });
+        r.act("worktree_prune", Hint::none(), || worktrees::prune(p));
+        assert_eq!(
+            r.state().undo.action.as_deref(),
+            Some("branch_create"),
+            "the chain goes on"
+        );
+
+        let before = fp(p);
+        // `create_branch` switched to each new branch: `x` is free again.
+        r.act("worktree_add", Hint::args(["x", a.as_str()]), || {
+            worktrees::add(p, &a, "x", false, None)
+        });
+        assert_eq!(fp(p), before, "an existing branch moves nothing here");
+        assert_eq!(r.reason(), UndoReasonCode::Worktrees);
     }
 
     /// "Ignore" writes one line into `.gitignore`: Undo takes it out (or deletes the

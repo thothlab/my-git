@@ -4,6 +4,7 @@ import { openRepoAt, recentRepos, state } from "../store";
 import { d } from "../i18n";
 import { openDiscardPanel } from "./DiscardPanel";
 import { openRemotesPanel } from "./RemotesPanel";
+import { openWorktreesPanel } from "./WorktreesPanel";
 import { openCloneDialog } from "./CloneDialog";
 import { DISABLED_CLASS } from "./IconButton";
 
@@ -52,7 +53,13 @@ export default function RepoMenu() {
       <button
         class="flex items-center gap-1.5 rounded border border-border bg-bg px-1.5 py-0.5 text-xs hover:bg-bg-muted"
         onClick={() => setMenuOpen((v) => !v)}
-        title={state()?.repoPath ?? d().openRepoTitle()}
+        title={
+          state()
+            ? state()!.linkedWorktreeOf
+              ? `${state()!.repoPath}\n${d().worktreeLinkedOf(state()!.linkedWorktreeOf!)}`
+              : state()!.repoPath
+            : d().openRepoTitle()
+        }
       >
         <Show
           when={current()}
@@ -60,6 +67,18 @@ export default function RepoMenu() {
         >
           <Avatar name={current()!} />
           <span class="max-w-[10rem] truncate font-medium">{current()}</span>
+          {/* A linked worktree says so, and whose: the folder name alone reads like
+              a separate repository. */}
+          <Show when={state()?.linkedWorktreeOf}>
+            {(main) => (
+              <span
+                class="shrink-0 rounded bg-accent/15 px-1 text-[0.625rem] text-accent"
+                title={d().worktreeLinkedOf(main())}
+              >
+                {d().worktreeLinkedBadge()} · {baseName(main())}
+              </span>
+            )}
+          </Show>
         </Show>
         <span class="text-fg-muted">▾</span>
       </button>
@@ -93,6 +112,17 @@ export default function RepoMenu() {
               }}
             >
               {d().remotesMenu()}
+            </button>
+            <button
+              class={`block w-full px-3 py-1.5 text-left hover:bg-bg-muted ${DISABLED_CLASS}`}
+              disabled={!state()}
+              title={state() ? undefined : d().restoreDiscardedNoRepo()}
+              onClick={() => {
+                setMenuOpen(false);
+                openWorktreesPanel();
+              }}
+            >
+              {d().worktreesMenu()}
             </button>
             {/* Repository-scoped, so it lives with the repository, not in the
                 application menu: backups are read from this repository's refs. */}

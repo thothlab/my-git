@@ -13,6 +13,7 @@ use crate::engine::{
     bisect, blame as blame_engine, branches, commit as commit_engine, conflict as conflict_engine, discard, file_history as file_history_engine, ignore, lfs, log as log_engine, ops,
     rebase, remotes, signature,
     undo::{self, Hint},
+    worktrees,
 };
 use crate::model::{
     BackgroundFetch, Blame, BlameBefore, BranchInfo, CloneProgress, CoAuthor, IgnoreChoice, IgnoreKind, RemoteInfo, BranchNode, ChangelistView, CommitDetails, CommitFileEntry, CommitSignature, ConflictFile, DiscardEntry,
@@ -20,7 +21,7 @@ use crate::model::{
     LinePick,
     FileState, FileStatus, FileWritten, GitExecResult, JournalOutput, JournalSummary, LogCursor,
     LogFilter, LogPage, OperationKind, RebaseRange, RebaseStep, RepoExternalChange, RepoState,
-    StashEntry, TextFile, UiState, UndoDirection, UndoState,
+    StashEntry, TextFile, UiState, UndoDirection, UndoState, WorktreeInfo,
 };
 use crate::uistate;
 use crate::watch::{self, RepoWatcher};
@@ -137,6 +138,9 @@ pub fn build_state(state: &State<AppState>) -> Result<RepoState> {
         // instead of a second `op_state` command that would be a rival source of truth.
         operation,
         user_email: crate::engine::cli::user_email(&repo),
+        // A marker, not a reason to fail the whole state: git older than 2.36 has no
+        // `worktree list -z`, and the window should still open.
+        linked_worktree_of: worktrees::main_of(&repo).ok().flatten(),
     })
 }
 
@@ -648,6 +652,99 @@ pub async fn remote_remove(state: State<'_, AppState>, name: String) -> Result<R
     let repo = state.repo_path()?;
     undoable(&state, "remote_remove", Hint::args([name.as_str()]), || {
         remotes::remove(&repo, &name)
+    })?;
+    build_state(&state)
+}
+
+// ── Worktrees (engine::worktrees) ──────────────────────────────────────────
+
+/// Every worktree of the open repository, the main one first.
+#[tauri::command]
+pub async fn worktree_list(state: State<'_, AppState>) -> Result<Vec<WorktreeInfo>> {
+    worktrees::list(&state.repo_path()?)
+}
+
+/// The folder a new worktree for `branch` goes to unless the user picks another.
+#[tauri::command]
+pub async fn worktree_suggest_path(state: State<'_, AppState>, branch: String) -> Result<String> {
+    worktrees::suggest_path(&state.repo_path()?, &branch)
+}
+
+/// Whether removing the worktree at `path` needs `force` (uncommitted or untracked
+/// files) — asked before the confirmation, so it can name the cost.
+#[tauri::command]
+pub async fn worktree_dirty(state: State<'_, AppState>, path: String) -> Result<bool> {
+    worktrees::dirty(&state.repo_path()?, &path)
+}
+
+/// Add a worktree at `path`: a new branch `branch` from `start` (`null` — HEAD)
+/// when `create`, else the existing local branch. The window stays where it is;
+/// the client opens the new folder through `openRepoAt` if asked to.
+#[tauri::command]
+pub async fn worktree_add(
+    state: State<'_, AppState>,
+    path: String,
+    branch: String,
+    create: bool,
+    start: Option<String>,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    undoable(
+        &state,
+        "worktree_add",
+        Hint::args([branch.as_str(), path.as_str()]),
+        || worktrees::add(&repo, &path, &branch, create, start.as_deref()),
+    )?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn worktree_remove(
+    state: State<'_, AppState>,
+    path: String,
+    force: bool,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    undoable(
+        &state,
+        "worktree_remove",
+        Hint::args([path.as_str()]),
+        || worktrees::remove(&repo, &path, force),
+    )?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn worktree_lock(
+    state: State<'_, AppState>,
+    path: String,
+    reason: Option<String>,
+) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    undoable(&state, "worktree_lock", Hint::args([path.as_str()]), || {
+        worktrees::lock(&repo, &path, reason.as_deref())
+    })?;
+    build_state(&state)
+}
+
+#[tauri::command]
+pub async fn worktree_unlock(state: State<'_, AppState>, path: String) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    undoable(
+        &state,
+        "worktree_unlock",
+        Hint::args([path.as_str()]),
+        || worktrees::unlock(&repo, &path),
+    )?;
+    build_state(&state)
+}
+
+/// Forget worktrees whose folders are gone.
+#[tauri::command]
+pub async fn worktree_prune(state: State<'_, AppState>) -> Result<RepoState> {
+    let repo = state.repo_path()?;
+    undoable(&state, "worktree_prune", Hint::none(), || {
+        worktrees::prune(&repo)
     })?;
     build_state(&state)
 }
