@@ -254,20 +254,13 @@ fn carries_credentials(url: &str) -> bool {
     matches!(check_url(url), Err(Error::Rule(m)) if m.contains(CREDENTIALS))
 }
 
-/// An address as the list shows it: a credential-bearing one masked.
-/// `exec::mask_credentials` does scheme URLs; an scp-syntax `user:secret@host:path`
-/// has no `://` for it to find, so its userinfo is cut here.
+/// An address as the list shows it: a credential-bearing one masked, by the same
+/// `exec::mask_credentials` the journal uses — scheme URLs and scp syntax alike.
 fn shown(url: &str) -> String {
-    if !carries_credentials(url) {
-        return url.to_string();
-    }
-    if url.contains("://") {
-        return exec::mask_credentials(url).into_owned();
-    }
-    let upto_slash = url.find('/').unwrap_or(url.len());
-    match url[..upto_slash].rfind('@') {
-        Some(at) => format!("***{}", &url[at..]),
-        None => url.to_string(),
+    if carries_credentials(url) {
+        exec::mask_credentials(url).into_owned()
+    } else {
+        url.to_string()
     }
 }
 
@@ -936,6 +929,30 @@ mod tests {
         let l = list(p).unwrap();
         assert_eq!(l[0].fetch_urls, vec!["https://***@h/r.git"]);
         assert!(l[0].has_credentials);
+    }
+
+    /// An scp-syntax address with a password, stored before Graft refused them: the
+    /// list shows it masked, and so does the journal's copy of the configuration
+    /// read behind the list — which used to keep the password verbatim.
+    #[test]
+    fn a_stored_scp_password_is_masked_in_the_list_and_the_journal() {
+        let dir = scratch_repo();
+        let p = dir.path();
+        run(p, &["remote", "add", "old", "me:s3cret@host:org/r.git"]);
+        let l = list(p).unwrap();
+        assert_eq!(l[0].fetch_urls, vec!["***@host:org/r.git"]);
+        assert!(l[0].has_credentials);
+
+        let repo = p.display().to_string();
+        let reads: Vec<_> = exec::journal_list(false, None)
+            .into_iter()
+            .filter(|e| e.repo == repo && e.argv.first().is_some_and(|a| a == "config"))
+            .collect();
+        assert!(!reads.is_empty());
+        for e in reads {
+            let out = exec::journal_output(e.id).unwrap();
+            assert!(!out.stdout.contains("s3cret"), "{}", out.stdout);
+        }
     }
 
     /// Removing a remote takes its remote-tracking branches out of the branch tree;

@@ -627,7 +627,8 @@ pub(crate) fn network_env(dir: &Path) -> Vec<(&'static str, String)> {
 
 // ── credentials ──────────────────────────────────────────────────────────────
 
-/// Replace the secret userinfo of every `scheme://user:secret@host` URL in `s` with `***`.
+/// Replace the secret userinfo of every remote address in `s` with `***` — both
+/// `scheme://user:secret@host/…` and scp syntax `user:secret@host:path`.
 ///
 /// git echoes remote URLs verbatim — in `remote -v`, in `fatal: unable to access
 /// 'https://user:token@host/…'`, in the argv of a `push <url>` — and both the journal
@@ -639,9 +640,17 @@ pub(crate) fn network_env(dir: &Path) -> Vec<(&'static str, String)> {
 ///
 /// The userinfo ends at the **last** `@` of the authority (a raw `@` inside a
 /// password is common and invalid-but-accepted), and the authority ends at the first
-/// `/ ? #`, whitespace or quote. Not touched: plain e-mail addresses and scp-style
-/// `git@host:org/repo` (no `://`), and an `@` in the path (`https://host/@scope/pkg`).
+/// `/ ? #`, whitespace or quote. Not touched: plain e-mail addresses, a plain scp
+/// login (`git@host:org/repo`), and an `@` in the path (`https://host/@scope/pkg`).
+/// The scp form is [`mask_scp`]'s, run on what this pass leaves.
 pub fn mask_credentials(s: &str) -> Cow<'_, str> {
+    match mask_scheme_urls(s) {
+        Cow::Borrowed(b) => mask_scp(b),
+        Cow::Owned(o) => Cow::Owned(mask_scp(&o).into_owned()),
+    }
+}
+
+fn mask_scheme_urls(s: &str) -> Cow<'_, str> {
     if !s.contains("://") {
         return Cow::Borrowed(s);
     }
@@ -670,6 +679,68 @@ pub fn mask_credentials(s: &str) -> Cow<'_, str> {
     }
     out.push_str(rest);
     Cow::Owned(out)
+}
+
+/// Characters that end a word for [`mask_scp`]: whitespace, quotes, angle brackets,
+/// NUL — what git and the shell put around an address. Deliberately not `=`, `,` or
+/// parentheses: a password may contain them, and cutting a word there would leave
+/// its first half on screen; the cost is that a word like `url=user:pw@h:r` is
+/// masked from its start (`***@h:r`).
+fn scp_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '<' | '>' | '\0')
+}
+
+/// The scp-syntax pass of [`mask_credentials`]: `user:secret@host:path` →
+/// `***@host:path`, and `ghp_…@host:path` the same ([`looks_like_token`]).
+///
+/// git has no `://` to anchor on here, so a word (see [`scp_boundary`]) qualifies by
+/// shape: an `@` followed by a host (no `/`, `@` or `:`) and a `:`. The **last** such
+/// `@` ends the userinfo — a raw `@` inside a password is common — and a userinfo
+/// with `/` is a path, not a login. Words holding `://` belong to the scheme pass.
+/// This runs on megabytes of journal output: a word without `@` costs one scan.
+fn mask_scp(s: &str) -> Cow<'_, str> {
+    if !s.contains('@') {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::new();
+    let mut copied = 0;
+    for word in s.split(scp_boundary) {
+        let Some(at) = scp_secret_end(word) else {
+            continue;
+        };
+        let start = word.as_ptr() as usize - s.as_ptr() as usize;
+        out.push_str(&s[copied..start]);
+        out.push_str("***");
+        copied = start + at;
+    }
+    if copied == 0 && out.is_empty() {
+        return Cow::Borrowed(s);
+    }
+    out.push_str(&s[copied..]);
+    Cow::Owned(out)
+}
+
+/// Where the secret userinfo of an scp-syntax `word` ends (its `@`), if it has one.
+fn scp_secret_end(word: &str) -> Option<usize> {
+    if !word.contains('@') || !word.contains(':') || word.contains("://") {
+        return None;
+    }
+    for (at, _) in word.match_indices('@').rev() {
+        let rest = &word[at + 1..];
+        let Some(colon) = rest.find(':') else {
+            continue;
+        };
+        let host = &rest[..colon];
+        if host.is_empty() || host.contains(['/', '@']) {
+            continue;
+        }
+        let user = &word[..at];
+        if user.is_empty() || user.contains('/') {
+            return None;
+        }
+        return secret_userinfo(user).then_some(at);
+    }
+    None
 }
 
 /// A userinfo worth hiding: it has a password, or its user name is a token.
@@ -1068,6 +1139,26 @@ mod tests {
                 "https://abcdefghijklmnopqrstuvwxyz012345@h/r",
                 "https://***@h/r",
             ),
+            // scp syntax
+            ("user:secret@host:org/r.git", "***@host:org/r.git"),
+            (
+                "origin\tuser:pw@host:r (fetch)",
+                "origin\t***@host:r (fetch)",
+            ),
+            (
+                "fatal: 'u:p@h:r' does not appear to be a git repository",
+                "fatal: '***@h:r' does not appear to be a git repository",
+            ),
+            (
+                "remote.o.url\nuser:p@ss@host:r\0",
+                "remote.o.url\n***@host:r\0",
+            ),
+            ("ghp_abc@github.com:o/r", "***@github.com:o/r"),
+            ("url=user:pw@h:r", "***@h:r"),
+            (
+                "two a:1@h:x and https://u:p@w/y",
+                "two ***@h:x and https://***@w/y",
+            ),
         ];
         for (input, want) in cases {
             assert_eq!(mask_credentials(input), want, "input: {input}");
@@ -1086,6 +1177,9 @@ mod tests {
             "https://org@dev.azure.com/org/p/_git/r",
             "https://abcdefghijklmnopqrstuvwxyz01234@h/r",
             "see ://weird@thing",
+            "see user@host for details",
+            "path/to:x@h:y",
+            "time 12:30 @host: noted",
             "plain text",
         ] {
             assert_eq!(mask_credentials(s), s);
@@ -1144,6 +1238,12 @@ mod tests {
             .find(|e| e.id == url.journal)
             .unwrap();
         assert_eq!(e.argv, vec!["check-ref-format", "https://***@h/x"]);
+        let scp = git(p, &["check-ref-format", "u:secret@h:x"]).run().unwrap();
+        let e = journal_list(false, Some(scp.journal - 1))
+            .into_iter()
+            .find(|e| e.id == scp.journal)
+            .unwrap();
+        assert_eq!(e.argv, vec!["check-ref-format", "***@h:x"]);
 
         let out = journal_output(bg.journal).unwrap();
         assert_eq!(out.stdout, String::from_utf8_lossy(&bg.stdout));
