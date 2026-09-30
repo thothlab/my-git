@@ -132,6 +132,7 @@ export default function BranchTree() {
    * then opens in the corner of the window instead of beside the row.
    */
   let listEl: HTMLDivElement | undefined;
+  let filterEl: HTMLInputElement | undefined;
   const rowElement = (key: string): HTMLElement | null => {
     const el = listEl?.querySelector<HTMLElement>(`[data-row-key="${CSS.escape(key)}"]`);
     return el?.isConnected ? el : null;
@@ -468,13 +469,38 @@ export default function BranchTree() {
         )}
       </Show>
       <div class="flex h-full min-h-0 flex-col text-xs">
-        <div class="shrink-0 border-b border-border p-1">
+        <div class="relative shrink-0 border-b border-border p-1">
           <input
-            class="w-full rounded border border-border bg-bg-subtle px-1.5 py-0.5 text-xs text-fg outline-none placeholder:text-fg-subtle focus:border-accent"
+            ref={filterEl}
+            class="w-full rounded border border-border bg-bg-subtle py-0.5 pl-1.5 pr-6 text-xs text-fg outline-none placeholder:text-fg-subtle focus:border-accent"
             placeholder={d().filterBranches()}
             value={filter()}
             onInput={(e) => setFilter(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.code === "Escape" && filter()) {
+                e.preventDefault();
+                setFilter("");
+              }
+            }}
           />
+          {/* Clears in one click and leaves the caret in the field, ready for
+              the next name. `onMouseDown` keeps the focus where it was: without
+              it the field blurs before the click lands. */}
+          <Show when={filter()}>
+            <button
+              type="button"
+              class="absolute inset-y-1 right-1 flex items-center rounded px-1.5 text-fg-subtle hover:text-fg"
+              title={d().clearBranchFilter()}
+              aria-label={d().clearBranchFilter()}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                setFilter("");
+                filterEl?.focus();
+              }}
+            >
+              ×
+            </button>
+          </Show>
         </div>
 
         <Show
