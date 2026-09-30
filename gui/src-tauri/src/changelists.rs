@@ -1,6 +1,7 @@
 //! Named-changelist metadata layer: the on-disk store, its sync against real git
 //! status, and the mutating operations. The on-disk schema is byte-compatible with
-//! the TUI version so both tools share one `<repo>/.git/changelists.json`.
+//! the TUI version so both tools share one `<repo>/.git/changelists.json` (a linked
+//! worktree keeps its own, see [`store_path`]).
 //!
 //! Contract source is the TUI **living spec**, not ТЗ §5 (which predates the TUI and
 //! diverges). Two rules that a naive reading gets wrong (Правка `e61e291`):
@@ -60,15 +61,18 @@ impl Default for Store {
     }
 }
 
-pub fn store_path(repo: &Path) -> PathBuf {
-    // Inside .git/ ⇒ automatically outside version control and `git status`, matching
-    // the TUI and JetBrains' workspace.xml placement.
-    repo.join(".git").join("changelists.json")
+/// `<git dir>/changelists.json`: inside the git dir ⇒ outside version control and
+/// `git status`, matching the TUI and JetBrains' workspace.xml placement. The main
+/// worktree's `.git/changelists.json` is the file shared with the TUI; a linked
+/// worktree has its own under `.git/worktrees/<name>/` (`cli::private_git_file`) —
+/// changelists are about the files of one working tree.
+pub fn store_path(repo: &Path) -> Result<PathBuf> {
+    crate::engine::cli::private_git_file(repo, "changelists.json")
 }
 
 /// Load the store, or a fresh Default store on first run (missing file is not an error).
 pub fn load(repo: &Path) -> Result<Store> {
-    match std::fs::read(store_path(repo)) {
+    match std::fs::read(store_path(repo)?) {
         Ok(bytes) => {
             let mut store: Store = serde_json::from_slice(&bytes)
                 .map_err(|e| Error::Parse(format!("changelists.json: {e}")))?;
@@ -86,7 +90,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// counter, not just the pid — Правка `716da3a`), then rename over the target so a
 /// concurrent TUI reader never sees a partial file.
 pub fn save(repo: &Path, store: &Store) -> Result<()> {
-    let path = store_path(repo);
+    let path = store_path(repo)?;
     let dir = path
         .parent()
         .ok_or_else(|| Error::Io("no .git directory".into()))?;
@@ -525,5 +529,48 @@ mod tests {
         let store = load(dir.path()).unwrap();
         assert_eq!(store.changelists.len(), 1);
         assert!(store.changelists[0].is_default);
+    }
+
+    /// In a linked worktree `.git` is a **file** (`gitdir: …`), and a store path glued
+    /// as `<root>/.git/changelists.json` is a path through a file: every read failed
+    /// with "Not a directory", and so did every `build_state` — the worktree could not
+    /// be opened at all. The store lives in that worktree's own git dir
+    /// (`.git/worktrees/<name>/`): changelists are about the files of one working
+    /// tree, and the main worktree's lists must not leak into the other.
+    #[test]
+    fn a_linked_worktree_keeps_its_own_store() {
+        use crate::engine::cli::tests::{run_git, scratch_repo};
+        let main = scratch_repo();
+        let outer = tempfile::tempdir().unwrap();
+        let linked = outer.path().join("linked");
+        let wt = linked.to_str().unwrap();
+        run_git(main.path(), &["worktree", "add", "-q", "-b", "side", wt]);
+        assert!(linked.join(".git").is_file());
+
+        let fresh = load(&linked).unwrap();
+        assert_eq!(fresh.changelists.len(), 1, "no store yet: the default one");
+
+        let mut store = Store::default();
+        create(&mut store, "Hotfix").unwrap();
+        save(&linked, &store).unwrap();
+        let names = load(&linked).unwrap().changelists;
+        assert!(names.iter().any(|c| c.name == "Hotfix"));
+
+        let path = store_path(&linked).unwrap();
+        assert!(
+            path.starts_with(main.path().canonicalize().unwrap().join(".git/worktrees")),
+            "the store lives in the linked worktree's git dir: {}",
+            path.display()
+        );
+        let main_names = load(main.path()).unwrap().changelists;
+        assert!(
+            !main_names.iter().any(|c| c.name == "Hotfix"),
+            "the main worktree does not see the other's lists"
+        );
+        assert_eq!(
+            store_path(main.path()).unwrap(),
+            main.path().join(".git").join("changelists.json"),
+            "the main worktree keeps the path the TUI reads"
+        );
     }
 }

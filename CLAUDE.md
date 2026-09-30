@@ -11,7 +11,11 @@
 
 Общее у них одно: формат `<repo>/.git/changelists.json`. Он байт-совместим, совместимость
 держится тестом `byte_compat_with_tui_fixture` в `gui/src-tauri/src/changelists.rs`.
-Кода они не делят — это две отдельные реализации.
+Кода они не делят — это две отдельные реализации. В linked worktree GUI держит файл в
+git-dir этого worktree (`.git/worktrees/<имя>/changelists.json`); TUI
+(`terminal/src/changelists.rs::store_path`) там пока клеит `<корень>/.git/…` сквозь файл
+`.git`, и его чтение падает с `Not a directory`. Чинить TUI — тоже через `--git-path`, иначе
+в linked worktree инструменты перестанут делить файл.
 
 ## Команды
 
@@ -27,8 +31,8 @@
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
 | `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `ageColor`, `signatureRules`, `backgroundFetchRules`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; `lfsRules`; разбор и печать команды консоли), 385 утверждений |
-| `cargo test` | Оба крейта разом: 393 теста GUI + 73 TUI |
-| `cargo test -p graft` | Только Rust-сторона GUI, 393 теста |
+| `cargo test` | Оба крейта разом: 396 тестов GUI + 73 TUI |
+| `cargo test -p graft` | Только Rust-сторона GUI, 396 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
 | `cargo build -p mygit --release` | Собрать TUI (`target/release/mygit`) |
 | `cargo clean` | Один общий `target/` на оба крейта |
@@ -193,7 +197,10 @@ Git вызывается только как внешний процесс. `gix
   `pub(crate)`-функции: `parse_diff`, `parse_refs`, `whitespace_args`, `context_arg`,
   `git_paths`, `user_email`, `fnv1a`, `literal`, `replace_file` (атомарная запись байтов:
   уникальный tmp рядом + `rename`, права цели переносятся; ею пишут `write_text_file` и
-  `engine::ignore`), `check_branch_name`, `check_tag_name`
+  `engine::ignore`), `private_git_file` (путь своего файла Graft в git-dir **этого**
+  worktree: `.git` — каталог → `<корень>/.git/<имя>` без запуска git, иначе
+  `rev-parse --git-path`; им резолвят `changelists::store_path` и `uistate::state_path`),
+  `check_branch_name`, `check_tag_name`
   (новое имя ветки или тега проверяется ими **до** мутации и отвергается `Error::Rule`:
   `check-ref-format --branch` / `refs/tags/<имя>`, ведущий `-`, голый `@`, раскрытие
   `@{-1}`) и метод `CliEngine::worktree_path` (резолв пути клиента с проверкой симлинков —
@@ -744,7 +751,9 @@ Git вызывается только как внешний процесс. `gix
 ## Где живёт состояние
 
 - `<repo>/.git/changelists.json` — changelist'ы. Байт-совместим с TUI. **Панель Git его не
-  читает и не пишет.**
+  читает и не пишет.** У linked worktree свой файл — `<common>/.git/worktrees/<имя>/changelists.json`
+  (`cli::private_git_file`): списки — про файлы одного рабочего дерева. Так же и
+  `graft-ui.json`.
 - `refs/graft/discard` — копии перед откатом (`engine::discard`): своя цепочка коммитов от
   имени `Graft <graft@localhost>`, не больше 200, потом начинается заново, а старая становится
   недостижимой (её приберёт `gc`). Читается и людьми: `git log -p refs/graft/discard`. Из
@@ -1206,6 +1215,14 @@ Git вызывается только как внешний процесс. `gix
   без сравнения поля `lfs` (вместе с `downloaded`) в `editRules.samePayload` перечитанный
   ответ глотался бы, и карточка вечно звала «Загрузить». Карточка LFS — такой же гейт, как
   `binary`: `view()` пуст, выбор строк и правка выключены (`editAvailability` → `"lfs"`).
+- **Linked worktree не открывался вовсе.** У него `.git` — файл (`gitdir: …`), а
+  `changelists::store_path` / `uistate::state_path` клеили `<корень>/.git/<файл>`: путь сквозь
+  файл, каждое чтение — `Not a directory`, и падал уже первый `build_state`. Теперь оба через
+  `cli::private_git_file`. Путь своего файла в git-dir **никогда** не склеивать с `.git`
+  руками — тот же урок, что у маркеров операции (`--git-path`) и хранилища LFS (common dir).
+  Держат тесты `a_linked_worktree_keeps_its_own_store`,
+  `a_linked_worktree_reads_and_writes_its_own_state`,
+  `a_linked_worktree_opens_and_commits_like_a_repository`.
 - `git remote add` сам отказывает в имени, вложенном в существующее (`origin/sub` при
   `origin`), и принимает имя с ведущим `-` после `--` — второе режет `check_remote_name`.
 

@@ -1,4 +1,5 @@
-//! UI state of the Git panel, stored in `.git/graft-ui.json`.
+//! UI state of the Git panel, stored in `<git dir>/graft-ui.json` (`.git/graft-ui.json`
+//! of the main worktree, `.git/worktrees/<name>/graft-ui.json` of a linked one).
 //!
 //! A **separate** file from `.git/changelists.json` on purpose: the changelist store
 //! is byte-compatible with the TUI (see `changelists::byte_compat_with_tui_fixture`)
@@ -15,13 +16,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::error::{Error, Result};
 use crate::model::UiState;
 
-pub fn state_path(repo: &Path) -> PathBuf {
-    repo.join(".git").join("graft-ui.json")
+/// `<git dir>/graft-ui.json` — per worktree, like the changelist store
+/// (`cli::private_git_file`): a linked worktree's `.git` is a file.
+pub fn state_path(repo: &Path) -> Result<PathBuf> {
+    crate::engine::cli::private_git_file(repo, "graft-ui.json")
 }
 
 /// Read the panel's UI state. Missing or corrupt file ⇒ defaults.
 pub fn get(repo: &Path) -> Result<UiState> {
-    let bytes = match std::fs::read(state_path(repo)) {
+    let bytes = match std::fs::read(state_path(repo)?) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(UiState::default()),
         Err(e) => return Err(Error::Io(e.to_string())),
@@ -34,7 +37,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Persist atomically: unique temp name per call (pid + counter, as in
 /// `changelists::save` — Правка `716da3a`), then rename over the target.
 pub fn set(repo: &Path, state: &UiState) -> Result<()> {
-    let path = state_path(repo);
+    let path = state_path(repo)?;
     let dir = path
         .parent()
         .ok_or_else(|| Error::Io("no .git directory".into()))?;
@@ -64,7 +67,7 @@ mod tests {
         let st = get(dir.path()).unwrap();
         assert_eq!(st, UiState::default());
         assert_eq!(st.version, 1);
-        assert!(!state_path(dir.path()).exists(), "get must not create the file");
+        assert!(!state_path(dir.path()).unwrap().exists(), "get must not create the file");
     }
 
     #[test]
@@ -77,14 +80,14 @@ mod tests {
         st.log_highlight = true;
         set(dir.path(), &st).unwrap();
 
-        assert!(state_path(dir.path()).exists());
+        assert!(state_path(dir.path()).unwrap().exists());
         assert_eq!(get(dir.path()).unwrap(), st);
     }
 
     #[test]
     fn ui_state_corrupt_file_falls_back_to_default() {
         let dir = repo();
-        std::fs::write(state_path(dir.path()), b"{ not json at all ").unwrap();
+        std::fs::write(state_path(dir.path()).unwrap(), b"{ not json at all ").unwrap();
         assert_eq!(get(dir.path()).unwrap(), UiState::default());
     }
 
@@ -101,12 +104,35 @@ mod tests {
         assert_eq!(std::fs::read(&cl).unwrap(), before);
     }
 
+    /// A linked worktree's `.git` is a file; the state file goes to its own git dir,
+    /// not through that file (which failed every read and write with "Not a
+    /// directory").
+    #[test]
+    fn a_linked_worktree_reads_and_writes_its_own_state() {
+        use crate::engine::cli::tests::{run_git, scratch_repo};
+        let main = scratch_repo();
+        let outer = tempfile::tempdir().unwrap();
+        let linked = outer.path().join("linked");
+        let wt = linked.to_str().unwrap();
+        run_git(main.path(), &["worktree", "add", "-q", "-b", "side", wt]);
+
+        assert_eq!(get(&linked).unwrap(), UiState::default());
+        let mut st = UiState::default();
+        st.favorites = vec!["side".into()];
+        set(&linked, &st).unwrap();
+        assert_eq!(get(&linked).unwrap(), st);
+        assert!(state_path(&linked)
+            .unwrap()
+            .starts_with(main.path().canonicalize().unwrap().join(".git/worktrees")));
+        assert_eq!(get(main.path()).unwrap(), UiState::default());
+    }
+
     /// The file is JSON on the Tauri boundary shape: camelCase keys, version 1.
     #[test]
     fn ui_state_file_is_camel_case() {
         let dir = repo();
         set(dir.path(), &UiState::default()).unwrap();
-        let text = std::fs::read_to_string(state_path(dir.path())).unwrap();
+        let text = std::fs::read_to_string(state_path(dir.path()).unwrap()).unwrap();
         assert!(text.contains("\"collapsedFolders\""), "{text}");
         assert!(text.contains("\"columnWidths\""), "{text}");
         assert!(text.contains("\"logHighlight\""), "{text}");

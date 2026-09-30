@@ -126,6 +126,28 @@ pub(crate) fn check_branch_name(repo: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Where a Graft file private to one working tree lives: `<git dir>/<name>`.
+///
+/// For the main worktree `.git` is a directory and that is `<root>/.git/<name>` —
+/// answered without starting git, since `build_state` asks on every refresh, and the
+/// same path the TUI reads (`changelists.json` stays byte-shared with it). In a linked
+/// worktree (and a submodule with an absorbed git dir) `.git` is a **file**
+/// (`gitdir: …`), and gluing a path through it fails every read and write with "Not a
+/// directory"; git itself is asked there (`rev-parse --git-path`, [`CliEngine::git_paths`]),
+/// which names the worktree's own `.git/worktrees/<name>/<file>` — one file per
+/// worktree. Only for names git does not share between worktrees: `--git-path` of a
+/// shared name (`config`, `refs`, …) resolves into the common dir.
+pub(crate) fn private_git_file(repo: &Path, name: &str) -> Result<PathBuf> {
+    let dot_git = repo.join(".git");
+    if dot_git.is_dir() {
+        return Ok(dot_git.join(name));
+    }
+    CliEngine::new(repo)
+        .git_paths(&[name])?
+        .pop()
+        .ok_or_else(|| Error::Parse(format!("rev-parse --git-path {name}: no path")))
+}
+
 /// Refuse a new tag name git would not accept, before anything is changed — the
 /// counterpart of [`check_branch_name`], checked as the full ref `refs/tags/<name>`.
 ///
@@ -3369,6 +3391,54 @@ pub(crate) mod tests {
         assert!(
             p.join(".git").join("changelists.json").exists(),
             "store persisted into real .git/"
+        );
+    }
+
+    /// Opening a linked worktree as the repository: the same sequence as
+    /// `build_state` (root → snapshot → store) and a changelist commit, all from the
+    /// worktree's root. The store read failed here with "Not a directory" before
+    /// `private_git_file`, so the window could not open the worktree at all.
+    #[test]
+    fn a_linked_worktree_opens_and_commits_like_a_repository() {
+        use crate::changelists;
+        let main = scratch_repo();
+        let outer = tempfile::tempdir().unwrap();
+        let linked = outer.path().join("linked");
+        let wt = linked.to_str().unwrap();
+        run(main.path(), &["worktree", "add", "-q", "-b", "side", wt]);
+
+        let root = CliEngine::resolve_root(&linked.join(".")).unwrap();
+        assert_eq!(root.canonicalize().unwrap(), linked.canonicalize().unwrap());
+
+        std::fs::write(root.join("a.txt"), "changed in the worktree\n").unwrap();
+        let eng = CliEngine::new(&root);
+        let snap = eng.snapshot().unwrap();
+        assert_eq!(snap.branch, "side");
+        let mut store = changelists::load(&root).unwrap();
+        assert!(changelists::sync(&mut store, &snap));
+        changelists::save(&root, &store).unwrap();
+        let views = changelists::build_views(&store, &snap);
+        let def = views.iter().find(|v| v.is_default).unwrap();
+        assert!(def.files.iter().any(|f| f.path == "a.txt"));
+
+        eng.commit_paths(&["a.txt".to_string()], "from the worktree", false)
+            .unwrap();
+        assert!(eng.snapshot().unwrap().files.is_empty(), "committed clean");
+        let subject = |dir: &Path, rev: &str| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["log", "-1", "--format=%s", rev])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(subject(main.path(), "side"), "from the worktree");
+        assert_eq!(subject(main.path(), "main"), "init", "main did not move");
+        assert_eq!(
+            std::fs::read_to_string(main.path().join("a.txt")).unwrap(),
+            "one\n",
+            "the main worktree's files are untouched"
         );
     }
     /// R34i: three whitespace modes. `none` must keep the historical behaviour —
