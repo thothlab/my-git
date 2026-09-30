@@ -27,7 +27,10 @@
  *     waiting for, and when the repository's own terms replace the UI's words;
  *   - `src/components/coAuthorRules.ts` - whom the co-author picker offers and
  *     where `Co-authored-by:` lines go in a message, cross-checked against
- *     `git interpret-trailers` itself (so `git` must be on PATH).
+ *     `git interpret-trailers` itself (so `git` must be on PATH);
+ *   - `src/components/log/forgeUrl.ts` - which remote the commit links are
+ *     about, and the GitHub / GitLab / Bitbucket URLs built from its address
+ *     (https, ssh, scp syntax, credentials that must never reach a link).
  *
  * Run it:  node scripts/check-log-filters.mjs      (from `gui/`)
  * Another time zone:  TZ=America/Los_Angeles node scripts/check-log-filters.mjs
@@ -49,7 +52,12 @@ const src = join(here, "..", "src", "components", "log");
 const out = await mkdtemp(join(tmpdir(), "graft-log-filters-"));
 
 await build({
-  entryPoints: [join(src, "searchPattern.ts"), join(src, "filterValues.ts"), join(src, "bisectMarks.ts")],
+  entryPoints: [
+    join(src, "searchPattern.ts"),
+    join(src, "filterValues.ts"),
+    join(src, "bisectMarks.ts"),
+    join(src, "forgeUrl.ts"),
+  ],
   outdir: out,
   format: "esm",
   logLevel: "warning",
@@ -143,6 +151,7 @@ const rb = await load("rebaseRules.js");
 const bm = await load("bisectMarks.js");
 const clone = await load("cloneRules.js");
 const co = await load("coAuthorRules.js");
+const fu = await load("forgeUrl.js");
 
 let failed = 0;
 const eq = (actual, expected, what) => {
@@ -979,6 +988,119 @@ for (const argv of [
     }
     eq(w(msg, ps), r.stdout.replace(/\n+$/, ""), `same as git interpret-trailers: ${what}`);
   }
+}
+
+// -- Forge links: which remote, and the URL built from its address -----------
+{
+  const H = "0123456789abcdef0123456789abcdef01234567";
+  const at = (url) => {
+    const r = fu.parseRemote(url);
+    return r && `${r.forge} ${r.host} ${r.path.join("/")}`;
+  };
+  eq(
+    [
+      at("https://github.com/o/r.git"),
+      at("https://github.com/o/r"),
+      at("https://github.com/o/r/"),
+      at("https://github.com/o/r.git/"),
+      at("git@github.com:o/r.git"),
+      at("github.com:o/r"),
+      at("ssh://git@github.com/o/r.git"),
+      at("ssh://git@ssh.github.com:443/o/r.git"),
+      at("git+ssh://git@github.com/o/r"),
+      at("git://github.com/o/r.git"),
+      at("  HTTPS://GitHub.com/o/r.git  "),
+      at("https://www.github.com/o/r"),
+      at("https://gitlab.com/group/sub/proj.git"),
+      at("git@gitlab.com:group/proj.git"),
+      at("ssh://git@altssh.gitlab.com:443/g/p.git"),
+      at("https://bitbucket.org/ws/repo.git"),
+      at("git@bitbucket.org:ws/repo.git"),
+      at("https://github.com/o/r.git?x=1#top"),
+    ],
+    [
+      "github github.com o/r", "github github.com o/r", "github github.com o/r", "github github.com o/r",
+      "github github.com o/r", "github github.com o/r", "github github.com o/r", "github github.com o/r",
+      "github github.com o/r", "github github.com o/r", "github github.com o/r", "github github.com o/r",
+      "gitlab gitlab.com group/sub/proj", "gitlab gitlab.com group/proj", "gitlab gitlab.com g/p",
+      "bitbucket bitbucket.org ws/repo", "bitbucket bitbucket.org ws/repo", "github github.com o/r",
+    ],
+    "https, ssh, scp and git addresses of the three hosts; .git, slashes, case, query dropped",
+  );
+  eq(
+    [
+      at("https://gitlab.example.com/g/p.git"),
+      at("git@git.company.io:g/p.git"),
+      at("https://github.com.evil.io/o/r"),
+      at("https://evilgithub.com/o/r"),
+      at("/srv/git/r.git"),
+      at("../sibling/r.git"),
+      at("file:///srv/github.com/o/r"),
+      at("C:\\repos\\r"),
+      at("https://github.com/o"),
+      at("https://github.com/o/r/tree/main"),
+      at("https://bitbucket.org/ws/a/b"),
+      at("https://gitlab.com/solo"),
+      at("https://github.com/o/../r"),
+      at("ftp://github.com/o/r"),
+      at(""),
+    ],
+    Array(15).fill(null),
+    "self-hosted and look-alike hosts, local paths, file://, wrong depth, dot-dot: no link",
+  );
+
+  const links = (url, email = "a@b.c", name = "Ann Lee") => fu.forgeLinks(url, H, { name, email });
+  eq(links("git@github.com:o/r.git"), {
+    forge: "github",
+    commit: `https://github.com/o/r/commit/${H}`,
+    authorCommits: "https://github.com/o/r/commits?author=a%40b.c",
+  }, "GitHub: commit and the author's commits");
+  eq(links("https://gitlab.com/g/s/p.git"), {
+    forge: "gitlab",
+    commit: `https://gitlab.com/g/s/p/-/commit/${H}`,
+    authorCommits: "https://gitlab.com/g/s/p/-/commits/HEAD?author=Ann%20Lee",
+  }, "GitLab: the /-/ routes, nested groups kept, the author by name under a ref");
+  eq(links("https://bitbucket.org/ws/repo"), {
+    forge: "bitbucket",
+    commit: `https://bitbucket.org/ws/repo/commits/${H}`,
+    authorCommits: null,
+  }, "Bitbucket: the commit; no author filter to link to");
+  eq(
+    [
+      links("https://user:s3cret@github.com/o/r.git").commit,
+      links("https://ghp_TOKEN@github.com/o/r.git").commit,
+      links("https://***@github.com/o/r.git").commit,
+      links("user:pa55@github.com:o/r.git").commit,
+      links("ssh://git:pw@github.com:22/o/r.git").commit,
+    ],
+    Array(5).fill(`https://github.com/o/r/commit/${H}`),
+    "credentials, masked or not, never reach the link",
+  );
+  eq([fu.forgeLinks("git@github.com:o/r", "zz", { name: "A", email: "a@b.c" }).commit,
+    links("git@github.com:o/r", "no mail").authorCommits, links("https://gitlab.com/g/p", "a@b.c", "  ").authorCommits],
+    [null, null, null], "no link for a hash, an address or a name that is not one");
+  eq(links("https://gitlab.com/g/p", "", "Zoë O'Neil & Co").authorCommits,
+    "https://gitlab.com/g/p/-/commits/HEAD?author=Zo%C3%AB%20O'Neil%20%26%20Co",
+    "GitLab: the name is encoded, and needs no e-mail");
+  eq(links("https://github.com/o/r%20x"), null, "a space in the path is no GitHub repository");
+  eq(links("https://github.com/o/r", "a+b@c.d").authorCommits, "https://github.com/o/r/commits?author=a%2Bb%40c.d",
+    "the address is encoded");
+
+  const R = (name, url) => ({ name, fetchUrls: url ? [url] : [] });
+  const remotes = [R("fork", "f"), R("origin", "o"), R("team/main", "t"), R("team", "t0")];
+  eq(
+    [
+      fu.pickRemote(remotes, "team/main/x")?.name,
+      fu.pickRemote(remotes, "team/dev")?.name,
+      fu.pickRemote(remotes, "gone/main")?.name,
+      fu.pickRemote(remotes, null)?.name,
+      fu.pickRemote([R("fork", "f"), R("up", "u")], null)?.name,
+      fu.pickRemote([R("origin", null)], null),
+      fu.pickRemote([], "origin/main"),
+    ],
+    ["team/main", "team", "origin", "origin", "fork", null, null],
+    "the upstream's remote (longest name), else origin, else the first; none without an address",
+  );
 }
 
 await rm(out, { recursive: true, force: true });

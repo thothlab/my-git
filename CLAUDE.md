@@ -26,7 +26,7 @@
 | `cd gui && npm run tauri dev` | Запустить Graft локально (нужен дисплей) |
 | `cd gui && npm run build` | Сборка фронта (vite, ~1 с) |
 | `cd gui && npx tsc --noEmit` | Проверка типов |
-| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; разбор и печать команды консоли), 345 утверждений |
+| `cd gui && node scripts/check-log-filters.mjs` | Харнесс чистых функций (фильтры лога, `pathTree`, `editRules`, `lineSelection`, `blameRules`, `conflictRules`, `rebaseRules`, `bisectMarks`, `forgeUrl`, `cloneRules`, `coAuthorRules` — сверяется с `git interpret-trailers`, так что нужен `git` в PATH; разбор и печать команды консоли), 356 утверждений |
 | `cargo test` | Оба крейта разом: 365 тестов GUI + 73 TUI |
 | `cargo test -p graft` | Только Rust-сторона GUI, 365 тестов |
 | `cargo test -p mygit` | Только тесты TUI, 73 теста |
@@ -110,7 +110,8 @@ gui/src/            фронт
                     где поле сообщения, что уходит на бэк, предпросмотр, `squashRun` по
                     первым родителям, без единого импорта
   components/log/   панель Git: BranchTree, LogTable, LogGraph, CommitDetailsPane, FilterBar, LogView, PanelChrome + чистые модули;
-                    bisectMarks.ts — метка bisect у строки лога и фаза поиска, без единого импорта
+                    bisectMarks.ts — метка bisect у строки лога и фаза поиска, без единого импорта;
+                    forgeUrl.ts — ссылки «Открыть на GitHub / GitLab / Bitbucket» из адреса remote
   components/log/actions/  действия над коммитами и ветками, контекстное меню, диалоги;
                     operation.ts — `continueOperation`, `operationWord` (полоса операции и
                     редактор конфликта зовут одно и то же)
@@ -669,6 +670,20 @@ Git вызывается только как внешний процесс. `gix
   трейлер без пустой строки. Уже указанный соавтор не дублируется по **почте** — строже
   `addIfDifferent`. Список людей (`log_co_authors`) читается на первый фокус поля, не при
   монтировании панели: режим Changes историю сам не читает.
+- **Ссылки на хостинг — только для трёх известных хостов** (`forgeUrl.ts`: github.com,
+  gitlab.com, bitbucket.org и их `www.` / SSH-алиасы). Самохостинг по имени хоста не
+  угадать, и угаданная форма URL уверенно открыла бы не ту страницу — неизвестный хост
+  ссылки не получает. URL собирается из хоста и пути репозитория, **userinfo адреса в него
+  не попадает никогда**. Remote выбирается строго: upstream текущей ветки, иначе `origin`,
+  иначе первый — и менее предпочтительный remote на известном хосте вместо него не берётся
+  (это может быть форк без коммита). «Коммиты автора»: GitHub — `commits?author=<почта>`,
+  GitLab — `/-/commits/HEAD?author=<имя>` (документирован по имени; ref в пути обязателен —
+  `/-/commits` без ветки редиректит на ветку по умолчанию и теряет query), Bitbucket — нет.
+  Список remotes — `remote_list` ресурсом в
+  `CommitDetailsPane`, ключом на объект `state()` (правка в диалоге Remotes приходит новым
+  состоянием), читается через `latest`, чтобы ссылки не мигали на каждом обновлении, — но
+  только ответ для текущего `repoPath`: сразу после смены репозитория `latest` ещё держит
+  remotes прежнего.
 
 ## Где живёт состояние
 

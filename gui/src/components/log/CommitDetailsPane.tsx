@@ -13,6 +13,7 @@ import {
   commitFiles,
   commitsCompare,
   errText,
+  remoteList,
   WORKING_TREE,
   type CommitDetails,
   type CommitFileEntry,
@@ -20,7 +21,7 @@ import {
 } from "../../api";
 import { focusPanel } from "../../hotkeys";
 import { d, fmtDateTime } from "../../i18n";
-import { setSelectedPath, setViewMode, state, statusMeta } from "../../store";
+import { setError, setSelectedPath, setViewMode, state, statusMeta } from "../../store";
 import type { CompareTarget } from "./actions/compareSelection";
 import { PanelBtn, PanelChrome, PanelNote } from "./PanelChrome";
 import { IconCollapseAll, IconExpandAll } from "../IconButton";
@@ -28,6 +29,7 @@ import { openFileHistory } from "../FileHistoryPanel";
 import { openBlame } from "../blame/BlamePanel";
 import ContextMenu, { anchorOfElement, type MenuAnchor } from "./actions/ContextMenu";
 import { setSelectedCommitFile, selectedCommitFile } from "./commitFileSelection";
+import { FORGE_NAME, forgeLinks, pickRemote } from "./forgeUrl";
 import {
   baseName,
   buildFileTree,
@@ -104,6 +106,22 @@ export default function CommitDetailsPane(props: {
   onCleanup(() => clearTimeout(settleTimer));
 
   const subject = settled;
+
+  // The remotes behind the "Open on GitHub / GitLab / Bitbucket" links. Keyed on
+  // the state object, not the path: a remote added or re-pointed in the Remotes
+  // dialog arrives as a new state, and the links must follow it. Here, not in the
+  // card: the card is rebuilt for every commit, the remotes are not.
+  const [remotes] = createResource(
+    () => state(),
+    async (s) => ({ repo: s.repoPath, list: await remoteList().catch(() => []) }),
+  );
+  // `latest`: a refetch after each state refresh must not blink the links away —
+  // but only the answer for *this* repository counts: right after a switch the
+  // previous one's remotes would point the new commit at another project.
+  const repoRemote = () => {
+    const got = remotes.latest;
+    return got && got.repo === state()?.repoPath ? pickRemote(got.list, state()?.upstream) : null;
+  };
 
   const [data] = createResource(subject, async (s) => {
     if ("cmp" in s) {
@@ -388,6 +406,7 @@ export default function CommitDetailsPane(props: {
                   {(details) => (
                     <CommitCard
                       details={details()}
+                      remoteUrl={repoRemote()?.url ?? null}
                       allBranches={allBranches()}
                       onToggleBranches={() => setAllBranches((v) => !v)}
                     />
@@ -471,6 +490,8 @@ function CompareCard(props: { cmp: CompareTarget }) {
 /** Subject, body, hash and authorship. Everything here is selectable text. */
 function CommitCard(props: {
   details: CommitDetails;
+  /** Address of the remote the forge links are about (`pickRemote`), or null. */
+  remoteUrl: string | null;
   allBranches: boolean;
   onToggleBranches: () => void;
 }) {
@@ -505,6 +526,11 @@ function CommitCard(props: {
       </Show>
 
       <div class="mt-2 font-mono text-[0.6875rem] text-fg-muted">{c().hash}</div>
+      <ForgeLinksRow
+        url={props.remoteUrl}
+        hash={c().hash}
+        author={{ name: c().author, email: c().authorEmail }}
+      />
 
       <div class="mt-1 text-fg-muted">
         {d().authorLabel()}: {c().author} <MailLink email={c().authorEmail} /> ·{" "}
@@ -539,6 +565,56 @@ function CommitCard(props: {
         </Show>
       </div>
     </div>
+  );
+}
+
+/**
+ * "Open on GitHub" and "Commits by this author" — only for a remote on one of
+ * the three known hosts (`forgeUrl.ts`); anything else shows nothing rather than
+ * a guessed address. The link is built from the host and path alone, so an
+ * address with credentials never lends them to it. A commit that is not pushed
+ * yet opens the forge's "not found" page: whether the remote has it is not
+ * something the log knows for certain.
+ */
+function ForgeLinksRow(props: {
+  url: string | null;
+  hash: string;
+  author: { name: string; email: string };
+}) {
+  const links = () => (props.url ? forgeLinks(props.url, props.hash, props.author) : null);
+  const open = (href: string) =>
+    void openUrl(href).catch((e) => setError(d().forgeOpenFailed(errText(e))));
+  return (
+    <Show when={links()}>
+      {(l) => (
+        <div class="mt-1 flex flex-wrap gap-x-3">
+          <Show when={l().commit}>
+            {(href) => (
+              <button
+                class="text-accent hover:underline"
+                title={href()}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => open(href())}
+              >
+                {d().forgeOpenCommit(FORGE_NAME[l().forge])}
+              </button>
+            )}
+          </Show>
+          <Show when={l().authorCommits}>
+            {(href) => (
+              <button
+                class="text-accent hover:underline"
+                title={href()}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => open(href())}
+              >
+                {d().forgeAuthorCommits(FORGE_NAME[l().forge])}
+              </button>
+            )}
+          </Show>
+        </div>
+      )}
+    </Show>
   );
 }
 
